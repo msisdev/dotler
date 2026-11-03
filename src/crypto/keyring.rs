@@ -1,5 +1,5 @@
 use secrecy::{ExposeSecret, SecretString};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 pub const KEYRING_SERVICE_NAME: &str = "dotler";
@@ -56,6 +56,7 @@ impl std::fmt::Debug for ResolvedPassphrase {
 }
 
 static MOCK_KEYRING: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+static MOCK_PROMPT_QUEUE: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 
 pub struct OsKeyring;
 
@@ -68,6 +69,7 @@ impl OsKeyring {
     pub fn disable_mock() {
         let mut lock = MOCK_KEYRING.lock().unwrap();
         *lock = None;
+        Self::clear_mock_prompt_replies();
     }
 
     pub fn clear_mock() {
@@ -75,6 +77,19 @@ impl OsKeyring {
         if let Some(map) = lock.as_mut() {
             map.clear();
         }
+        Self::clear_mock_prompt_replies();
+    }
+
+    pub fn push_mock_prompt_reply(reply: impl Into<String>) {
+        MOCK_PROMPT_QUEUE.lock().unwrap().push_back(reply.into());
+    }
+
+    pub fn clear_mock_prompt_replies() {
+        MOCK_PROMPT_QUEUE.lock().unwrap().clear();
+    }
+
+    fn take_mock_prompt_reply() -> Option<String> {
+        MOCK_PROMPT_QUEUE.lock().unwrap().pop_front()
     }
 
     pub fn is_mock_enabled() -> bool {
@@ -177,37 +192,47 @@ impl OsKeyring {
             return Err(KeyringError::PassphraseRequiredInNonInteractiveMode);
         }
 
-        Self::prompt_passphrase()
+        Self::prompt_passphrase_with_message("Enter dotler vault passphrase: ")
     }
 
-    fn prompt_passphrase() -> Result<ResolvedPassphrase, KeyringError> {
-        #[cfg(unix)]
-        {
-            use std::io::{BufRead, BufReader};
-            if let Ok(tty) = std::fs::File::open("/dev/tty") {
-                let mut reader = BufReader::new(tty);
-                let mut line = String::new();
-                if reader.read_line(&mut line).is_ok() {
-                    let trimmed = line.trim_end_matches(['\r', '\n']);
-                    if !trimmed.is_empty() {
-                        return Ok(ResolvedPassphrase {
-                            secret: SecretString::new(trimmed.to_string()),
-                            source: PassphraseSource::TerminalPrompt,
-                        });
-                    }
-                }
+    /// Prompts the user on the interactive terminal with echo disabled across Unix and Windows.
+    pub fn prompt_passphrase_with_message(
+        prompt: &str,
+    ) -> Result<ResolvedPassphrase, KeyringError> {
+        if let Some(mock_reply) = Self::take_mock_prompt_reply() {
+            let trimmed = mock_reply.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                return Err(KeyringError::PromptCancelled);
             }
+            return Ok(ResolvedPassphrase {
+                secret: SecretString::new(trimmed.to_string()),
+                source: PassphraseSource::TerminalPrompt,
+            });
         }
 
-        Err(KeyringError::PromptCancelled)
+        match rpassword::prompt_password(prompt) {
+            Ok(line) => {
+                let trimmed = line.trim_end_matches(['\r', '\n']);
+                if trimmed.is_empty() {
+                    Err(KeyringError::PromptCancelled)
+                } else {
+                    Ok(ResolvedPassphrase {
+                        secret: SecretString::new(trimmed.to_string()),
+                        source: PassphraseSource::TerminalPrompt,
+                    })
+                }
+            }
+            Err(_) => Err(KeyringError::PromptCancelled),
+        }
     }
 }
 
 #[cfg(test)]
+pub(crate) static MOCK_KEYRING_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
-
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     struct MockKeyringGuard<'a> {
         _lock: std::sync::MutexGuard<'a, ()>,
@@ -215,7 +240,9 @@ mod tests {
 
     impl<'a> MockKeyringGuard<'a> {
         fn new() -> Self {
-            let lock = TEST_LOCK.lock().unwrap();
+            let lock = MOCK_KEYRING_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             OsKeyring::enable_mock();
             OsKeyring::clear_mock();
             Self { _lock: lock }
@@ -317,6 +344,9 @@ mod tests {
 
     #[test]
     fn test_keyring_headless_fallback_returns_none() {
+        let _lock = MOCK_KEYRING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // When mock is disabled, running on a headless machine without Secret Service daemon
         // should gracefully return Ok(None) or Ok(Some) if a local daemon happens to be present,
         // but must NEVER panic.

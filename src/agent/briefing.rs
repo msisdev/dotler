@@ -4,8 +4,6 @@
 //! `<repo>/SKILL.md` during repository initialization.
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -13,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent::AgentError;
 use crate::config::local::LocalConfig;
 use crate::config::repo::OsInfo;
+use crate::config::state::atomic_write_file;
 
 /// Snapshot of the local system configuration and OS environment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,9 +171,7 @@ Dotfiles are organized in top-level group directories defined within `dotler.tom
 - If encryption fails due to a locked vault, direct the user to run `dotler key set` in their terminal.
 "#;
 
-    let mut file = fs::File::create(&skill_path)?;
-    file.write_all(content.as_bytes())?;
-    file.sync_all()?;
+    atomic_write_file(&skill_path, content.as_bytes())?;
 
     Ok(skill_path)
 }
@@ -182,6 +179,7 @@ Dotfiles are organized in top-level group directories defined within `dotler.tom
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn test_init_scaffolds_skill_md() {
@@ -210,6 +208,9 @@ mod tests {
 
     #[test]
     fn test_render_briefing_zero_secret_leakage() {
+        let _guard = crate::crypto::keyring::MOCK_KEYRING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let cfg = LocalConfig::default();
         let os_info = OsInfo::new("debian", "linux");
         let secret = "my_super_secret_password_never_leak_me";

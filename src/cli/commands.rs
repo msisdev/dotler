@@ -970,12 +970,12 @@ fn handle_vault<W: Write>(
         LocalConfig::default()
     };
 
-    let (_label, repo_path) = resolve_repo_path(&local_cfg, cli.repo.as_deref())?;
-    let manifest_path = repo_path.join("dotler.toml");
-    let repo_cfg = RepoConfig::load(&manifest_path)?;
-
     match cmd {
         VaultCommand::Init(args) => {
+            let (_label, repo_path) = resolve_repo_path(&local_cfg, cli.repo.as_deref())?;
+            let manifest_path = repo_path.join("dotler.toml");
+            let repo_cfg = RepoConfig::load(&manifest_path)?;
+
             if repo_cfg.vault.is_some() {
                 return Err(EngineError::Config(crate::config::ConfigError::UnknownField {
                     field: "vault".to_string(),
@@ -984,6 +984,7 @@ fn handle_vault<W: Write>(
             }
             let pass = read_new_passphrase(
                 args.password_stdin,
+                true,
                 is_interactive,
                 "Enter new vault passphrase: ",
             )?;
@@ -1008,38 +1009,20 @@ fn handle_vault<W: Write>(
         }
 
         VaultCommand::Passwd(args) => {
-            let vault_cfg = repo_cfg
-                .vault
-                .as_ref()
-                .ok_or_else(|| EngineError::VaultLocked {
-                    reason: "Vault is not configured".to_string(),
-                })?;
-            let old_pass = resolve_existing_vault_passphrase(vault_cfg, is_interactive)?;
-            let new_pass = read_new_passphrase(
+            let data = rotate_vault_passphrases(
+                &local_cfg,
+                cli.repo.as_deref(),
                 args.password_stdin,
                 is_interactive,
-                "Enter new vault passphrase: ",
             )?;
-
-            let new_cfg = change_password(vault_cfg, &old_pass, &new_pass)?;
-
-            // Re-write dotler.toml atomically with new password_slot
-            let manifest_str = fs::read_to_string(&manifest_path)?;
-            let updated_manifest = manifest_str.replace(
-                &format!("password_slot = \"{}\"", vault_cfg.password_slot),
-                &format!("password_slot = \"{}\"", new_cfg.password_slot),
-            );
-            atomic_write_file(&manifest_path, updated_manifest.as_bytes())?;
-            let _ = OsKeyring::set(&new_pass);
-
-            let data = json!({
-                "vault_id": new_cfg.vault_id,
-                "status": "password_rotated",
-            });
             Ok(render_success_to(stdout, "vault passwd", &data, cli.json))
         }
 
         VaultCommand::Recover(args) => {
+            let (_label, repo_path) = resolve_repo_path(&local_cfg, cli.repo.as_deref())?;
+            let manifest_path = repo_path.join("dotler.toml");
+            let repo_cfg = RepoConfig::load(&manifest_path)?;
+
             let vault_cfg = repo_cfg
                 .vault
                 .as_ref()
@@ -1050,13 +1033,15 @@ fn handle_vault<W: Write>(
                 SecretString::new(m.clone())
             } else {
                 read_new_passphrase(
-                    args.password_stdin,
+                    false,
+                    false,
                     is_interactive,
                     "Enter 12-word recovery mnemonic: ",
                 )?
             };
             let new_pass = read_new_passphrase(
                 args.password_stdin,
+                true,
                 is_interactive,
                 "Enter new vault passphrase: ",
             )?;
@@ -1096,6 +1081,7 @@ fn handle_key<W: Write>(
         KeyCommand::Set(args) => {
             let pass = read_new_passphrase(
                 args.password_stdin,
+                true,
                 is_interactive,
                 "Enter vault passphrase to store in keyring: ",
             )?;
@@ -1154,23 +1140,227 @@ fn resolve_repo_path(
     local_cfg: &LocalConfig,
     requested_label: Option<&str>,
 ) -> Result<(String, PathBuf), EngineError> {
-    // Check if current directory contains dotler.toml first
-    let current_dir = std::env::current_dir()?;
-    if current_dir.join("dotler.toml").is_file() {
-        let label = requested_label
-            .map(|s| s.to_string())
-            .or_else(|| {
-                current_dir
-                    .file_name()
-                    .map(|f| f.to_string_lossy().to_string())
-            })
-            .unwrap_or_else(|| "default".to_string());
-        return Ok((label, current_dir));
+    if requested_label.is_none() {
+        let current_dir = std::env::current_dir()?;
+        if current_dir.join("dotler.toml").is_file() {
+            let label = current_dir
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_else(|| "default".to_string());
+            return Ok((label, current_dir));
+        }
     }
 
     local_cfg
         .resolve_repo(requested_label)
         .map_err(EngineError::Config)
+}
+
+fn rotate_vault_passphrases(
+    local_cfg: &LocalConfig,
+    requested_label: Option<&str>,
+    password_stdin: bool,
+    is_interactive: bool,
+) -> Result<serde_json::Value, EngineError> {
+    let mut candidates: Vec<(String, PathBuf)> = Vec::new();
+    let explicit_repo = requested_label.is_some();
+
+    if let Some(label) = requested_label {
+        let (resolved_label, path) = local_cfg
+            .resolve_repo(Some(label))
+            .map_err(EngineError::Config)?;
+        candidates.push((resolved_label, path));
+    } else {
+        for (label, raw_path) in &local_cfg.repos {
+            candidates.push((label.clone(), expand_tilde(raw_path)));
+        }
+
+        if let Ok(current_dir) = std::env::current_dir()
+            && current_dir.join("dotler.toml").is_file()
+        {
+            let canon_cwd = fs::canonicalize(&current_dir).unwrap_or_else(|_| current_dir.clone());
+            let already_listed = candidates
+                .iter()
+                .any(|(_, p)| fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == canon_cwd);
+            if !already_listed {
+                let cwd_label = current_dir
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "current".to_string());
+                candidates.push((cwd_label, current_dir));
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        return Err(EngineError::Config(
+            crate::config::ConfigError::NoReposConfigured,
+        ));
+    }
+
+    let mut vault_targets: Vec<(String, PathBuf, crate::config::repo::VaultConfig)> = Vec::new();
+    let mut skipped_repos: Vec<String> = Vec::new();
+
+    for (label, repo_path) in candidates {
+        let manifest_path = repo_path.join("dotler.toml");
+        if !manifest_path.is_file() {
+            if explicit_repo {
+                return Err(EngineError::Config(
+                    crate::config::ConfigError::RepoPathNotFound(repo_path.display().to_string()),
+                ));
+            }
+            skipped_repos.push(label);
+            continue;
+        }
+
+        let repo_cfg = match RepoConfig::load(&manifest_path) {
+            Ok(cfg) => cfg,
+            Err(e) if explicit_repo => return Err(EngineError::Config(e)),
+            Err(_) => {
+                skipped_repos.push(label);
+                continue;
+            }
+        };
+
+        match repo_cfg.vault {
+            Some(vault_cfg) => vault_targets.push((label, manifest_path, vault_cfg)),
+            None if explicit_repo => {
+                return Err(EngineError::VaultLocked {
+                    reason: "Vault is not configured".to_string(),
+                });
+            }
+            None => skipped_repos.push(label),
+        }
+    }
+
+    if vault_targets.is_empty() {
+        return Err(EngineError::VaultLocked {
+            reason: "Vault is not configured in any registered repository".to_string(),
+        });
+    }
+
+    let old_pass = resolve_old_passphrase_for_vaults(&vault_targets, is_interactive)?;
+    let new_pass = read_new_passphrase(
+        password_stdin,
+        false,
+        is_interactive,
+        "Enter new vault passphrase: ",
+    )?;
+
+    let mut pending_writes: Vec<(String, PathBuf, String, String)> = Vec::new();
+    let mut already_synced_repos: Vec<String> = Vec::new();
+
+    for (label, manifest_path, vault_cfg) in vault_targets {
+        match change_password(&vault_cfg, &old_pass, &new_pass) {
+            Ok(new_cfg) => {
+                let manifest_str = fs::read_to_string(&manifest_path)?;
+                let updated_manifest = manifest_str.replace(
+                    &format!("password_slot = \"{}\"", vault_cfg.password_slot),
+                    &format!("password_slot = \"{}\"", new_cfg.password_slot),
+                );
+                pending_writes.push((label, manifest_path, updated_manifest, new_cfg.vault_id));
+            }
+            Err(crate::crypto::vault::VaultError::WeakPassphrase(msg)) => {
+                return Err(EngineError::Vault(
+                    crate::crypto::vault::VaultError::WeakPassphrase(msg),
+                ));
+            }
+            Err(crate::crypto::vault::VaultError::InvalidSecret) => {
+                if let Ok(slot) = VaultSlot::from_base64(&vault_cfg.password_slot)
+                    && slot.unwrap(&new_pass, Some(&vault_cfg.vault_id)).is_ok()
+                {
+                    already_synced_repos.push(label);
+                    continue;
+                }
+                if explicit_repo {
+                    return Err(EngineError::Vault(
+                        crate::crypto::vault::VaultError::InvalidSecret,
+                    ));
+                }
+                skipped_repos.push(label);
+            }
+            Err(other) => {
+                if explicit_repo {
+                    return Err(EngineError::Vault(other));
+                }
+                skipped_repos.push(label);
+            }
+        }
+    }
+
+    if pending_writes.is_empty() && already_synced_repos.is_empty() {
+        return Err(EngineError::Vault(
+            crate::crypto::vault::VaultError::InvalidSecret,
+        ));
+    }
+
+    let mut rotated_repos = Vec::new();
+    let mut primary_vault_id: Option<String> = None;
+
+    for (label, manifest_path, updated_manifest, vault_id) in pending_writes {
+        atomic_write_file(&manifest_path, updated_manifest.as_bytes())?;
+        if primary_vault_id.is_none() {
+            primary_vault_id = Some(vault_id);
+        }
+        rotated_repos.push(label);
+    }
+
+    let keyring_updated = OsKeyring::set(&new_pass).is_ok();
+    skipped_repos.sort();
+
+    let mut data = json!({
+        "status": "password_rotated",
+        "rotated_repos": rotated_repos,
+        "skipped_repos": skipped_repos,
+        "keyring_updated": keyring_updated,
+    });
+    if !already_synced_repos.is_empty() {
+        data["already_synced_repos"] = json!(already_synced_repos);
+    }
+    if let Some(vid) = primary_vault_id {
+        data["vault_id"] = json!(vid);
+    }
+    Ok(data)
+}
+
+fn resolve_old_passphrase_for_vaults(
+    vault_targets: &[(String, PathBuf, crate::config::repo::VaultConfig)],
+    is_interactive: bool,
+) -> Result<SecretString, EngineError> {
+    let matches_any = |candidate: &SecretString| -> bool {
+        vault_targets.iter().any(|(_, _, vcfg)| {
+            VaultSlot::from_base64(&vcfg.password_slot)
+                .ok()
+                .and_then(|slot| slot.unwrap(candidate, Some(&vcfg.vault_id)).ok())
+                .is_some()
+        })
+    };
+
+    if let Ok(env_pass) = std::env::var(crate::crypto::keyring::PASSPHRASE_ENV_VAR) {
+        let trimmed = env_pass.trim_end_matches(['\r', '\n']);
+        if !trimmed.is_empty() {
+            let secret = SecretString::new(trimmed.to_string());
+            if matches_any(&secret) || !is_interactive {
+                return Ok(secret);
+            }
+        }
+    }
+
+    if let Ok(Some(sec)) = OsKeyring::get()
+        && matches_any(&sec)
+    {
+        return Ok(sec);
+    }
+
+    if !is_interactive {
+        return Err(EngineError::Crypto(crate::crypto::CryptoError::Keyring(
+            crate::crypto::keyring::KeyringError::PassphraseRequiredInNonInteractiveMode,
+        )));
+    }
+
+    let resolved = OsKeyring::prompt_passphrase_with_message("Enter current vault passphrase: ")
+        .map_err(|e| EngineError::Crypto(crate::crypto::CryptoError::Keyring(e)))?;
+    Ok(resolved.secret)
 }
 
 fn unlock_vault_if_needed(
@@ -1231,31 +1421,6 @@ fn unlock_vault_if_needed(
     Ok(Some(key))
 }
 
-fn resolve_existing_vault_passphrase(
-    vault_cfg: &crate::config::repo::VaultConfig,
-    is_interactive: bool,
-) -> Result<SecretString, EngineError> {
-    let slot = VaultSlot::from_base64(&vault_cfg.password_slot)?;
-
-    if let Ok(env_pass) = std::env::var(crate::crypto::keyring::PASSPHRASE_ENV_VAR) {
-        let trimmed = env_pass.trim_end_matches(['\r', '\n']);
-        if !trimmed.is_empty() {
-            let secret = SecretString::new(trimmed.to_string());
-            if slot.unwrap(&secret, Some(&vault_cfg.vault_id)).is_ok() {
-                return Ok(secret);
-            }
-        }
-    }
-
-    if let Ok(Some(sec)) = OsKeyring::get()
-        && slot.unwrap(&sec, Some(&vault_cfg.vault_id)).is_ok()
-    {
-        return Ok(sec);
-    }
-
-    read_new_passphrase(false, is_interactive, "Enter current vault passphrase: ")
-}
-
 fn has_encrypted_rules(repo_cfg: &RepoConfig) -> bool {
     for g in repo_cfg.groups.values() {
         if let Ok(rules) = parse_selection_rules(&g.files) {
@@ -1291,6 +1456,7 @@ fn has_encrypted_repo_files(repo_path: &Path, repo_cfg: &RepoConfig) -> bool {
 
 fn read_new_passphrase(
     password_stdin: bool,
+    allow_env_var: bool,
     is_interactive: bool,
     prompt_msg: &str,
 ) -> Result<SecretString, EngineError> {
@@ -1308,7 +1474,8 @@ fn read_new_passphrase(
         return Ok(SecretString::new(trimmed.to_string()));
     }
 
-    if let Ok(env_pass) = std::env::var(crate::crypto::keyring::PASSPHRASE_ENV_VAR) {
+    if allow_env_var && let Ok(env_pass) = std::env::var(crate::crypto::keyring::PASSPHRASE_ENV_VAR)
+    {
         let trimmed = env_pass.trim_end_matches(['\r', '\n']);
         if !trimmed.is_empty() {
             return Ok(SecretString::new(trimmed.to_string()));
@@ -1409,11 +1576,16 @@ mod tests {
 
         // Rotating password interactively must prompt for the NEW passphrase rather than reusing keyring
         OsKeyring::push_mock_prompt_reply("rotated-new-secret-999");
-        let resolved_old = resolve_existing_vault_passphrase(&vault_cfg, true).unwrap();
+        let targets = vec![(
+            "primary".to_string(),
+            PathBuf::from("/tmp/dummy"),
+            vault_cfg.clone(),
+        )];
+        let resolved_old = resolve_old_passphrase_for_vaults(&targets, true).unwrap();
         assert_eq!(resolved_old.expose_secret(), "interactive-day0-secret");
 
         let resolved_new =
-            read_new_passphrase(false, true, "Enter new vault passphrase: ").unwrap();
+            read_new_passphrase(false, false, true, "Enter new vault passphrase: ").unwrap();
         assert_eq!(resolved_new.expose_secret(), "rotated-new-secret-999");
 
         let rotated_cfg = change_password(&vault_cfg, &resolved_old, &resolved_new).unwrap();
@@ -1423,6 +1595,134 @@ mod tests {
                 .unwrap(&resolved_new, Some(&rotated_cfg.vault_id))
                 .is_ok()
         );
+
+        OsKeyring::clear_mock();
+        OsKeyring::disable_mock();
+    }
+
+    #[test]
+    fn test_rotate_vault_passphrases_updates_all_matching_repos_and_keyring() {
+        use secrecy::ExposeSecret;
+
+        let _guard = crate::crypto::keyring::MOCK_KEYRING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        OsKeyring::enable_mock();
+        OsKeyring::clear_mock();
+        unsafe {
+            std::env::remove_var(crate::crypto::keyring::PASSPHRASE_ENV_VAR);
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_a = tmp.path().join("repo_a");
+        let repo_b = tmp.path().join("repo_b");
+        let repo_other = tmp.path().join("repo_other");
+        let repo_plain = tmp.path().join("repo_plain");
+        let repo_missing = tmp.path().join("repo_missing");
+
+        for dir in [&repo_a, &repo_b, &repo_other, &repo_plain] {
+            fs::create_dir_all(dir.join("shell")).unwrap();
+        }
+
+        let old_pass = SecretString::new("shared-old-pass-111".to_string());
+        let other_pass = SecretString::new("third-party-pass-222".to_string());
+
+        let (vcfg_a, vkey_a, _) = init_vault(&old_pass).unwrap();
+        let (vcfg_b, vkey_b, _) = init_vault(&old_pass).unwrap();
+        let (vcfg_other, _, _) = init_vault(&other_pass).unwrap();
+
+        let enc_a = vkey_a.encrypt_file(b"secret-a-payload").unwrap().to_bytes();
+        let enc_b = vkey_b.encrypt_file(b"secret-b-payload").unwrap().to_bytes();
+        atomic_write_file(&repo_a.join("shell/token.enc"), &enc_a).unwrap();
+        atomic_write_file(&repo_b.join("shell/token.enc"), &enc_b).unwrap();
+
+        let write_vault_manifest = |dir: &Path, vcfg: &crate::config::repo::VaultConfig| {
+            let content = format!(
+                "[shell]\nos-linux = \"~\"\nos-macos = \"~\"\nos-windows = \"~\"\nfiles = \"* encrypt\"\n\n[vault]\nvault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n",
+                vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
+            );
+            atomic_write_file(&dir.join("dotler.toml"), content.as_bytes()).unwrap();
+        };
+
+        write_vault_manifest(&repo_a, &vcfg_a);
+        write_vault_manifest(&repo_b, &vcfg_b);
+        write_vault_manifest(&repo_other, &vcfg_other);
+        atomic_write_file(
+            &repo_plain.join("dotler.toml"),
+            b"[shell]\nos-linux = \"~\"\nos-macos = \"~\"\nos-windows = \"~\"\nfiles = \"*\"\n",
+        )
+        .unwrap();
+
+        let mut local_cfg = LocalConfig::default();
+        local_cfg
+            .repos
+            .insert("repo_a".to_string(), repo_a.to_string_lossy().to_string());
+        local_cfg
+            .repos
+            .insert("repo_b".to_string(), repo_b.to_string_lossy().to_string());
+        local_cfg.repos.insert(
+            "repo_other".to_string(),
+            repo_other.to_string_lossy().to_string(),
+        );
+        local_cfg.repos.insert(
+            "repo_plain".to_string(),
+            repo_plain.to_string_lossy().to_string(),
+        );
+        local_cfg.repos.insert(
+            "repo_missing".to_string(),
+            repo_missing.to_string_lossy().to_string(),
+        );
+
+        // Wrong old password matching zero vaults must fail without modifying keyring or manifests
+        OsKeyring::push_mock_prompt_reply("wrong-old-pass-000");
+        OsKeyring::push_mock_prompt_reply("shared-new-pass-999");
+        let wrong_res = rotate_vault_passphrases(&local_cfg, None, false, true);
+        assert!(wrong_res.is_err());
+        assert!(OsKeyring::get().unwrap().is_none());
+
+        // Seed OsKeyring with old_pass, then rotate interactively to shared-new-pass-999
+        OsKeyring::set(&old_pass).unwrap();
+        OsKeyring::push_mock_prompt_reply("shared-new-pass-999");
+
+        let report = rotate_vault_passphrases(&local_cfg, None, false, true)
+            .expect("multi-repo rotation must succeed");
+
+        assert_eq!(report["status"], "password_rotated");
+        assert_eq!(report["rotated_repos"], json!(["repo_a", "repo_b"]));
+        assert_eq!(
+            report["skipped_repos"],
+            json!(["repo_missing", "repo_other", "repo_plain"])
+        );
+        assert_eq!(report["keyring_updated"], true);
+
+        // OsKeyring must now hold the new passphrase
+        let keyring_secret = OsKeyring::get().unwrap().unwrap();
+        assert_eq!(keyring_secret.expose_secret(), "shared-new-pass-999");
+
+        // Both repo_a and repo_b must unlock with the new passphrase while .enc bytes stay untouched
+        for (repo_dir, orig_enc, expected_plain) in [
+            (&repo_a, &enc_a, b"secret-a-payload".as_slice()),
+            (&repo_b, &enc_b, b"secret-b-payload".as_slice()),
+        ] {
+            let disk_enc = fs::read(repo_dir.join("shell/token.enc")).unwrap();
+            assert_eq!(&disk_enc, orig_enc, ".enc bytes must remain 100% untouched");
+
+            let reloaded = RepoConfig::load(&repo_dir.join("dotler.toml")).unwrap();
+            let vcfg = reloaded.vault.unwrap();
+            let slot = VaultSlot::from_base64(&vcfg.password_slot).unwrap();
+            assert!(slot.unwrap(&old_pass, Some(&vcfg.vault_id)).is_err());
+            let unlocked_key = slot.unwrap(&keyring_secret, Some(&vcfg.vault_id)).unwrap();
+            let dec = unlocked_key
+                .decrypt_file(&crate::crypto::vault::EncryptedFile::from_bytes(&disk_enc).unwrap())
+                .unwrap();
+            assert_eq!(dec.expose_secret().as_slice(), expected_plain);
+        }
+
+        // Third-party repo with different passphrase must remain untouched
+        let reloaded_other = RepoConfig::load(&repo_other.join("dotler.toml")).unwrap();
+        let other_vcfg = reloaded_other.vault.unwrap();
+        assert_eq!(other_vcfg.password_slot, vcfg_other.password_slot);
 
         OsKeyring::clear_mock();
         OsKeyring::disable_mock();

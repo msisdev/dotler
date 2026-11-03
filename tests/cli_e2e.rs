@@ -670,3 +670,112 @@ files = "!*"
     );
     assert!(!dir_c.join("c.conf").exists());
 }
+
+#[test]
+fn test_e2e_vault_passwd_rotates_all_matching_registered_repos() {
+    let sandbox = E2eSandbox::new();
+
+    let repo_personal = sandbox.home_dir.join("personal-dots");
+    let repo_work = sandbox.home_dir.join("work-dots");
+    let repo_other = sandbox.home_dir.join("other-dots");
+    let repo_plain = sandbox.home_dir.join("plain-dots");
+
+    for (dir, label) in [
+        (&repo_personal, "personal"),
+        (&repo_work, "work"),
+        (&repo_other, "other"),
+        (&repo_plain, "plain"),
+    ] {
+        fs::create_dir_all(dir).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_dotler"))
+            .env("HOME", &sandbox.home_dir)
+            .current_dir(dir)
+            .args(["init", "--label", label])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0));
+    }
+
+    // Initialize personal and work with shared_old_pass, and other with separate_pass
+    for (dir, pass) in [
+        (&repo_personal, "shared_old_pass_123"),
+        (&repo_work, "shared_old_pass_123"),
+        (&repo_other, "separate_foreign_pass_456"),
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_dotler"))
+            .env("HOME", &sandbox.home_dir)
+            .current_dir(dir)
+            .args(["vault", "init", "--password-stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        if let Some(mut stdin) = child.stdin.take() {
+            writeln!(stdin, "{pass}").unwrap();
+        }
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0));
+    }
+
+    let other_before = fs::read_to_string(repo_other.join("dotler.toml")).unwrap();
+
+    // Run `dotler vault passwd` from outside all repo directories (`home_dir`)
+    let mut passwd_child = Command::new(env!("CARGO_BIN_EXE_dotler"))
+        .env("HOME", &sandbox.home_dir)
+        .env("DOTLER_PASSPHRASE", "shared_old_pass_123")
+        .current_dir(&sandbox.home_dir)
+        .args(["vault", "passwd", "--password-stdin", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Some(mut stdin) = passwd_child.stdin.take() {
+        writeln!(stdin, "shared_new_pass_789").unwrap();
+    }
+    let passwd_out = passwd_child.wait_with_output().unwrap();
+    assert_eq!(
+        passwd_out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&passwd_out.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&passwd_out.stdout).unwrap();
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(
+        parsed["data"]["rotated_repos"],
+        serde_json::json!(["personal", "work"])
+    );
+    assert_eq!(
+        parsed["data"]["skipped_repos"],
+        serde_json::json!(["other", "plain"])
+    );
+
+    // `other` repo with separate password must be byte-for-byte untouched
+    let other_after = fs::read_to_string(repo_other.join("dotler.toml")).unwrap();
+    assert_eq!(other_before, other_after);
+
+    // Subsequent rotation using `shared_new_pass_789` must succeed on both `personal` and `work`
+    let mut passwd_child2 = Command::new(env!("CARGO_BIN_EXE_dotler"))
+        .env("HOME", &sandbox.home_dir)
+        .env("DOTLER_PASSPHRASE", "shared_new_pass_789")
+        .current_dir(&sandbox.home_dir)
+        .args(["vault", "passwd", "--password-stdin", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Some(mut stdin) = passwd_child2.stdin.take() {
+        writeln!(stdin, "shared_final_pass_000").unwrap();
+    }
+    let passwd_out2 = passwd_child2.wait_with_output().unwrap();
+    assert_eq!(passwd_out2.status.code(), Some(0));
+    let parsed2: Value = serde_json::from_slice(&passwd_out2.stdout).unwrap();
+    assert_eq!(
+        parsed2["data"]["rotated_repos"],
+        serde_json::json!(["personal", "work"])
+    );
+}

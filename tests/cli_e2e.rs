@@ -562,3 +562,111 @@ files = "sec.txt encrypt"
         stderr.contains("Encryption mismatch") || stderr.contains("conflicts with encryption rule")
     );
 }
+
+#[test]
+fn test_e2e_tidy_default_keep_and_multi_group_filter() {
+    let sandbox = E2eSandbox::new();
+
+    let init_out = sandbox
+        .cmd()
+        .args(["init", "--label", "main"])
+        .output()
+        .unwrap();
+    assert_eq!(init_out.status.code(), Some(0));
+
+    let dir_a = sandbox.home_dir.join(".config").join("app_a");
+    let dir_b = sandbox.home_dir.join(".config").join("app_b");
+    let dir_c = sandbox.home_dir.join(".config").join("app_c");
+    fs::create_dir_all(&dir_a).unwrap();
+    fs::create_dir_all(&dir_b).unwrap();
+    fs::create_dir_all(&dir_c).unwrap();
+
+    fs::write(dir_a.join("a.conf"), "a\n").unwrap();
+    fs::write(dir_b.join("b.conf"), "b\n").unwrap();
+    fs::write(dir_c.join("c.conf"), "c\n").unwrap();
+
+    let toml_v1 = r#"[grp_a]
+os-linux = "~/.config/app_a"
+os-macos = "~/.config/app_a"
+os-windows = "~/.config/app_a"
+files = "*"
+
+[grp_b]
+os-linux = "~/.config/app_b"
+os-macos = "~/.config/app_b"
+os-windows = "~/.config/app_b"
+files = "*"
+
+[grp_c]
+os-linux = "~/.config/app_c"
+os-macos = "~/.config/app_c"
+os-windows = "~/.config/app_c"
+files = "*"
+"#;
+    fs::write(sandbox.repo_dir.join("dotler.toml"), toml_v1).unwrap();
+
+    let imp_out = sandbox.cmd().arg("import").output().unwrap();
+    assert_eq!(imp_out.status.code(), Some(0));
+
+    // Exclude all three files so each becomes an orphan in its respective group
+    let toml_v2 = r#"[grp_a]
+os-linux = "~/.config/app_a"
+os-macos = "~/.config/app_a"
+os-windows = "~/.config/app_a"
+files = "!*"
+
+[grp_b]
+os-linux = "~/.config/app_b"
+os-macos = "~/.config/app_b"
+os-windows = "~/.config/app_b"
+files = "!*"
+
+[grp_c]
+os-linux = "~/.config/app_c"
+os-macos = "~/.config/app_c"
+os-windows = "~/.config/app_c"
+files = "!*"
+"#;
+    fs::write(sandbox.repo_dir.join("dotler.toml"), toml_v2).unwrap();
+
+    // Run `dotler tidy grp_a grp_b` with NO --rm/--keep flag (must default to --keep and filter both groups)
+    let tidy_out = sandbox
+        .cmd()
+        .args(["tidy", "grp_a", "grp_b", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(tidy_out.status.code(), Some(0));
+
+    let parsed: Value = serde_json::from_slice(&tidy_out.stdout).unwrap();
+    assert_eq!(parsed["ok"], true);
+    let kept = parsed["data"]["untracked_kept_orphans"].as_array().unwrap();
+    let removed = parsed["data"]["removed_os_orphans"].as_array().unwrap();
+    assert_eq!(
+        kept.len(),
+        2,
+        "Both grp_a and grp_b orphans must be untracked with --keep default"
+    );
+    assert_eq!(removed.len(), 0);
+
+    // OS files must remain intact under default --keep
+    assert!(dir_a.join("a.conf").is_file());
+    assert!(dir_b.join("b.conf").is_file());
+    assert!(dir_c.join("c.conf").is_file());
+
+    // grp_c was NOT passed to tidy, so running tidy grp_c --rm now must still find and delete c.conf
+    let tidy_c = sandbox
+        .cmd()
+        .args(["tidy", "grp_c", "--rm", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(tidy_c.status.code(), Some(0));
+    let parsed_c: Value = serde_json::from_slice(&tidy_c.stdout).unwrap();
+    assert_eq!(
+        parsed_c["data"]["removed_os_orphans"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(!dir_c.join("c.conf").exists());
+}

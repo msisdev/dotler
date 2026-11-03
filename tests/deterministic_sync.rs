@@ -1537,3 +1537,126 @@ files = "*"
     assert!(!internal_repo.join("shell").join(".git").exists());
     assert!(!internal_repo.join("shell").join("dotfiles").exists());
 }
+
+#[test]
+fn test_tidy_single_and_multi_group_filters_isolate_orphans() {
+    let sb = SyncTestSandbox::new();
+    let lock = sb.acquire_lock();
+
+    let dir_a = sb.home_dir.join("grp_a");
+    let dir_b = sb.home_dir.join("grp_b");
+    let dir_c = sb.home_dir.join("grp_c");
+    fs::create_dir_all(&dir_a).unwrap();
+    fs::create_dir_all(&dir_b).unwrap();
+    fs::create_dir_all(&dir_c).unwrap();
+
+    fs::write(dir_a.join("keep_a.conf"), "a_keep").unwrap();
+    fs::write(dir_a.join("orphan_a.conf"), "a_orphan").unwrap();
+    fs::write(dir_b.join("orphan_b.conf"), "b_orphan").unwrap();
+    fs::write(dir_c.join("orphan_c.conf"), "c_orphan").unwrap();
+
+    let initial_toml = r#"[grp_a]
+os-linux = "~/grp_a"
+os-macos = "~/grp_a"
+os-windows = "~/grp_a"
+files = "*"
+
+[grp_b]
+os-linux = "~/grp_b"
+os-macos = "~/grp_b"
+os-windows = "~/grp_b"
+files = "*"
+
+[grp_c]
+os-linux = "~/grp_c"
+os-macos = "~/grp_c"
+os-windows = "~/grp_c"
+files = "*"
+"#;
+    let repo_cfg1 = RepoConfig::parse(initial_toml).unwrap();
+
+    let engine1 = SyncEngine::new(
+        "main",
+        &sb.repo_dir,
+        &repo_cfg1,
+        &sb.state_db,
+        vec![],
+        OsInfo::detect(),
+        None,
+    )
+    .with_home_dir(&sb.home_dir);
+    let plans1 = engine1.plan(None, &lock).unwrap();
+    engine1.import_files(&plans1, &lock, false).unwrap();
+
+    // Now exclude orphan_a.conf, orphan_b.conf, and orphan_c.conf in dotler.toml
+    let updated_toml = r#"[grp_a]
+os-linux = "~/grp_a"
+os-macos = "~/grp_a"
+os-windows = "~/grp_a"
+files = "keep_a.conf"
+
+[grp_b]
+os-linux = "~/grp_b"
+os-macos = "~/grp_b"
+os-windows = "~/grp_b"
+files = "!*"
+
+[grp_c]
+os-linux = "~/grp_c"
+os-macos = "~/grp_c"
+os-windows = "~/grp_c"
+files = "!*"
+"#;
+    let repo_cfg2 = RepoConfig::parse(updated_toml).unwrap();
+    let engine2 = SyncEngine::new(
+        "main",
+        &sb.repo_dir,
+        &repo_cfg2,
+        &sb.state_db,
+        vec![],
+        OsInfo::detect(),
+        None,
+    )
+    .with_home_dir(&sb.home_dir);
+
+    // Tidy ONLY grp_a and grp_b with default KeepOnOs policy
+    let report = engine2
+        .tidy_groups(
+            &["grp_a".to_string(), "grp_b".to_string()],
+            &lock,
+            TidyOrphanPolicy::default(),
+            false,
+        )
+        .unwrap();
+
+    assert_eq!(report.untracked_kept_orphans.len(), 2);
+    assert!(dir_a.join("orphan_a.conf").is_file());
+    assert!(dir_b.join("orphan_b.conf").is_file());
+    assert!(
+        sb.state_db
+            .get_synced_file(&dir_a.join("orphan_a.conf").to_string_lossy())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        sb.state_db
+            .get_synced_file(&dir_b.join("orphan_b.conf").to_string_lossy())
+            .unwrap()
+            .is_none()
+    );
+
+    // grp_a's active file and grp_c's untouched orphan must STILL remain tracked in synced_files
+    assert!(
+        sb.state_db
+            .get_synced_file(&dir_a.join("keep_a.conf").to_string_lossy())
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        sb.state_db
+            .get_synced_file(&dir_c.join("orphan_c.conf").to_string_lossy())
+            .unwrap()
+            .is_some(),
+        "Unselected group grp_c must not have its synced_files records touched"
+    );
+}

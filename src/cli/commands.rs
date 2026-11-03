@@ -26,7 +26,8 @@ use crate::engine::remote::{
     GroupSelector, clone_repo, install_remote, list_remote, parse_url, uninstall_remote,
 };
 use crate::engine::sync::{
-    FileSyncStatus, SyncEngine, TidyOrphanPolicy, export_files, import_files, plan, tidy,
+    FileSyncStatus, SyncEngine, TidyOrphanPolicy, atomic_write_file, export_files, import_files,
+    plan, tidy_groups,
 };
 
 #[derive(Parser, Debug, Clone)]
@@ -412,7 +413,7 @@ pub fn dispatch<W1: Write, W2: Write>(
         Command::Init(args) => handle_init(args, cli, stdout, &lock_guard),
         Command::Git { command } => handle_git(command, cli, stdout, &lock_guard),
         Command::Check(args) => handle_check(args, cli, stdout, &lock_guard),
-        Command::Status(args) => handle_status(args, cli, stdout, &lock_guard),
+        Command::Status(args) => handle_status(args, cli, is_interactive, stdout, &lock_guard),
         Command::Import(args) => handle_import(args, cli, is_interactive, stdout, &lock_guard),
         Command::Export(args) => handle_export(args, cli, is_interactive, stdout, &lock_guard),
         Command::Tidy(args) => handle_tidy(args, cli, is_interactive, stdout, &lock_guard),
@@ -447,7 +448,7 @@ files = """
 *
 """
 "#;
-        fs::write(&dotler_toml_path, initial_toml)?;
+        atomic_write_file(&dotler_toml_path, initial_toml.as_bytes())?;
     }
 
     let skill_path = scaffold_skill_md(&repo_dir)
@@ -728,6 +729,7 @@ fn handle_check<W: Write>(
 fn handle_status<W: Write>(
     args: &StatusArgs,
     cli: &Cli,
+    is_interactive: bool,
     stdout: &mut W,
     lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
@@ -748,7 +750,8 @@ fn handle_status<W: Write>(
     }
     let state_db = StateDb::open(&state_db_path)?;
 
-    let vault_key = try_unlock_vault(&repo_cfg);
+    let has_enc = has_encrypted_rules(&repo_cfg) || has_encrypted_repo_files(&repo_path, &repo_cfg);
+    let vault_key = unlock_vault_if_needed(&repo_cfg, is_interactive, has_enc && is_interactive)?;
     let os_info = OsInfo::detect();
 
     let mut devices = local_cfg.default_devices.clone();
@@ -774,7 +777,7 @@ fn handle_status<W: Write>(
 fn handle_import<W: Write>(
     args: &ImportArgs,
     cli: &Cli,
-    _is_interactive: bool,
+    is_interactive: bool,
     stdout: &mut W,
     lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
@@ -795,7 +798,8 @@ fn handle_import<W: Write>(
     }
     let state_db = StateDb::open(&state_db_path)?;
 
-    let vault_key = try_unlock_vault(&repo_cfg);
+    let needs_vault = has_encrypted_rules(&repo_cfg);
+    let vault_key = unlock_vault_if_needed(&repo_cfg, is_interactive, needs_vault)?;
     let os_info = OsInfo::detect();
 
     let mut devices = local_cfg.default_devices.clone();
@@ -814,13 +818,6 @@ fn handle_import<W: Write>(
     );
 
     let groups = args.resolved_groups();
-
-    // Ensure vault is unlocked if encrypted rules exist
-    if has_encrypted_rules(&repo_cfg) && sync_engine.vault_key.is_none() {
-        return Err(EngineError::VaultLocked {
-            reason: "Encrypted group cannot be synced without vault passphrase".to_string(),
-        });
-    }
 
     let mut plans = Vec::new();
     if groups.is_empty() {
@@ -840,7 +837,7 @@ fn handle_import<W: Write>(
 fn handle_export<W: Write>(
     args: &ExportArgs,
     cli: &Cli,
-    _is_interactive: bool,
+    is_interactive: bool,
     stdout: &mut W,
     lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
@@ -861,7 +858,8 @@ fn handle_export<W: Write>(
     }
     let state_db = StateDb::open(&state_db_path)?;
 
-    let vault_key = try_unlock_vault(&repo_cfg);
+    let needs_vault = has_encrypted_rules(&repo_cfg);
+    let vault_key = unlock_vault_if_needed(&repo_cfg, is_interactive, needs_vault)?;
     let os_info = OsInfo::detect();
 
     let mut devices = local_cfg.default_devices.clone();
@@ -880,13 +878,6 @@ fn handle_export<W: Write>(
     );
 
     let groups = args.resolved_groups();
-
-    // Ensure vault is unlocked if encrypted rules exist
-    if has_encrypted_rules(&repo_cfg) && sync_engine.vault_key.is_none() {
-        return Err(EngineError::VaultLocked {
-            reason: "Encrypted group cannot be synced without vault passphrase".to_string(),
-        });
-    }
 
     let mut plans = Vec::new();
     if groups.is_empty() {
@@ -918,7 +909,7 @@ fn handle_export<W: Write>(
 fn handle_tidy<W: Write>(
     args: &TidyArgs,
     cli: &Cli,
-    _is_interactive: bool,
+    is_interactive: bool,
     stdout: &mut W,
     lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
@@ -939,7 +930,9 @@ fn handle_tidy<W: Write>(
     }
     let state_db = StateDb::open(&state_db_path)?;
 
-    let vault_key = try_unlock_vault(&repo_cfg);
+    let needs_vault =
+        has_encrypted_rules(&repo_cfg) || has_encrypted_repo_files(&repo_path, &repo_cfg);
+    let vault_key = unlock_vault_if_needed(&repo_cfg, is_interactive, needs_vault)?;
     let os_info = OsInfo::detect();
 
     let mut devices = local_cfg.default_devices.clone();
@@ -959,27 +952,14 @@ fn handle_tidy<W: Write>(
 
     let groups = args.resolved_groups();
 
-    // Ensure vault is unlocked if encrypted rules exist
-    if has_encrypted_rules(&repo_cfg) && sync_engine.vault_key.is_none() {
-        return Err(EngineError::VaultLocked {
-            reason: "Encrypted group cannot be synced without vault passphrase".to_string(),
-        });
-    }
-
     let policy = if args.rm {
         TidyOrphanPolicy::RemoveFromOs
     } else {
         TidyOrphanPolicy::KeepOnOs
     };
 
-    let group_filter = if groups.len() == 1 {
-        Some(groups[0].as_str())
-    } else {
-        None
-    };
-
     let dry_run = args.dry_run || cli.dry_run;
-    let report = tidy(&sync_engine, group_filter, lock, policy, dry_run)?;
+    let report = tidy_groups(&sync_engine, &groups, lock, policy, dry_run)?;
     Ok(render_success_to(stdout, "tidy", &report, cli.json))
 }
 
@@ -1009,16 +989,20 @@ fn handle_vault<W: Write>(
                     hint: "Vault is already initialized in dotler.toml. Use 'dotler vault passwd' to change password.".to_string(),
                 }));
             }
-            let pass = read_passphrase(args.password_stdin, is_interactive)?;
+            let pass = read_new_passphrase(
+                args.password_stdin,
+                is_interactive,
+                "Enter new vault passphrase: ",
+            )?;
             let (vault_cfg, _vault_key, mnemonic) = init_vault(&pass)?;
 
-            // Update dotler.toml
+            // Update dotler.toml atomically
             let mut manifest_str = fs::read_to_string(&manifest_path)?;
             manifest_str.push_str(&format!(
                 "\n[vault]\nvault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n",
                 vault_cfg.vault_id, vault_cfg.password_slot, vault_cfg.recovery_slot
             ));
-            fs::write(&manifest_path, manifest_str)?;
+            atomic_write_file(&manifest_path, manifest_str.as_bytes())?;
 
             // Attempt to store in keyring
             let _ = OsKeyring::set(&pass);
@@ -1037,18 +1021,22 @@ fn handle_vault<W: Write>(
                 .ok_or_else(|| EngineError::VaultLocked {
                     reason: "Vault is not configured".to_string(),
                 })?;
-            let old_pass = read_passphrase(false, is_interactive)?;
-            let new_pass = read_passphrase(args.password_stdin, is_interactive)?;
+            let old_pass = resolve_existing_vault_passphrase(vault_cfg, is_interactive)?;
+            let new_pass = read_new_passphrase(
+                args.password_stdin,
+                is_interactive,
+                "Enter new vault passphrase: ",
+            )?;
 
             let new_cfg = change_password(vault_cfg, &old_pass, &new_pass)?;
 
-            // Re-write dotler.toml with new password_slot
+            // Re-write dotler.toml atomically with new password_slot
             let manifest_str = fs::read_to_string(&manifest_path)?;
             let updated_manifest = manifest_str.replace(
                 &format!("password_slot = \"{}\"", vault_cfg.password_slot),
                 &format!("password_slot = \"{}\"", new_cfg.password_slot),
             );
-            fs::write(&manifest_path, updated_manifest)?;
+            atomic_write_file(&manifest_path, updated_manifest.as_bytes())?;
             let _ = OsKeyring::set(&new_pass);
 
             let data = json!({
@@ -1068,9 +1056,17 @@ fn handle_vault<W: Write>(
             let mnemonic_phrase = if let Some(ref m) = args.mnemonic {
                 SecretString::new(m.clone())
             } else {
-                read_passphrase(args.password_stdin, is_interactive)?
+                read_new_passphrase(
+                    args.password_stdin,
+                    is_interactive,
+                    "Enter 12-word recovery mnemonic: ",
+                )?
             };
-            let new_pass = read_passphrase(args.password_stdin, is_interactive)?;
+            let new_pass = read_new_passphrase(
+                args.password_stdin,
+                is_interactive,
+                "Enter new vault passphrase: ",
+            )?;
 
             let (new_cfg, new_mnemonic) = recover_vault(vault_cfg, &mnemonic_phrase, &new_pass)?;
 
@@ -1083,7 +1079,7 @@ fn handle_vault<W: Write>(
                 &format!("recovery_slot = \"{}\"", vault_cfg.recovery_slot),
                 &format!("recovery_slot = \"{}\"", new_cfg.recovery_slot),
             );
-            fs::write(&manifest_path, updated)?;
+            atomic_write_file(&manifest_path, updated.as_bytes())?;
             let _ = OsKeyring::set(&new_pass);
 
             let data = json!({
@@ -1105,7 +1101,11 @@ fn handle_key<W: Write>(
 ) -> Result<i32, EngineError> {
     match cmd {
         KeyCommand::Set(args) => {
-            let pass = read_passphrase(args.password_stdin, is_interactive)?;
+            let pass = read_new_passphrase(
+                args.password_stdin,
+                is_interactive,
+                "Enter vault passphrase to store in keyring: ",
+            )?;
             OsKeyring::set(&pass)
                 .map_err(|e| EngineError::Crypto(crate::crypto::CryptoError::Keyring(e)))?;
             let data = json!({ "status": "keyring_updated" });
@@ -1180,14 +1180,87 @@ fn resolve_repo_path(
         .map_err(EngineError::Config)
 }
 
-fn try_unlock_vault(repo_cfg: &RepoConfig) -> Option<VaultKey> {
-    let vault_cfg = repo_cfg.vault.as_ref()?;
-    let secret = match read_passphrase(false, false) {
-        Ok(s) => s,
-        Err(_) => return None,
+fn unlock_vault_if_needed(
+    repo_cfg: &RepoConfig,
+    is_interactive: bool,
+    required: bool,
+) -> Result<Option<VaultKey>, EngineError> {
+    let Some(vault_cfg) = repo_cfg.vault.as_ref() else {
+        if required {
+            return Err(EngineError::VaultLocked {
+                reason:
+                    "Encrypted group cannot be synced without an initialized [vault] in dotler.toml"
+                        .to_string(),
+            });
+        }
+        return Ok(None);
     };
-    let slot = VaultSlot::from_base64(&vault_cfg.password_slot).ok()?;
-    slot.unwrap(&secret, Some(&vault_cfg.vault_id)).ok()
+
+    let slot = VaultSlot::from_base64(&vault_cfg.password_slot)?;
+
+    if let Ok(env_pass) = std::env::var(crate::crypto::keyring::PASSPHRASE_ENV_VAR) {
+        let trimmed = env_pass.trim_end_matches(['\r', '\n']);
+        if !trimmed.is_empty() {
+            let secret = SecretString::new(trimmed.to_string());
+            match slot.unwrap(&secret, Some(&vault_cfg.vault_id)) {
+                Ok(key) => return Ok(Some(key)),
+                Err(e) if !is_interactive && required => return Err(EngineError::Vault(e)),
+                Err(_) => {}
+            }
+        }
+    }
+
+    let keyring_secret = OsKeyring::get().ok().flatten();
+    if let Some(ref sec) = keyring_secret
+        && let Ok(key) = slot.unwrap(sec, Some(&vault_cfg.vault_id))
+    {
+        return Ok(Some(key));
+    }
+
+    if !required {
+        return Ok(None);
+    }
+
+    if !is_interactive {
+        return Err(EngineError::Crypto(crate::crypto::CryptoError::Keyring(
+            crate::crypto::keyring::KeyringError::PassphraseRequiredInNonInteractiveMode,
+        )));
+    }
+
+    let resolved = OsKeyring::prompt_passphrase_with_message("Enter dotler vault passphrase: ")
+        .map_err(|e| EngineError::Crypto(crate::crypto::CryptoError::Keyring(e)))?;
+    let key = slot.unwrap(&resolved.secret, Some(&vault_cfg.vault_id))?;
+
+    if keyring_secret.is_none() {
+        let _ = OsKeyring::set(&resolved.secret);
+    }
+
+    Ok(Some(key))
+}
+
+fn resolve_existing_vault_passphrase(
+    vault_cfg: &crate::config::repo::VaultConfig,
+    is_interactive: bool,
+) -> Result<SecretString, EngineError> {
+    let slot = VaultSlot::from_base64(&vault_cfg.password_slot)?;
+
+    if let Ok(env_pass) = std::env::var(crate::crypto::keyring::PASSPHRASE_ENV_VAR) {
+        let trimmed = env_pass.trim_end_matches(['\r', '\n']);
+        if !trimmed.is_empty() {
+            let secret = SecretString::new(trimmed.to_string());
+            if slot.unwrap(&secret, Some(&vault_cfg.vault_id)).is_ok() {
+                return Ok(secret);
+            }
+        }
+    }
+
+    if let Ok(Some(sec)) = OsKeyring::get()
+        && slot.unwrap(&sec, Some(&vault_cfg.vault_id)).is_ok()
+    {
+        return Ok(sec);
+    }
+
+    read_new_passphrase(false, is_interactive, "Enter current vault passphrase: ")
 }
 
 fn has_encrypted_rules(repo_cfg: &RepoConfig) -> bool {
@@ -1203,9 +1276,30 @@ fn has_encrypted_rules(repo_cfg: &RepoConfig) -> bool {
     false
 }
 
-fn read_passphrase(
+fn has_encrypted_repo_files(repo_path: &Path, repo_cfg: &RepoConfig) -> bool {
+    for g_name in repo_cfg.groups.keys() {
+        let group_dir = repo_path.join(g_name);
+        if !group_dir.is_dir() {
+            continue;
+        }
+        for entry in walkdir::WalkDir::new(&group_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if entry.file_type().is_file()
+                && entry.path().extension().and_then(|s| s.to_str()) == Some("enc")
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn read_new_passphrase(
     password_stdin: bool,
     is_interactive: bool,
+    prompt_msg: &str,
 ) -> Result<SecretString, EngineError> {
     if password_stdin {
         let mut line = String::new();
@@ -1228,17 +1322,13 @@ fn read_passphrase(
         }
     }
 
-    if let Ok(Some(sec)) = OsKeyring::get() {
-        return Ok(sec);
-    }
-
     if !is_interactive {
         return Err(EngineError::Crypto(crate::crypto::CryptoError::Keyring(
             crate::crypto::keyring::KeyringError::PassphraseRequiredInNonInteractiveMode,
         )));
     }
 
-    let resolved = OsKeyring::resolve(is_interactive, None)
+    let resolved = OsKeyring::prompt_passphrase_with_message(prompt_msg)
         .map_err(|e| EngineError::Crypto(crate::crypto::CryptoError::Keyring(e)))?;
     Ok(resolved.secret)
 }
@@ -1268,5 +1358,62 @@ mod tests {
         assert!(Cli::try_parse_from(["dotler", "ai"]).is_ok());
         assert!(Cli::try_parse_from(["dotler", "mcp"]).is_ok());
         assert!(Cli::try_parse_from(["dotler", "update"]).is_ok());
+    }
+
+    #[test]
+    fn test_interactive_prompt_unlocks_vault_and_autosaves_to_keyring() {
+        use secrecy::ExposeSecret;
+
+        let _guard = crate::crypto::keyring::MOCK_KEYRING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        OsKeyring::enable_mock();
+        OsKeyring::clear_mock();
+        unsafe {
+            std::env::remove_var(crate::crypto::keyring::PASSPHRASE_ENV_VAR);
+        }
+
+        let pass = SecretString::new("interactive-day0-secret".to_string());
+        let (vault_cfg, expected_key, _mnemonic) = init_vault(&pass).unwrap();
+        let repo_cfg = RepoConfig {
+            vault: Some(vault_cfg.clone()),
+            ..Default::default()
+        };
+
+        // Keyring starts empty; queue interactive prompt reply
+        assert!(OsKeyring::get().unwrap().is_none());
+        OsKeyring::push_mock_prompt_reply("interactive-day0-secret");
+
+        let unlocked = unlock_vault_if_needed(&repo_cfg, true, true)
+            .expect("interactive unlock must succeed")
+            .expect("vault key must be returned");
+        assert_eq!(unlocked.vault_id(), expected_key.vault_id());
+
+        // Verified passphrase must be auto-saved to OsKeyring on Day 0
+        let saved = OsKeyring::get()
+            .unwrap()
+            .expect("keyring must hold auto-saved secret");
+        assert_eq!(saved.expose_secret(), "interactive-day0-secret");
+
+        // Rotating password interactively must prompt for the NEW passphrase rather than reusing keyring
+        OsKeyring::push_mock_prompt_reply("rotated-new-secret-999");
+        let resolved_old = resolve_existing_vault_passphrase(&vault_cfg, true).unwrap();
+        assert_eq!(resolved_old.expose_secret(), "interactive-day0-secret");
+
+        let resolved_new =
+            read_new_passphrase(false, true, "Enter new vault passphrase: ").unwrap();
+        assert_eq!(resolved_new.expose_secret(), "rotated-new-secret-999");
+
+        let rotated_cfg = change_password(&vault_cfg, &resolved_old, &resolved_new).unwrap();
+        let rotated_slot = VaultSlot::from_base64(&rotated_cfg.password_slot).unwrap();
+        assert!(
+            rotated_slot
+                .unwrap(&resolved_new, Some(&rotated_cfg.vault_id))
+                .is_ok()
+        );
+
+        OsKeyring::clear_mock();
+        OsKeyring::disable_mock();
     }
 }

@@ -4,25 +4,25 @@
 //! hash-based re-encryption skipping, and format tidying.
 
 use std::collections::BTreeSet;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
+use crate::config::StateError;
 use crate::config::local::expand_tilde;
 use crate::config::repo::{
     OsInfo, RepoConfig, SelectionMode, evaluate_selection, parse_selection_rules,
     resolve_group_target_path,
 };
-pub use crate::config::state::TMP_FILE_PREFIX;
-use crate::config::state::{DotlerLockGuard, StateDb, SyncedFileRecord};
+pub use crate::config::state::{ATOMIC_REPLACE_RETRIES, TMP_FILE_PREFIX};
+use crate::config::state::{
+    DotlerLockGuard, StateDb, SyncedFileRecord, atomic_write_file as shared_atomic_write_file,
+};
 use crate::crypto::vault::{EncryptedFile, VaultKey};
 use crate::engine::EngineError;
-
-pub const ATOMIC_REPLACE_RETRIES: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FileSyncStatus {
@@ -36,11 +36,11 @@ pub enum FileSyncStatus {
     Orphaned,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TidyOrphanPolicy {
-    InteractivePrompt,
-    RemoveFromOs,
+    #[default]
     KeepOnOs,
+    RemoveFromOs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -616,7 +616,7 @@ impl<'a> SyncEngine<'a> {
         Ok(report)
     }
 
-    /// Integrated Tidy (`tidy`)
+    /// Integrated Tidy (`tidy`) for an optional single group filter.
     pub fn tidy(
         &self,
         group_filter: Option<&str>,
@@ -624,13 +624,35 @@ impl<'a> SyncEngine<'a> {
         policy: TidyOrphanPolicy,
         dry_run: bool,
     ) -> Result<TidyReport, EngineError> {
+        let filters: Vec<String> = group_filter.into_iter().map(str::to_string).collect();
+        self.tidy_groups(&filters, lock, policy, dry_run)
+    }
+
+    /// Integrated Tidy (`tidy`) supporting zero, one, or multiple group filters.
+    pub fn tidy_groups(
+        &self,
+        group_filters: &[String],
+        lock: &DotlerLockGuard,
+        policy: TidyOrphanPolicy,
+        dry_run: bool,
+    ) -> Result<TidyReport, EngineError> {
         let mut report = TidyReport::default();
+        let all_synced = self.state_db.list_synced_files(Some(&self.repo_label))?;
+
+        for filter in group_filters {
+            let exists_in_repo = self.repo_config.groups.contains_key(filter);
+            let exists_in_db = all_synced.iter().any(|r| &r.group_name == filter);
+            if !exists_in_repo && !exists_in_db {
+                return Err(EngineError::GroupNotFound {
+                    group: filter.clone(),
+                    available: self.repo_config.groups.keys().cloned().collect(),
+                });
+            }
+        }
 
         // 1. In-Repo Format Reconciliation
         for (group_name, group_cfg) in &self.repo_config.groups {
-            if let Some(filter) = group_filter
-                && filter != group_name
-            {
+            if !group_filters.is_empty() && !group_filters.iter().any(|f| f == group_name) {
                 continue;
             }
 
@@ -712,16 +734,32 @@ impl<'a> SyncEngine<'a> {
         }
 
         // 2. Orphan Cleanup (`synced_files`)
-        let plans = self.plan(group_filter, lock)?;
-        let active_target_paths: Vec<String> = plans
+        let mut plans = Vec::new();
+        if group_filters.is_empty() {
+            plans = self.plan(None, lock)?;
+        } else {
+            for g in group_filters {
+                if self.repo_config.groups.contains_key(g) {
+                    let mut p = self.plan(Some(g.as_str()), lock)?;
+                    plans.append(&mut p);
+                }
+            }
+        }
+
+        let active_target_paths: std::collections::HashSet<String> = plans
             .iter()
             .filter(|p| p.status != FileSyncStatus::Orphaned)
             .map(|p| p.target_os_path.to_string_lossy().to_string())
             .collect();
 
-        let orphaned = self
-            .state_db
-            .find_orphaned_synced_files(&self.repo_label, &active_target_paths)?;
+        let orphaned: Vec<String> = all_synced
+            .into_iter()
+            .filter(|rec| {
+                group_filters.is_empty() || group_filters.iter().any(|g| g == &rec.group_name)
+            })
+            .map(|rec| rec.target_path)
+            .filter(|target| !active_target_paths.contains(target))
+            .collect();
 
         for orphan_path_str in orphaned {
             let orphan_path = PathBuf::from(&orphan_path_str);
@@ -735,7 +773,7 @@ impl<'a> SyncEngine<'a> {
                     }
                     report.removed_os_orphans.push(orphan_path);
                 }
-                TidyOrphanPolicy::KeepOnOs | TidyOrphanPolicy::InteractivePrompt => {
+                TidyOrphanPolicy::KeepOnOs => {
                     if !dry_run {
                         let _ = self.state_db.remove_synced_file(&orphan_path_str);
                     }
@@ -785,47 +823,20 @@ pub fn tidy(
     engine.tidy(group_filter, lock, policy, dry_run)
 }
 
-/// Atomic file replacement with temporary file in the same parent directory and fsync
+pub fn tidy_groups(
+    engine: &SyncEngine,
+    group_filters: &[String],
+    lock: &DotlerLockGuard,
+    policy: TidyOrphanPolicy,
+    dry_run: bool,
+) -> Result<TidyReport, EngineError> {
+    engine.tidy_groups(group_filters, lock, policy, dry_run)
+}
+
+/// Atomic file replacement delegating to the shared configuration state handler.
 pub fn atomic_write_file(dest: &Path, content: &[u8]) -> Result<(), EngineError> {
-    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-
-    let rand_id: u64 = rand::random();
-    let tmp_path = parent.join(format!("{TMP_FILE_PREFIX}{rand_id:016x}"));
-
-    {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp_path)?;
-        file.write_all(content)?;
-        file.sync_all()?;
-    }
-
-    #[cfg(unix)]
-    if let Ok(metadata) = fs::metadata(dest) {
-        let _ = fs::set_permissions(&tmp_path, metadata.permissions());
-    }
-
-    let mut attempts = 0;
-    loop {
-        match fs::rename(&tmp_path, dest) {
-            Ok(()) => break,
-            Err(e) => {
-                attempts += 1;
-                if attempts >= ATOMIC_REPLACE_RETRIES {
-                    let _ = fs::remove_file(&tmp_path);
-                    return Err(EngineError::AtomicReplaceFailed(format!(
-                        "Failed to rename {} to {}: {}",
-                        tmp_path.display(),
-                        dest.display(),
-                        e
-                    )));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        }
-    }
-
-    Ok(())
+    shared_atomic_write_file(dest, content).map_err(|e| match e {
+        StateError::Io(io) => EngineError::Io(io),
+        other => EngineError::AtomicReplaceFailed(other.to_string()),
+    })
 }

@@ -20,7 +20,9 @@ use crate::config::state::{
 use crate::crypto::keyring::OsKeyring;
 use crate::crypto::vault::{VaultKey, VaultSlot};
 use crate::engine::remote::{list_remote, parse_url};
-use crate::engine::sync::{SyncEngine, TidyOrphanPolicy, export_files, import_files, plan, tidy};
+use crate::engine::sync::{
+    SyncEngine, TidyOrphanPolicy, export_files, import_files, plan, tidy_groups,
+};
 
 /// JSON-RPC 2.0 incoming request frame.
 #[derive(Debug, Clone, Deserialize)]
@@ -545,6 +547,16 @@ fn dispatch_tool(
 
         "dotler_tidy" => {
             let repo_arg = args.get("repo").and_then(Value::as_str);
+            let group_filters: Vec<String> = args
+                .get("groups")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
             let rm_opt = args.get("rm").and_then(Value::as_bool).unwrap_or(false);
             let keep_opt = args.get("keep").and_then(Value::as_bool).unwrap_or(false);
             let dry_run = args
@@ -588,7 +600,7 @@ fn dispatch_tool(
                 vault_key.as_ref(),
             );
 
-            let report = tidy(&sync_engine, None, lock, policy, dry_run)
+            let report = tidy_groups(&sync_engine, &group_filters, lock, policy, dry_run)
                 .map_err(|e| format!("Tidy failed: {e}\nHint: {}", e.hint()))?;
 
             Ok(ToolCallResult {

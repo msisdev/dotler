@@ -40,7 +40,7 @@ pub enum FileSyncStatus {
 pub enum TidyOrphanPolicy {
     #[default]
     KeepOnOs,
-    RemoveFromOs,
+    PurgeFromOs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -764,7 +764,7 @@ impl<'a> SyncEngine<'a> {
         for orphan_path_str in orphaned {
             let orphan_path = PathBuf::from(&orphan_path_str);
             match policy {
-                TidyOrphanPolicy::RemoveFromOs => {
+                TidyOrphanPolicy::PurgeFromOs => {
                     if orphan_path.is_file() && !dry_run {
                         let _ = fs::remove_file(&orphan_path);
                     }

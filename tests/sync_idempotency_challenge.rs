@@ -631,7 +631,7 @@ files = "valid.sh"
 
     // 2. Tidy must ignore stale tmp files
     let tidy_report = engine
-        .tidy(None, &lock, TidyOrphanPolicy::RemoveFromOs, false)
+        .tidy(None, &lock, TidyOrphanPolicy::PurgeFromOs, false)
         .unwrap();
     assert_eq!(tidy_report.removed_from_repo, 0);
     assert_eq!(tidy_report.removed_os_orphans.len(), 0);
@@ -742,10 +742,10 @@ files = "active.txt"
     let installed_before = sandbox.state_db.list_installed_files(None).unwrap();
     assert_eq!(installed_before.len(), 3);
 
-    // 4. Run tidy with RemoveFromOs
+    // 4. Run tidy with PurgeFromOs
     let engine = sandbox.sync_engine(&config, None);
     let report = engine
-        .tidy(None, &lock, TidyOrphanPolicy::RemoveFromOs, false)
+        .tidy(None, &lock, TidyOrphanPolicy::PurgeFromOs, false)
         .unwrap();
 
     assert_eq!(report.removed_os_orphans.len(), 1);
@@ -811,7 +811,7 @@ files = "missing_file.txt"
 
     let engine = sandbox.sync_engine(&config, None);
     let report = engine
-        .tidy(None, &lock, TidyOrphanPolicy::RemoveFromOs, false)
+        .tidy(None, &lock, TidyOrphanPolicy::PurgeFromOs, false)
         .unwrap();
 
     assert_eq!(

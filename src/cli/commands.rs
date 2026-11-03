@@ -288,15 +288,8 @@ pub struct TidyArgs {
     #[arg(short, long, help = "Group name flag to tidy")]
     pub group: Option<String>,
 
-    #[arg(long, conflicts_with = "keep", help = "Remove orphaned OS files")]
-    pub rm: bool,
-
-    #[arg(
-        long,
-        conflicts_with = "rm",
-        help = "Keep orphaned OS files without tracking"
-    )]
-    pub keep: bool,
+    #[arg(long, help = "Permanently delete orphaned files from OS filesystem")]
+    pub purge: bool,
 
     #[arg(long, help = "Simulate tidy operations without modifying files")]
     pub dry_run: bool,
@@ -952,8 +945,8 @@ fn handle_tidy<W: Write>(
 
     let groups = args.resolved_groups();
 
-    let policy = if args.rm {
-        TidyOrphanPolicy::RemoveFromOs
+    let policy = if args.purge {
+        TidyOrphanPolicy::PurgeFromOs
     } else {
         TidyOrphanPolicy::KeepOnOs
     };
@@ -1338,10 +1331,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_tidy_conflicting_flags() {
-        let args = ["dotler", "tidy", "--rm", "--keep"];
-        let res = Cli::try_parse_from(args);
-        assert!(res.is_err(), "Clap must reject --rm and --keep together");
+    fn test_parse_tidy_purge_and_reject_removed_flags() {
+        let default_cli = Cli::try_parse_from(["dotler", "tidy"]).expect("bare tidy must parse");
+        match default_cli.command {
+            Command::Tidy(args) => assert!(!args.purge),
+            other => panic!("Unexpected command: {other:?}"),
+        }
+
+        let purge_cli =
+            Cli::try_parse_from(["dotler", "tidy", "--purge"]).expect("tidy --purge must parse");
+        match purge_cli.command {
+            Command::Tidy(args) => assert!(args.purge),
+            other => panic!("Unexpected command: {other:?}"),
+        }
+
+        assert!(
+            Cli::try_parse_from(["dotler", "tidy", "--rm"]).is_err(),
+            "Clap must reject removed --rm flag"
+        );
+        assert!(
+            Cli::try_parse_from(["dotler", "tidy", "--keep"]).is_err(),
+            "Clap must reject removed --keep flag"
+        );
     }
 
     #[test]

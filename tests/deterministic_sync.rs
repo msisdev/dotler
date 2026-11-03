@@ -1001,7 +1001,7 @@ files = "active.sh"
 }
 
 #[test]
-fn test_tidy_orphan_rm_policy_deletes_os_file() {
+fn test_tidy_orphan_purge_policy_deletes_os_file() {
     let sandbox = SyncTestSandbox::new();
     let lock = sandbox.acquire_lock();
 
@@ -1028,7 +1028,7 @@ files = "active.sh"
 
     let engine = sandbox.sync_engine(&config, None);
     let report = engine
-        .tidy(None, &lock, TidyOrphanPolicy::RemoveFromOs, false)
+        .tidy(None, &lock, TidyOrphanPolicy::PurgeFromOs, false)
         .unwrap();
 
     assert_eq!(report.removed_os_orphans.len(), 1);
@@ -1069,7 +1069,7 @@ files = "active.sh"
 
     let engine = sandbox.sync_engine(&config, None);
     engine
-        .tidy(None, &lock, TidyOrphanPolicy::RemoveFromOs, false)
+        .tidy(None, &lock, TidyOrphanPolicy::PurgeFromOs, false)
         .unwrap();
 
     let installed = sandbox

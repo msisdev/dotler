@@ -197,13 +197,13 @@ fn test_e2e_exit_codes_0_to_4_comprehensive() {
     // Code 2 (EXIT_CONFIG_OR_ARGS_ERROR): Invalid CLI arguments or syntax error
     let code2_out = sandbox
         .cmd()
-        .args(["tidy", "--rm", "--keep"])
+        .args(["tidy", "--unknown-flag"])
         .output()
         .unwrap();
     assert_eq!(
         code2_out.status.code(),
         Some(2),
-        "Conflicting flags --rm and --keep must exit with code 2"
+        "Invalid CLI flag must exit with code 2"
     );
 
     // Code 3 (EXIT_SECURITY_BLOCKED): Path traversal attempt in dotler.toml
@@ -367,7 +367,7 @@ fn test_e2e_all_12_subcommands_clean_execution() {
     assert_eq!(out_export.status.code(), Some(0), "export must succeed");
 
     // 6. tidy
-    let out_tidy = sandbox.cmd().args(["tidy", "--keep"]).output().unwrap();
+    let out_tidy = sandbox.cmd().arg("tidy").output().unwrap();
     assert_eq!(out_tidy.status.code(), Some(0), "tidy must succeed");
 
     // 7. key set & del
@@ -629,7 +629,7 @@ files = "!*"
 "#;
     fs::write(sandbox.repo_dir.join("dotler.toml"), toml_v2).unwrap();
 
-    // Run `dotler tidy grp_a grp_b` with NO --rm/--keep flag (must default to --keep and filter both groups)
+    // Run `dotler tidy grp_a grp_b` with NO --purge flag (must keep OS files and filter both groups)
     let tidy_out = sandbox
         .cmd()
         .args(["tidy", "grp_a", "grp_b", "--json"])
@@ -644,19 +644,19 @@ files = "!*"
     assert_eq!(
         kept.len(),
         2,
-        "Both grp_a and grp_b orphans must be untracked with --keep default"
+        "Both grp_a and grp_b orphans must be untracked while preserving OS files by default"
     );
     assert_eq!(removed.len(), 0);
 
-    // OS files must remain intact under default --keep
+    // OS files must remain intact under default behavior
     assert!(dir_a.join("a.conf").is_file());
     assert!(dir_b.join("b.conf").is_file());
     assert!(dir_c.join("c.conf").is_file());
 
-    // grp_c was NOT passed to tidy, so running tidy grp_c --rm now must still find and delete c.conf
+    // grp_c was NOT passed to tidy, so running `tidy grp_c --purge` now must find and delete c.conf
     let tidy_c = sandbox
         .cmd()
-        .args(["tidy", "grp_c", "--rm", "--json"])
+        .args(["tidy", "grp_c", "--purge", "--json"])
         .output()
         .unwrap();
     assert_eq!(tidy_c.status.code(), Some(0));

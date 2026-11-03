@@ -150,8 +150,7 @@ pub fn list_tools() -> Vec<McpToolDefinition> {
                 "properties": {
                     "repo": { "type": "string", "description": "Repository label (defaults to default_repo)" },
                     "groups": { "type": "array", "items": { "type": "string" }, "description": "Optional group name filters" },
-                    "rm": { "type": "boolean", "description": "Remove orphaned files from OS filesystem" },
-                    "keep": { "type": "boolean", "description": "Keep orphaned files on OS and only untrack from database (safe agent default)" },
+                    "purge": { "type": "boolean", "description": "Permanently delete orphaned files from OS filesystem (defaults to false, keeping OS files intact)" },
                     "dry_run": { "type": "boolean", "description": "Simulate tidy operations without modifying files" }
                 },
                 "additionalProperties": false
@@ -557,20 +556,25 @@ fn dispatch_tool(
                         .collect()
                 })
                 .unwrap_or_default();
-            let rm_opt = args.get("rm").and_then(Value::as_bool).unwrap_or(false);
-            let keep_opt = args.get("keep").and_then(Value::as_bool).unwrap_or(false);
+            if let Some(obj) = args.as_object() {
+                for key in obj.keys() {
+                    if !matches!(key.as_str(), "repo" | "groups" | "purge" | "dry_run") {
+                        return Err(format!(
+                            "Unknown argument '{key}' for dotler_tidy. Allowed arguments: repo, groups, purge, dry_run."
+                        ));
+                    }
+                }
+            }
+
+            let purge = args.get("purge").and_then(Value::as_bool).unwrap_or(false);
             let dry_run = args
                 .get("dry_run")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
 
-            if rm_opt && keep_opt {
-                return Err("Conflicting options: 'rm' and 'keep' cannot both be true.".to_string());
-            }
-
-            // Safe agent default is KeepOnOs
-            let policy = if rm_opt {
-                TidyOrphanPolicy::RemoveFromOs
+            // Safe agent default is KeepOnOs (purge = false)
+            let policy = if purge {
+                TidyOrphanPolicy::PurgeFromOs
             } else {
                 TidyOrphanPolicy::KeepOnOs
             };

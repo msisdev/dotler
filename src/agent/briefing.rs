@@ -110,7 +110,7 @@ pub fn render_briefing(
     out.push_str("Always follow the deterministic 5-step agent execution loop:\n");
     out.push_str("1. Inspect or edit `dotler.toml` and dotfiles.\n");
     out.push_str("2. Statically validate configuration: `dotler check --json`\n");
-    out.push_str("3. Reconcile formats and clean orphans: `dotler tidy --keep --json`\n");
+    out.push_str("3. Reconcile formats and clean orphans: `dotler tidy --json`\n");
     out.push_str("4. Pre-simulate operations without disk modification:\n");
     out.push_str("   - For collection: `dotler import --dry-run --json`\n");
     out.push_str("   - For deployment: `dotler export --dry-run --json`\n");
@@ -162,7 +162,7 @@ Dotfiles are organized in top-level group directories defined within `dotler.tom
 ## Recommended Agent Execution Loop
 1. Edit manifests or files.
 2. Validate syntax: `dotler check --json`
-3. Reconcile encryption formats: `dotler tidy --keep --json`
+3. Reconcile encryption formats: `dotler tidy --json`
 4. Pre-simulate: `dotler import --dry-run --json` or `dotler export --dry-run --json`
 5. Apply atomically: `dotler import --json` or `dotler export --json`
 

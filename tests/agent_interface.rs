@@ -617,7 +617,7 @@ fn test_mcp_tidy_safe_keep_default() {
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
 
-    // Call dotler_tidy with NO rm and NO keep flags
+    // Call dotler_tidy with NO purge flag (must default to purge=false)
     let tidy_req = json!({
         "jsonrpc": "2.0",
         "id": 2,
@@ -640,8 +640,27 @@ fn test_mcp_tidy_safe_keep_default() {
     // Safe agent default: the file must NOT be deleted from the filesystem
     assert!(
         test_file.exists(),
-        "Safe Default Invariant: dotler_tidy must default to keep=true and preserve OS files"
+        "Safe Default Invariant: dotler_tidy must default to purge=false and preserve OS files"
     );
+
+    // Passing removed legacy argument (`rm`) must return a tool error
+    let legacy_req = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "dotler_tidy",
+            "arguments": { "rm": true }
+        }
+    });
+    writeln!(stdin, "{}", serde_json::to_string(&legacy_req).unwrap()).unwrap();
+    stdin.flush().unwrap();
+
+    line.clear();
+    reader.read_line(&mut line).unwrap();
+    let legacy_resp: Value = serde_json::from_str(&line).expect("Valid JSON response");
+    assert_eq!(legacy_resp["id"], 3);
+    assert_eq!(legacy_resp["result"]["isError"], true);
 
     drop(stdin);
     let _ = child.wait();

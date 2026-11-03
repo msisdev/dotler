@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::ConfigError;
+use crate::config::state::atomic_write_file;
+use crate::config::{ConfigError, StateError};
 
 pub const LOCAL_CONFIG_DIR: &str = "~/.config/dotler";
 pub const LOCAL_CONFIG_FILE: &str = "~/.config/dotler/config.toml";
@@ -195,32 +195,10 @@ impl LocalConfig {
         let serialized = toml::to_string_pretty(self)
             .map_err(|e| ConfigError::TomlSyntaxError(e.to_string()))?;
 
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(parent)?;
-
-        let rand_suffix: u64 = rand::random();
-        let tmp_path = parent.join(format!(".dotler-tmp-config-{rand_suffix:016x}"));
-
-        {
-            let mut file = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&tmp_path)?;
-            file.write_all(serialized.as_bytes())?;
-            file.sync_all()?;
-        }
-
-        fs::rename(&tmp_path, path).map_err(|e| {
-            let _ = fs::remove_file(&tmp_path);
-            ConfigError::AtomicRenameFailed(format!(
-                "Failed to rename {} to {}: {}",
-                tmp_path.display(),
-                path.display(),
-                e
-            ))
-        })?;
-
-        Ok(())
+        atomic_write_file(path, serialized.as_bytes()).map_err(|e| match e {
+            StateError::Io(io) => ConfigError::IoError(io),
+            other => ConfigError::AtomicRenameFailed(other.to_string()),
+        })
     }
 }
 

@@ -1,4 +1,5 @@
 use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -16,6 +17,7 @@ pub const SQLITE_BUSY_TIMEOUT_MS: u64 = 5000;
 pub const DOTLER_LOCK_TIMEOUT_MS: u64 = 5000;
 pub const DOTLER_LOCK_POLL_INTERVAL_MS: u64 = 50;
 pub const TMP_FILE_PREFIX: &str = ".dotler-tmp-";
+pub const ATOMIC_REPLACE_RETRIES: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncedFileRecord {
@@ -394,6 +396,59 @@ impl Drop for DotlerLockGuard {
     }
 }
 
+/// Writes `content` to `dest` atomically by creating a `.dotler-tmp-*` file
+/// in the same parent directory, syncing to disk (`fsync`), preserving permissions
+/// when replacing an existing file, and renaming into place with bounded retries.
+pub fn atomic_write_file(dest: &Path, content: &[u8]) -> Result<(), StateError> {
+    let parent = match dest.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    fs::create_dir_all(parent)?;
+
+    let rand_id: u64 = rand::random();
+    let tmp_path = parent.join(format!("{TMP_FILE_PREFIX}{rand_id:016x}"));
+
+    {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)?;
+        if let Err(e) = file.write_all(content).and_then(|()| file.sync_all()) {
+            drop(file);
+            let _ = fs::remove_file(&tmp_path);
+            return Err(StateError::Io(e));
+        }
+    }
+
+    #[cfg(unix)]
+    if let Ok(metadata) = fs::metadata(dest) {
+        let _ = fs::set_permissions(&tmp_path, metadata.permissions());
+    }
+
+    let mut attempts = 0;
+    loop {
+        match fs::rename(&tmp_path, dest) {
+            Ok(()) => break,
+            Err(e) => {
+                attempts += 1;
+                if attempts >= ATOMIC_REPLACE_RETRIES {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(StateError::AtomicReplaceFailed(format!(
+                        "Failed to rename {} to {}: {}",
+                        tmp_path.display(),
+                        dest.display(),
+                        e
+                    )));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -651,5 +706,41 @@ mod tests {
             }
             other => panic!("expected LockError::Timeout, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_shared_atomic_write_file_creates_overwrites_and_preserves_permissions() {
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("nested").join("config.toml");
+
+        atomic_write_file(&target, b"first = 1\n").expect("initial atomic write");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "first = 1\n");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        atomic_write_file(&target, b"second = 2\n").expect("overwrite atomic write");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "second = 2\n");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "existing file permissions must be preserved");
+        }
+
+        let parent = target.parent().unwrap();
+        let leftovers: Vec<_> = fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(TMP_FILE_PREFIX))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "atomic_write_file must leave zero temporary staging files"
+        );
     }
 }

@@ -5,9 +5,10 @@ pub mod state;
 pub use local::{LOCAL_CONFIG_DIR, LOCAL_CONFIG_FILE, LocalConfig, RESERVED_OS_PREFIX};
 pub use repo::{GroupConfig, OsInfo, RepoConfig, SelectionMode, SelectionRule, VaultConfig};
 pub use state::{
-    BACKUPS_DIR_PATH, DOTLER_LOCK_PATH, DOTLER_LOCK_POLL_INTERVAL_MS, DOTLER_LOCK_TIMEOUT_MS,
-    DotlerLock, DotlerLockGuard, InstalledFileRecord, SQLITE_BUSY_TIMEOUT_MS, SQLITE_JOURNAL_MODE,
-    SQLITE_SYNCHRONOUS, STATE_DB_PATH, StateDb, SyncedFileRecord, TMP_FILE_PREFIX,
+    ATOMIC_REPLACE_RETRIES, BACKUPS_DIR_PATH, DOTLER_LOCK_PATH, DOTLER_LOCK_POLL_INTERVAL_MS,
+    DOTLER_LOCK_TIMEOUT_MS, DotlerLock, DotlerLockGuard, InstalledFileRecord,
+    SQLITE_BUSY_TIMEOUT_MS, SQLITE_JOURNAL_MODE, SQLITE_SYNCHRONOUS, STATE_DB_PATH, StateDb,
+    SyncedFileRecord, TMP_FILE_PREFIX, atomic_write_file,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -102,6 +103,9 @@ pub enum StateError {
 
     #[error("Transaction error: {0}")]
     Transaction(String),
+
+    #[error("Atomic file replacement failed: {0}")]
+    AtomicReplaceFailed(String),
 }
 
 impl StateError {

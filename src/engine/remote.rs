@@ -395,9 +395,7 @@ pub fn clone_repo(
                 let enc_file = EncryptedFile::from_bytes(&enc_bytes)?;
                 let decrypted = r_key.decrypt_file(&enc_file)?;
                 let re_encrypted = l_key.encrypt_file(decrypted.expose_secret())?;
-                let tmp_path = entry.path().with_extension("enc.dotler-tmp");
-                fs::write(&tmp_path, re_encrypted.to_bytes())?;
-                fs::rename(&tmp_path, entry.path())?;
+                atomic_write_file(entry.path(), &re_encrypted.to_bytes())?;
             }
         }
     }
@@ -672,10 +670,8 @@ fn create_backup_file(
         expand_tilde(BACKUPS_DIR_PATH).join(timestamp.to_string())
     };
     let dest = backup_root.join(rel);
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::copy(source, &dest)?;
+    let source_bytes = fs::read(source)?;
+    atomic_write_file(&dest, &source_bytes)?;
     Ok(dest.to_string_lossy().to_string())
 }
 

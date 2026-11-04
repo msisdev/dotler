@@ -39,6 +39,62 @@ impl EnvironmentSnapshot {
     }
 }
 
+/// Official online documentation URL for Dotler.
+pub const OFFICIAL_MANUAL_URL: &str = "https://msisdev.github.io/dotler/";
+
+/// Shared static operational guide embedded in both `dotler ai` (`render_briefing`)
+/// and `<repo>/SKILL.md` (`scaffold_skill_md`).
+pub const SHARED_OPERATIONAL_GUIDE: &str = r#"## 2. Group Layout & Selection Rules (dotler.toml)
+- Official Documentation: https://msisdev.github.io/dotler/
+- Single Home Path Rule: All dotfile target paths MUST start with `~` or `~/` (e.g. `~/.bashrc`, `~/.config/nvim`). Directory traversal (`..`), backslashes, and shell variables (`$HOME`, `%VAR%`) are strictly prohibited.
+- 3-State Selection Rules (Last-Match-Wins):
+  - `<pattern>` (or `+<pattern>`): Include matching files as plaintext.
+  - `<pattern> encrypt` (or `@<pattern>`): Include matching files and encrypt using XChaCha20-Poly1305 (`.enc`).
+  - `!<pattern>`: Exclude matching files.
+  - Sequential line-by-line evaluation: rules appearing later override earlier declarations.
+- Manifest Example:
+
+```text
+[shell]
+files = """
+*
+*.key encrypt
+!*.log
+"""
+os-linux = "~"
+os-macos = "~"
+```
+
+## 3. Standard Operational Guidelines & Command Cheatsheet
+Always follow the deterministic 5-step agent execution loop:
+1. Inspect or edit `dotler.toml` and dotfiles.
+2. Statically validate configuration: `dotler check --json`
+3. Reconcile formats and clean orphans: `dotler tidy --json` (use `dotler tidy --purge --json` to permanently delete orphaned OS files)
+4. Pre-simulate operations without disk modification:
+   - For collection: `dotler import --dry-run --json`
+   - For deployment: `dotler export --dry-run --json`
+5. Perform atomic synchronized operations:
+   - `dotler import --json`
+   - `dotler export --json`
+
+MCP Equivalent Tools:
+- `dotler_briefing`: Fetch this briefing and environment status.
+- `dotler_check`: Perform static manifest and path safety checks.
+- `dotler_status`: Reconcile 3-way synchronization state.
+- `dotler_import`: Ingest OS files into repository with atomic staging.
+- `dotler_export`: Deploy repository files with conflict protection.
+- `dotler_tidy`: Reconcile file formats and clean untracked orphans (`purge: false` by default).
+- `dotler_git_ls`: Inspect remote Git repositories before cloning.
+
+## 4. Security Guardrails & Prohibitions (Zero Secret Leakage)
+- ZERO SECRET LEAKAGE: NEVER prompt the user in chat for master passphrases or 12-word recovery mnemonics!
+- If `keyring_ready` is false and an encrypted group needs synchronization, instruct the user to run `dotler key set` once in their local terminal.
+- `dotler vault passwd` rotates the passphrase across all matching locally registered repositories and updates the OS keyring in one shot.
+- Symbolic links are strictly prohibited inside the repository (exit code 3). On the OS side, symlinks pointing to regular files inside `~` are dereferenced on `import` and materialized into standalone regular files on `export`.
+- Directory traversal (`..`), symlinks escaping `~`, and environment variable expansions are blocked by path safety invariants (exit code 3).
+- Never overwrite locally modified files without explicit `--force` user authorization.
+"#;
+
 /// Generates the one-shot markdown briefing for AI agents (`dotler ai`).
 pub fn render_briefing(
     local_config: &LocalConfig,
@@ -82,62 +138,7 @@ pub fn render_briefing(
         snapshot.keyring_ready
     ));
 
-    // Section 2: Group Layout & Selection Rules
-    out.push_str("## 2. Group Layout & Selection Rules (dotler.toml)\n");
-    out.push_str("- Single Home Path Rule: All dotfile target paths MUST start with `~/` (e.g. `~/.bashrc`, `~/.config/nvim`). Directory traversal (`..`), backslashes, and shell variables (`$HOME`, `%VAR%`) are strictly prohibited.\n");
-    out.push_str("- 3-State Selection Rules (Last-Match-Wins):\n");
-    out.push_str("  - `<pattern>`: Include matching files as plaintext.\n");
-    out.push_str(
-        "  - `<pattern> encrypt`: Include matching files and encrypt using XChaCha20-Poly1305.\n",
-    );
-    out.push_str("  - `!<pattern>`: Exclude matching files.\n");
-    out.push_str("  - Sequential line-by-line evaluation: rules appearing later override earlier declarations.\n");
-    out.push_str("- Manifest Example:\n\n");
-    out.push_str("```text\n");
-    out.push_str("[shell]\n");
-    out.push_str("files = \"\"\"\n");
-    out.push_str("*\n");
-    out.push_str("*.key encrypt\n");
-    out.push_str("!*.log\n");
-    out.push_str("\"\"\"\n");
-    out.push_str("path = \"~\"\n");
-    out.push_str("os-linux = \"~\"\n");
-    out.push_str("os-macos = \"~\"\n");
-    out.push_str("```\n\n");
-
-    // Section 3: Standard Operational Guidelines & Command Cheatsheet
-    out.push_str("## 3. Standard Operational Guidelines & Command Cheatsheet\n");
-    out.push_str("Always follow the deterministic 5-step agent execution loop:\n");
-    out.push_str("1. Inspect or edit `dotler.toml` and dotfiles.\n");
-    out.push_str("2. Statically validate configuration: `dotler check --json`\n");
-    out.push_str("3. Reconcile formats and clean orphans: `dotler tidy --json`\n");
-    out.push_str("4. Pre-simulate operations without disk modification:\n");
-    out.push_str("   - For collection: `dotler import --dry-run --json`\n");
-    out.push_str("   - For deployment: `dotler export --dry-run --json`\n");
-    out.push_str("5. Perform atomic synchronized operations:\n");
-    out.push_str("   - `dotler import --json`\n");
-    out.push_str("   - `dotler export --json`\n\n");
-    out.push_str("MCP Equivalent Tools:\n");
-    out.push_str("- `dotler_briefing`: Fetch this briefing and environment status.\n");
-    out.push_str("- `dotler_check`: Perform static manifest and path safety checks.\n");
-    out.push_str("- `dotler_status`: Reconcile 3-way synchronization state.\n");
-    out.push_str("- `dotler_import`: Ingest OS files into repository with atomic staging.\n");
-    out.push_str("- `dotler_export`: Deploy repository files with conflict protection.\n");
-    out.push_str("- `dotler_tidy`: Reconcile file formats and clean untracked orphans.\n");
-    out.push_str("- `dotler_git_ls`: Inspect remote Git repositories before cloning.\n\n");
-
-    // Section 4: Security Guardrails & Prohibitions
-    out.push_str("## 4. Security Guardrails & Prohibitions (Zero Secret Leakage)\n");
-    out.push_str(
-        "- NEVER prompt the user in chat for master passphrases or 12-word recovery mnemonics!\n",
-    );
-    out.push_str("- If `keyring_ready` is false and an encrypted group needs synchronization, instruct the user to run `dotler key set` once in their local terminal.\n");
-    out.push_str("- Plaintext passwords and mnemonics are never accepted via CLI flags or MCP tool arguments.\n");
-    out.push_str("- Directory traversal (`..`) and environment variable expansions are blocked by path safety invariants.\n");
-    out.push_str(
-        "- Never overwrite locally modified files without explicit `--force` user authorization.\n",
-    );
-
+    out.push_str(SHARED_OPERATIONAL_GUIDE);
     out
 }
 
@@ -145,31 +146,14 @@ pub fn render_briefing(
 pub fn scaffold_skill_md(repo_dir: &Path) -> Result<PathBuf, AgentError> {
     let skill_path = repo_dir.join("SKILL.md");
 
-    let content = r#"# Dotler Repository Operational Manual for AI Coding Agents
-
-## Repository Architecture & Standards
-This repository is managed by `dotler`, a privacy-first, zero-trace dotfile synchronization engine.
-Dotfiles are organized in top-level group directories defined within `dotler.toml`.
-
-## Selection Syntax & Rules (`dotler.toml`)
-- Target Path Rule: All deployment targets MUST begin with `~/`.
-- 3-State Selection (Last-Match-Wins):
-  - `<pattern>`: Plaintext inclusion.
-  - `<pattern> encrypt`: Authenticated symmetric encryption (XChaCha20-Poly1305).
-  - `!<pattern>`: Exclusion.
-  - Later rules override earlier rules.
-
-## Recommended Agent Execution Loop
-1. Edit manifests or files.
-2. Validate syntax: `dotler check --json`
-3. Reconcile encryption formats: `dotler tidy --json`
-4. Pre-simulate: `dotler import --dry-run --json` or `dotler export --dry-run --json`
-5. Apply atomically: `dotler import --json` or `dotler export --json`
-
-## Security Guardrails
-- ZERO SECRET LEAKAGE: Never ask the user for master passwords or recovery phrases in conversation.
-- If encryption fails due to a locked vault, direct the user to run `dotler key set` in their terminal.
-"#;
+    let mut content = String::from(
+        "# Dotler Repository Operational Manual for AI Coding Agents\n\n\
+         ## 1. Repository Architecture & Standards\n\
+         - This repository is managed by `dotler`, a privacy-first, deterministic dotfile synchronization engine.\n\
+         - Dotfiles are organized in top-level group directories defined within `dotler.toml`.\n\
+         - Run `dotler ai` (or MCP `dotler_briefing`) to inspect live device/OS keys and keyring status on the current machine.\n\n",
+    );
+    content.push_str(SHARED_OPERATIONAL_GUIDE);
 
     atomic_write_file(&skill_path, content.as_bytes())?;
 

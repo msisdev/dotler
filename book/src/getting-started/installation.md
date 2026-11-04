@@ -2,10 +2,10 @@
 
 ## Install with Cargo
 
-Requires Rust `1.85+` and `git`:
+Requires Rust `1.89+` and `git`:
 
 ```sh
-cargo install --git https://github.com/msisdev/dotler
+cargo install dotler
 ```
 
 Check the installed version:

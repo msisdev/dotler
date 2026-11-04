@@ -1885,3 +1885,141 @@ files = ".*rc"
     assert_eq!(export_rep2.processed, 0);
     assert_eq!(export_rep2.skipped, 1);
 }
+
+#[test]
+fn test_remote_git_multi_manifest_bfs_unicode_order_and_explicit_subpath() {
+    let sb = SyncTestSandbox::new();
+    let lock = sb.acquire_lock();
+
+    // Seed a remote repository with NO root dotler.toml, and multiple nested dotler.toml files:
+    // - z_cfg/dotler.toml (depth 1, lexicographically after a_cfg)
+    // - a_cfg/dotler.toml (depth 1, lexicographically first at depth 1)
+    // - a_cfg/deep/dotler.toml (depth 2)
+    let worktree = sb.root.path().join("multi_worktree");
+    let bare_repo = sb.root.path().join("multi_bare.git");
+    fs::create_dir_all(worktree.join("z_cfg").join("zsh")).unwrap();
+    fs::create_dir_all(worktree.join("a_cfg").join("nvim")).unwrap();
+    fs::create_dir_all(worktree.join("a_cfg").join("deep").join("tmux")).unwrap();
+
+    fs::write(
+        worktree.join("z_cfg").join("dotler.toml"),
+        "[zsh]\nos-linux = \"~\"\nos-macos = \"~\"\nfiles = \".zshrc\"\n",
+    )
+    .unwrap();
+    fs::write(
+        worktree.join("z_cfg").join("zsh").join(".zshrc"),
+        "# from z_cfg\n",
+    )
+    .unwrap();
+
+    fs::write(
+        worktree.join("a_cfg").join("dotler.toml"),
+        "[nvim]\nos-linux = \"~\"\nos-macos = \"~\"\nfiles = \"init.lua\"\n",
+    )
+    .unwrap();
+    fs::write(
+        worktree.join("a_cfg").join("nvim").join("init.lua"),
+        "-- from a_cfg\n",
+    )
+    .unwrap();
+
+    fs::write(
+        worktree.join("a_cfg").join("deep").join("dotler.toml"),
+        "[tmux]\nos-linux = \"~\"\nos-macos = \"~\"\nfiles = \".tmux.conf\"\n",
+    )
+    .unwrap();
+    fs::write(
+        worktree
+            .join("a_cfg")
+            .join("deep")
+            .join("tmux")
+            .join(".tmux.conf"),
+        "# from deep\n",
+    )
+    .unwrap();
+
+    let run_git = |dir: &std::path::Path, args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+    run_git(&worktree, &["init"]);
+    run_git(&worktree, &["config", "user.email", "test@example.com"]);
+    run_git(&worktree, &["config", "user.name", "Test"]);
+    run_git(&worktree, &["add", "."]);
+    run_git(&worktree, &["commit", "-m", "init multi"]);
+    let status = std::process::Command::new("git")
+        .args([
+            "clone",
+            "--bare",
+            worktree.to_str().unwrap(),
+            bare_repo.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let bare_url_str = bare_repo.to_string_lossy().to_string();
+
+    // 1. `git ls` without subpath returns all 3 manifests in BFS + Unicode order:
+    //    ["a_cfg/dotler.toml", "z_cfg/dotler.toml", "a_cfg/deep/dotler.toml"]
+    let parsed_all = parse_url(&bare_url_str).unwrap();
+    assert!(parsed_all.subpath.is_none());
+    let summary = list_remote(&parsed_all, None, &lock).unwrap();
+    let manifest_paths: Vec<&str> = summary.manifests.iter().map(|m| m.path.as_str()).collect();
+    assert_eq!(
+        manifest_paths,
+        vec![
+            "a_cfg/dotler.toml",
+            "z_cfg/dotler.toml",
+            "a_cfg/deep/dotler.toml"
+        ]
+    );
+    // Primary groups default to first BFS + Unicode manifest (`a_cfg/dotler.toml` -> `nvim`)
+    assert_eq!(summary.groups[0].name, "nvim");
+
+    // 2. `git clone <git-url>` without subpath clones the first BFS + Unicode manifest (`a_cfg/dotler.toml`)
+    let clone_default_dest = sb.root.path().join("cloned_default");
+    let clone_rep1 = clone_repo(
+        &parsed_all,
+        &[],
+        None,
+        &clone_default_dest,
+        None,
+        None,
+        None,
+        &lock,
+    )
+    .unwrap();
+    assert_eq!(clone_rep1.cloned_groups, vec!["nvim"]);
+    assert!(clone_default_dest.join("dotler.toml").is_file());
+    assert!(clone_default_dest.join("nvim").join("init.lua").is_file());
+
+    // 3. `git clone <git-url>/<dotler.toml path>` clones the explicitly targeted manifest (`z_cfg/dotler.toml`)
+    let explicit_url_str = format!("{bare_url_str}/z_cfg/dotler.toml");
+    let parsed_explicit = parse_url(&explicit_url_str).unwrap();
+    assert_eq!(parsed_explicit.subpath.as_deref(), Some("z_cfg"));
+    let clone_explicit_dest = sb.root.path().join("cloned_explicit");
+    let clone_rep2 = clone_repo(
+        &parsed_explicit,
+        &[],
+        None,
+        &clone_explicit_dest,
+        None,
+        None,
+        None,
+        &lock,
+    )
+    .unwrap();
+    assert_eq!(clone_rep2.cloned_groups, vec!["zsh"]);
+    assert!(clone_explicit_dest.join("dotler.toml").is_file());
+    assert!(clone_explicit_dest.join("zsh").join(".zshrc").is_file());
+
+    // 4. Shorthand URL with subpath (`gh:owner/repo/configs/linux/dotler.toml`)
+    let gh_sub = parse_url("gh:owner/repo/configs/linux/dotler.toml").unwrap();
+    assert_eq!(gh_sub.clone_url, "https://github.com/owner/repo.git");
+    assert_eq!(gh_sub.subpath.as_deref(), Some("configs/linux"));
+}

@@ -8,9 +8,9 @@ pub mod sync;
 
 pub use remote::{
     BACKUPS_DIR_NAME, CloneReport, GroupSelector, InstallReport, PathOverride,
-    REMOTE_TOML_FETCH_MAX_BYTES, RemoteGroupInfo, RemoteRepoSummary, RemoteRepoUrl,
-    STAGING_CLONE_PREFIX, UninstallReport, clone_repo, install_remote, list_remote, parse_url,
-    uninstall_remote,
+    REMOTE_TOML_FETCH_MAX_BYTES, RemoteGroupInfo, RemoteManifestSummary, RemoteRepoSummary,
+    RemoteRepoUrl, STAGING_CLONE_PREFIX, UninstallReport, clone_repo, install_remote, list_remote,
+    parse_url, uninstall_remote,
 };
 pub use sync::{
     ATOMIC_REPLACE_RETRIES, FileActionPlan, FileSyncStatus, SyncEngine, SyncReport,
@@ -173,6 +173,9 @@ impl EngineError {
             }
             EngineError::AtomicReplaceFailed(msg) => {
                 format!("Atomic file replace failed: {msg}")
+            }
+            EngineError::Config(crate::config::ConfigError::MissingVaultConfig) => {
+                "Run 'dotler vault init' to initialize vault encryption before syncing encrypted files.".to_string()
             }
             EngineError::Config(e) => format!("Fix configuration error: {e}"),
             EngineError::State(e) => format!("Database operation failed: {e}"),

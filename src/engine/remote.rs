@@ -52,6 +52,8 @@ pub const STAGING_CLONE_PREFIX: &str = ".dotler-tmp-clone-";
 pub struct RemoteRepoUrl {
     pub raw: String,
     pub clone_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subpath: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,8 +93,18 @@ pub struct RemoteGroupInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteManifestSummary {
+    pub path: String,
+    pub groups: Vec<RemoteGroupInfo>,
+    pub has_vault: bool,
+    pub vault_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteRepoSummary {
     pub url: String,
+    #[serde(default)]
+    pub manifests: Vec<RemoteManifestSummary>,
     pub groups: Vec<RemoteGroupInfo>,
     pub has_vault: bool,
     pub vault_id: Option<String>,
@@ -117,6 +129,44 @@ pub struct UninstallReport {
     pub restored_backups: Vec<PathBuf>,
 }
 
+fn normalize_subpath(raw_sub: &str) -> Result<String, EngineError> {
+    let trimmed = raw_sub.trim_matches('/');
+    if trimmed.contains("..") || trimmed.contains('\\') {
+        return Err(EngineError::HardBlockedPath {
+            path: PathBuf::from(raw_sub),
+            reason: "directory traversal ('..') or backslash is prohibited in dotler.toml path"
+                .to_string(),
+        });
+    }
+    if trimmed.is_empty() || trimmed == "dotler.toml" {
+        return Ok(String::new());
+    }
+    if let Some(stripped) = trimmed.strip_suffix("/dotler.toml") {
+        return Ok(stripped.trim_matches('/').to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn split_two_segment_slug(clean: &str) -> (&str, Option<&str>) {
+    if let Some((repo_part, sub_part)) = clean.split_once(".git/") {
+        return (repo_part, Some(sub_part));
+    }
+    let mut indices = clean.match_indices('/');
+    if let (Some(_), Some((second_slash, _))) = (indices.next(), indices.next()) {
+        let repo_part = clean[..second_slash]
+            .trim_end_matches('/')
+            .trim_end_matches(".git");
+        let sub_part = &clean[second_slash + 1..];
+        (repo_part, Some(sub_part))
+    } else {
+        (clean.trim_end_matches(".git"), None)
+    }
+}
+
+fn is_git_repo_dir(dir: &Path) -> bool {
+    dir.join(".git").exists() || (dir.join("HEAD").is_file() && dir.join("objects").is_dir())
+}
+
 pub fn parse_url(raw: &str) -> Result<RemoteRepoUrl, EngineError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -126,7 +176,7 @@ pub fn parse_url(raw: &str) -> Result<RemoteRepoUrl, EngineError> {
         });
     }
 
-    let clone_url = if let Some(slug) = trimmed.strip_prefix("gh:") {
+    let (clone_url, subpath) = if let Some(slug) = trimmed.strip_prefix("gh:") {
         let clean = slug.trim_matches('/');
         if clean.is_empty() {
             return Err(EngineError::InvalidUrlFormat {
@@ -134,7 +184,12 @@ pub fn parse_url(raw: &str) -> Result<RemoteRepoUrl, EngineError> {
                 reason: "Repository slug cannot be empty".to_string(),
             });
         }
-        format!("https://github.com/{}.git", clean)
+        let (repo_part, sub) = split_two_segment_slug(clean);
+        let sub_norm = match sub {
+            Some(s) => Some(normalize_subpath(s)?),
+            None => None,
+        };
+        (format!("https://github.com/{}.git", repo_part), sub_norm)
     } else if let Some(slug) = trimmed.strip_prefix("gl:") {
         let clean = slug.trim_matches('/');
         if clean.is_empty() {
@@ -143,7 +198,24 @@ pub fn parse_url(raw: &str) -> Result<RemoteRepoUrl, EngineError> {
                 reason: "Repository slug cannot be empty".to_string(),
             });
         }
-        format!("https://gitlab.com/{}.git", clean)
+        if let Some((repo_part, sub_part)) = clean.split_once(".git/") {
+            (
+                format!("https://gitlab.com/{}.git", repo_part),
+                Some(normalize_subpath(sub_part)?),
+            )
+        } else if clean.ends_with("/dotler.toml") {
+            let (repo_part, sub) = split_two_segment_slug(clean);
+            let sub_norm = match sub {
+                Some(s) => Some(normalize_subpath(s)?),
+                None => Some(String::new()),
+            };
+            (format!("https://gitlab.com/{}.git", repo_part), sub_norm)
+        } else {
+            (
+                format!("https://gitlab.com/{}.git", clean.trim_end_matches(".git")),
+                None,
+            )
+        }
     } else if let Some(slug) = trimmed.strip_prefix("cb:") {
         let clean = slug.trim_matches('/');
         if clean.is_empty() {
@@ -152,7 +224,12 @@ pub fn parse_url(raw: &str) -> Result<RemoteRepoUrl, EngineError> {
                 reason: "Repository slug cannot be empty".to_string(),
             });
         }
-        format!("https://codeberg.org/{}.git", clean)
+        let (repo_part, sub) = split_two_segment_slug(clean);
+        let sub_norm = match sub {
+            Some(s) => Some(normalize_subpath(s)?),
+            None => None,
+        };
+        (format!("https://codeberg.org/{}.git", repo_part), sub_norm)
     } else if let Some(slug) = trimmed.strip_prefix("srht:") {
         let clean = slug.trim_matches('/');
         if clean.is_empty() {
@@ -161,7 +238,12 @@ pub fn parse_url(raw: &str) -> Result<RemoteRepoUrl, EngineError> {
                 reason: "Repository slug cannot be empty".to_string(),
             });
         }
-        format!("https://git.sr.ht/{}", clean)
+        let (repo_part, sub) = split_two_segment_slug(clean);
+        let sub_norm = match sub {
+            Some(s) => Some(normalize_subpath(s)?),
+            None => None,
+        };
+        (format!("https://git.sr.ht/{}", repo_part), sub_norm)
     } else if let Some(slug) = trimmed.strip_prefix("bb:") {
         let clean = slug.trim_matches('/');
         if clean.is_empty() {
@@ -170,18 +252,87 @@ pub fn parse_url(raw: &str) -> Result<RemoteRepoUrl, EngineError> {
                 reason: "Repository slug cannot be empty".to_string(),
             });
         }
-        format!("https://bitbucket.org/{}.git", clean)
+        let (repo_part, sub) = split_two_segment_slug(clean);
+        let sub_norm = match sub {
+            Some(s) => Some(normalize_subpath(s)?),
+            None => None,
+        };
+        (format!("https://bitbucket.org/{}.git", repo_part), sub_norm)
     } else if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
-        if trimmed.ends_with(".git") {
-            trimmed.to_string()
+        if let Some((left, right)) = trimmed.split_once(".git/") {
+            (format!("{left}.git"), Some(normalize_subpath(right)?))
+        } else if let Some((scheme, rest)) = trimmed.split_once("://")
+            && let Some((host, path_part)) = rest.split_once('/')
+        {
+            let clean_path = path_part.trim_matches('/');
+            let is_two_seg_host = matches!(
+                host,
+                "github.com" | "codeberg.org" | "bitbucket.org" | "git.sr.ht"
+            );
+            if is_two_seg_host || clean_path.ends_with("/dotler.toml") {
+                let (repo_part, sub) = split_two_segment_slug(clean_path);
+                let sub_norm = match sub {
+                    Some(s) => Some(normalize_subpath(s)?),
+                    None => None,
+                };
+                let url_out = format!("{scheme}://{host}/{repo_part}.git");
+                (url_out, sub_norm)
+            } else if trimmed.ends_with(".git") {
+                (trimmed.to_string(), None)
+            } else {
+                (format!("{}.git", trimmed.trim_end_matches('/')), None)
+            }
+        } else if trimmed.ends_with(".git") {
+            (trimmed.to_string(), None)
         } else {
-            format!("{}.git", trimmed)
+            (format!("{}.git", trimmed), None)
         }
     } else if trimmed.starts_with("file://")
         || trimmed.starts_with('/')
         || trimmed.starts_with("./")
     {
-        trimmed.to_string()
+        if let Some((left, right)) = trimmed.split_once(".git/")
+            && !left.ends_with('/')
+        {
+            (format!("{left}.git"), Some(normalize_subpath(right)?))
+        } else {
+            let has_file_scheme = trimmed.starts_with("file://");
+            let fs_str = trimmed.strip_prefix("file://").unwrap_or(trimmed);
+            let (cand_str, explicit_toml) = if let Some(s) = fs_str.strip_suffix("/dotler.toml") {
+                (s, true)
+            } else {
+                (fs_str, false)
+            };
+            let cand_path = Path::new(cand_str);
+            let mut found_split: Option<(String, String)> = None;
+            if explicit_toml || !is_git_repo_dir(cand_path) {
+                for anc in cand_path.ancestors() {
+                    if is_git_repo_dir(anc) {
+                        if let Ok(rel) = cand_path.strip_prefix(anc) {
+                            let repo_str = if has_file_scheme {
+                                format!("file://{}", anc.display())
+                            } else {
+                                anc.display().to_string()
+                            };
+                            found_split = Some((repo_str, rel.to_string_lossy().to_string()));
+                        }
+                        break;
+                    }
+                }
+            }
+            if let Some((repo_str, rel_str)) = found_split {
+                (repo_str, Some(normalize_subpath(&rel_str)?))
+            } else if explicit_toml {
+                let repo_str = if has_file_scheme {
+                    format!("file://{cand_str}")
+                } else {
+                    cand_str.to_string()
+                };
+                (repo_str, Some(String::new()))
+            } else {
+                (trimmed.to_string(), None)
+            }
+        }
     } else {
         return Err(EngineError::InvalidUrlFormat {
             url: trimmed.to_string(),
@@ -193,6 +344,7 @@ pub fn parse_url(raw: &str) -> Result<RemoteRepoUrl, EngineError> {
     Ok(RemoteRepoUrl {
         raw: trimmed.to_string(),
         clone_url,
+        subpath,
     })
 }
 
@@ -284,27 +436,126 @@ impl GitRunner {
     }
 }
 
-pub fn list_remote(
-    url: &RemoteRepoUrl,
-    branch: Option<&str>,
-    _lock: &DotlerLockGuard,
-) -> Result<RemoteRepoSummary, EngineError> {
-    let raw_toml = GitRunner::fetch_file_shallow(
-        &url.clone_url,
-        branch,
-        "dotler.toml",
-        REMOTE_TOML_FETCH_MAX_BYTES,
-    )?;
+struct DiscoveredManifest {
+    rel_manifest_path: String,
+    manifest_dir: PathBuf,
+    config: RepoConfig,
+}
 
+fn load_and_validate_remote_manifest(
+    toml_path: &Path,
+    max_bytes: usize,
+) -> Result<RepoConfig, EngineError> {
+    if is_symlink(toml_path) {
+        return Err(EngineError::HardBlockedPath {
+            path: toml_path.to_path_buf(),
+            reason: "symbolic links are prohibited inside a dotler repository".to_string(),
+        });
+    }
+    let metadata = fs::metadata(toml_path)?;
+    if metadata.len() as usize > max_bytes {
+        return Err(EngineError::PayloadExceeded {
+            size_bytes: metadata.len() as usize,
+            limit_bytes: max_bytes,
+        });
+    }
+    let raw_toml = fs::read(toml_path)?;
     let toml_str = String::from_utf8(raw_toml).map_err(|_| EngineError::GitError {
         operation: "fetch".to_string(),
         message: "dotler.toml is not valid UTF-8".to_string(),
     })?;
-
     let repo_config = RepoConfig::parse(&toml_str)?;
+    repo_config.validate()?;
+    Ok(repo_config)
+}
 
+fn discover_manifests_in_tree(
+    repo_root: &Path,
+    subpath: Option<&str>,
+    raw_url: &str,
+) -> Result<Vec<DiscoveredManifest>, EngineError> {
+    validate_dir_no_symlinks(repo_root).map_err(|e| match e {
+        crate::config::ConfigError::HardBlockedPath { path, reason } => {
+            EngineError::HardBlockedPath {
+                path: PathBuf::from(path),
+                reason,
+            }
+        }
+        other => EngineError::Config(other),
+    })?;
+
+    if let Some(sub) = subpath {
+        let rel_dir = normalize_subpath(sub)?;
+        let manifest_dir = if rel_dir.is_empty() {
+            repo_root.to_path_buf()
+        } else {
+            repo_root.join(&rel_dir)
+        };
+        let toml_path = manifest_dir.join("dotler.toml");
+        if !toml_path.is_file() {
+            return Err(EngineError::MissingRemoteToml {
+                url: raw_url.to_string(),
+            });
+        }
+        let rel_manifest_path = if rel_dir.is_empty() {
+            "dotler.toml".to_string()
+        } else {
+            format!("{rel_dir}/dotler.toml")
+        };
+        let config = load_and_validate_remote_manifest(&toml_path, REMOTE_TOML_FETCH_MAX_BYTES)?;
+        return Ok(vec![DiscoveredManifest {
+            rel_manifest_path,
+            manifest_dir,
+            config,
+        }]);
+    }
+
+    let mut found_paths: Vec<(usize, String, PathBuf, PathBuf)> = Vec::new();
+    for entry in walkdir::WalkDir::new(repo_root)
+        .into_iter()
+        .filter_entry(|e| e.file_name() != ".git")
+    {
+        let entry = entry.map_err(std::io::Error::from)?;
+        if entry.file_type().is_file() && entry.file_name() == "dotler.toml" {
+            let full_path = entry.path().to_path_buf();
+            let manifest_dir = full_path.parent().unwrap_or(repo_root).to_path_buf();
+            let rel_path = full_path
+                .strip_prefix(repo_root)
+                .unwrap_or(&full_path)
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            let depth = rel_path.matches('/').count();
+            found_paths.push((depth, rel_path, manifest_dir, full_path));
+        }
+    }
+
+    // Sort by BFS depth first (shallowest first), then Unicode code point order
+    found_paths.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+    if found_paths.is_empty() {
+        return Err(EngineError::MissingRemoteToml {
+            url: raw_url.to_string(),
+        });
+    }
+
+    let mut manifests = Vec::with_capacity(found_paths.len());
+    for (_depth, rel_manifest_path, manifest_dir, toml_path) in found_paths {
+        let config = load_and_validate_remote_manifest(&toml_path, REMOTE_TOML_FETCH_MAX_BYTES)?;
+        manifests.push(DiscoveredManifest {
+            rel_manifest_path,
+            manifest_dir,
+            config,
+        });
+    }
+
+    Ok(manifests)
+}
+
+fn build_manifest_summary(m: &DiscoveredManifest) -> RemoteManifestSummary {
     let mut groups = Vec::new();
-    for (group_name, group) in &repo_config.groups {
+    for (group_name, group) in &m.config.groups {
         let rules = parse_selection_rules(&group.files).unwrap_or_default();
         let has_encrypted = rules
             .iter()
@@ -318,11 +569,46 @@ pub fn list_remote(
         });
     }
 
+    RemoteManifestSummary {
+        path: m.rel_manifest_path.clone(),
+        groups,
+        has_vault: m.config.vault.is_some(),
+        vault_id: m.config.vault.as_ref().map(|v| v.vault_id.clone()),
+    }
+}
+
+pub fn list_remote(
+    url: &RemoteRepoUrl,
+    branch: Option<&str>,
+    _lock: &DotlerLockGuard,
+) -> Result<RemoteRepoSummary, EngineError> {
+    let local_path = if let Some(stripped) = url.clone_url.strip_prefix("file://") {
+        Path::new(stripped)
+    } else {
+        Path::new(&url.clone_url)
+    };
+    let is_bare = local_path.join("HEAD").is_file()
+        && local_path.join("objects").is_dir()
+        && !local_path.join(".git").exists();
+
+    let discovered = if local_path.is_dir() && !is_bare && branch.is_none() {
+        discover_manifests_in_tree(local_path, url.subpath.as_deref(), &url.raw)?
+    } else {
+        let temp_dir = TempDirGuard::new().map_err(EngineError::Io)?;
+        GitRunner::clone_shallow(&url.clone_url, branch, temp_dir.path())?;
+        discover_manifests_in_tree(temp_dir.path(), url.subpath.as_deref(), &url.raw)?
+    };
+
+    let manifests: Vec<RemoteManifestSummary> =
+        discovered.iter().map(build_manifest_summary).collect();
+    let primary = &manifests[0];
+
     Ok(RemoteRepoSummary {
         url: url.raw.clone(),
-        groups,
-        has_vault: repo_config.vault.is_some(),
-        vault_id: repo_config.vault.as_ref().map(|v| v.vault_id.clone()),
+        groups: primary.groups.clone(),
+        has_vault: primary.has_vault,
+        vault_id: primary.vault_id.clone(),
+        manifests,
     })
 }
 
@@ -364,16 +650,10 @@ pub fn clone_repo(
     let mut cleanup = AutoCleanup(&staging_dir, true);
 
     GitRunner::clone_shallow(&url.clone_url, branch, &staging_dir)?;
-    validate_dir_no_symlinks(&staging_dir)?;
-
-    let toml_path = staging_dir.join("dotler.toml");
-    if !toml_path.is_file() {
-        return Err(EngineError::MissingRemoteToml {
-            url: url.raw.clone(),
-        });
-    }
-    let repo_config = RepoConfig::load(&toml_path)?;
-    repo_config.validate()?;
+    let discovered = discover_manifests_in_tree(&staging_dir, url.subpath.as_deref(), &url.raw)?;
+    let primary = &discovered[0];
+    let repo_config = &primary.config;
+    let manifest_dir = &primary.manifest_dir;
 
     let selected_groups: Vec<String> = if selectors.is_empty() {
         repo_config.groups.keys().cloned().collect()
@@ -400,7 +680,7 @@ pub fn clone_repo(
     if let (Some(r_key), Some(l_key)) = (remote_vault_key, local_vault_key)
         && r_key.vault_id() != l_key.vault_id()
     {
-        for entry in walkdir::WalkDir::new(&staging_dir).min_depth(1) {
+        for entry in walkdir::WalkDir::new(manifest_dir).min_depth(1) {
             let entry = entry.map_err(std::io::Error::from)?;
             if entry.file_type().is_file()
                 && entry.path().extension().and_then(|s| s.to_str()) == Some("enc")
@@ -414,8 +694,16 @@ pub fn clone_repo(
         }
     }
 
-    fs::rename(&staging_dir, target_dir)?;
-    cleanup.1 = false; // Disarm cleanup
+    if manifest_dir == &staging_dir {
+        fs::rename(&staging_dir, target_dir)?;
+        cleanup.1 = false; // Disarm cleanup
+    } else {
+        if target_dir.exists() {
+            let _ = fs::remove_dir(target_dir);
+        }
+        fs::rename(manifest_dir, target_dir)?;
+        // Leave cleanup.1 = true so the outer staging_dir is removed on Drop
+    }
 
     if let Some(cfg_path) = local_config_path {
         let mut local_config = if cfg_path.is_file() {
@@ -467,16 +755,10 @@ pub fn install_remote(
 ) -> Result<InstallReport, EngineError> {
     let temp_dir = TempDirGuard::new().map_err(EngineError::Io)?;
     GitRunner::clone_shallow(&url.clone_url, branch, temp_dir.path())?;
-    validate_dir_no_symlinks(temp_dir.path())?;
-
-    let toml_path = temp_dir.path().join("dotler.toml");
-    if !toml_path.is_file() {
-        return Err(EngineError::MissingRemoteToml {
-            url: url.raw.clone(),
-        });
-    }
-    let repo_config = RepoConfig::load(&toml_path)?;
-    repo_config.validate()?;
+    let discovered = discover_manifests_in_tree(temp_dir.path(), url.subpath.as_deref(), &url.raw)?;
+    let primary = &discovered[0];
+    let repo_config = &primary.config;
+    let manifest_dir = &primary.manifest_dir;
 
     let target_groups: Vec<String> = if groups.is_empty() {
         repo_config.groups.keys().cloned().collect()
@@ -544,7 +826,7 @@ pub fn install_remote(
         let home = resolve_home_for_state(state);
         validate_os_dir_path(&target_base, &home)?;
 
-        let group_dir = temp_dir.path().join(g_name);
+        let group_dir = manifest_dir.join(g_name);
         if !group_dir.is_dir() {
             continue;
         }

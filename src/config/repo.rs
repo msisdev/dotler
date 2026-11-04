@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -156,6 +156,203 @@ pub fn validate_path_security(path: &str) -> Result<(), ConfigError> {
             path: path.to_string(),
             reason: "path cannot target .git directories".to_string(),
         });
+    }
+
+    Ok(())
+}
+
+/// Returns true if `path` itself is a symbolic link (including broken/dangling links).
+pub fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+/// Rejects any symbolic link (file, directory, or broken link) inside a repository directory.
+pub fn validate_dir_no_symlinks(dir: &Path) -> Result<(), ConfigError> {
+    if is_symlink(dir) {
+        return Err(ConfigError::HardBlockedPath {
+            path: dir.display().to_string(),
+            reason: "symbolic links are prohibited inside a dotler repository".to_string(),
+        });
+    }
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in walkdir::WalkDir::new(dir) {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let p = entry.path();
+        if p.components().any(|c| c.as_os_str() == ".git") {
+            continue;
+        }
+        if entry.file_type().is_symlink() || is_symlink(p) {
+            return Err(ConfigError::HardBlockedPath {
+                path: p.display().to_string(),
+                reason: "symbolic links are prohibited inside a dotler repository".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn normalize_lexical_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn resolve_with_existing_ancestors(path: &Path) -> PathBuf {
+    let lexical = normalize_lexical_path(path);
+    let mut current = lexical.as_path();
+    while let Some(parent) = current.parent() {
+        if current.exists() {
+            if let Ok(canon) = fs::canonicalize(current)
+                && let Ok(tail) = lexical.strip_prefix(current)
+            {
+                if tail.as_os_str().is_empty() {
+                    return canon;
+                }
+                return normalize_lexical_path(&canon.join(tail));
+            }
+            break;
+        }
+        if parent == current {
+            break;
+        }
+        current = parent;
+    }
+    lexical
+}
+
+fn check_within_home_and_unprotected(
+    original_path: &Path,
+    resolved_path: &Path,
+    canonical_home: &Path,
+    canonical_dotler_dir: &Path,
+) -> Result<(), ConfigError> {
+    if !resolved_path.starts_with(canonical_home) {
+        return Err(ConfigError::HardBlockedPath {
+            path: original_path.display().to_string(),
+            reason: format!(
+                "symbolic link target '{}' escapes home directory ('~')",
+                resolved_path.display()
+            ),
+        });
+    }
+    if resolved_path == canonical_dotler_dir || resolved_path.starts_with(canonical_dotler_dir) {
+        return Err(ConfigError::HardBlockedPath {
+            path: original_path.display().to_string(),
+            reason: "symbolic link target cannot point inside ~/.config/dotler".to_string(),
+        });
+    }
+    if let Ok(rel) = resolved_path.strip_prefix(canonical_home)
+        && rel.components().any(|c| c.as_os_str() == ".git")
+    {
+        return Err(ConfigError::HardBlockedPath {
+            path: original_path.display().to_string(),
+            reason: "symbolic link target cannot point inside a .git directory".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validates that an OS target directory (and its existing ancestors) stays within `home_dir`.
+pub fn validate_os_dir_path(target_dir: &Path, home_dir: &Path) -> Result<(), ConfigError> {
+    let canonical_home =
+        fs::canonicalize(home_dir).unwrap_or_else(|_| normalize_lexical_path(home_dir));
+    let canonical_dotler_dir = canonical_home.join(".config").join("dotler");
+
+    let mut curr_opt = Some(target_dir);
+    while let Some(curr) = curr_opt {
+        if is_symlink(curr) && !curr.exists() {
+            return Err(ConfigError::HardBlockedPath {
+                path: target_dir.display().to_string(),
+                reason: format!(
+                    "directory path '{}' is a broken symbolic link",
+                    curr.display()
+                ),
+            });
+        }
+        if curr.exists() {
+            let canonical_curr = fs::canonicalize(curr)?;
+            check_within_home_and_unprotected(
+                target_dir,
+                &canonical_curr,
+                &canonical_home,
+                &canonical_dotler_dir,
+            )?;
+            if !canonical_curr.is_dir() {
+                return Err(ConfigError::HardBlockedPath {
+                    path: target_dir.display().to_string(),
+                    reason: format!(
+                        "target directory path '{}' is not a directory",
+                        curr.display()
+                    ),
+                });
+            }
+            break;
+        }
+        curr_opt = curr.parent();
+    }
+    Ok(())
+}
+
+/// Validates that an OS target file path (and its ancestors) does not escape `home_dir`
+/// or enter protected directories via symbolic links.
+pub fn validate_os_target_path(target_os_path: &Path, home_dir: &Path) -> Result<(), ConfigError> {
+    let canonical_home =
+        fs::canonicalize(home_dir).unwrap_or_else(|_| normalize_lexical_path(home_dir));
+    let canonical_dotler_dir = canonical_home.join(".config").join("dotler");
+
+    if let Some(parent) = target_os_path.parent() {
+        validate_os_dir_path(parent, home_dir)?;
+    }
+
+    if is_symlink(target_os_path) {
+        if target_os_path.exists() {
+            let canonical_target = fs::canonicalize(target_os_path)?;
+            check_within_home_and_unprotected(
+                target_os_path,
+                &canonical_target,
+                &canonical_home,
+                &canonical_dotler_dir,
+            )?;
+            if !canonical_target.is_file() {
+                return Err(ConfigError::HardBlockedPath {
+                    path: target_os_path.display().to_string(),
+                    reason: "symbolic link at target file path must point to a regular file"
+                        .to_string(),
+                });
+            }
+        } else {
+            let link_target = fs::read_link(target_os_path)?;
+            let parent = target_os_path.parent().unwrap_or(home_dir);
+            let canonical_parent =
+                fs::canonicalize(parent).unwrap_or_else(|_| normalize_lexical_path(parent));
+            let joined = if link_target.is_absolute() {
+                link_target
+            } else {
+                canonical_parent.join(link_target)
+            };
+            let resolved = resolve_with_existing_ancestors(&joined);
+            check_within_home_and_unprotected(
+                target_os_path,
+                &resolved,
+                &canonical_home,
+                &canonical_dotler_dir,
+            )?;
+        }
     }
 
     Ok(())
@@ -399,6 +596,12 @@ impl RepoConfig {
     }
 
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        if is_symlink(path) {
+            return Err(ConfigError::HardBlockedPath {
+                path: path.display().to_string(),
+                reason: "symbolic links are prohibited inside a dotler repository".to_string(),
+            });
+        }
         let content = fs::read_to_string(path)?;
         Self::parse(&content)
     }

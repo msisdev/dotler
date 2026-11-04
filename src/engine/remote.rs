@@ -14,8 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::local::{LocalConfig, expand_tilde};
 use crate::config::repo::{
-    OsInfo, RepoConfig, SelectionMode, evaluate_selection, parse_selection_rules,
-    resolve_group_target_path, validate_path_security,
+    OsInfo, RepoConfig, SelectionMode, evaluate_selection, is_symlink, parse_selection_rules,
+    resolve_group_target_path, validate_dir_no_symlinks, validate_os_dir_path,
+    validate_os_target_path, validate_path_security,
 };
 use crate::config::state::{BACKUPS_DIR_PATH, DotlerLockGuard, InstalledFileRecord, StateDb};
 use crate::crypto::vault::{EncryptedFile, VaultKey};
@@ -236,6 +237,12 @@ impl GitRunner {
 
         if local_path.is_dir() {
             let direct_file = local_path.join(file_path);
+            if is_symlink(&direct_file) {
+                return Err(EngineError::HardBlockedPath {
+                    path: direct_file,
+                    reason: "symbolic links are prohibited inside a dotler repository".to_string(),
+                });
+            }
             if direct_file.is_file() {
                 let metadata = fs::metadata(&direct_file)?;
                 if metadata.len() as usize > max_bytes {
@@ -252,6 +259,12 @@ impl GitRunner {
         Self::clone_shallow(url, branch, temp_dir.path())?;
 
         let target_file = temp_dir.path().join(file_path);
+        if is_symlink(&target_file) {
+            return Err(EngineError::HardBlockedPath {
+                path: target_file,
+                reason: "symbolic links are prohibited inside a dotler repository".to_string(),
+            });
+        }
         if !target_file.is_file() {
             return Err(EngineError::MissingRemoteToml {
                 url: url.to_string(),
@@ -351,6 +364,7 @@ pub fn clone_repo(
     let mut cleanup = AutoCleanup(&staging_dir, true);
 
     GitRunner::clone_shallow(&url.clone_url, branch, &staging_dir)?;
+    validate_dir_no_symlinks(&staging_dir)?;
 
     let toml_path = staging_dir.join("dotler.toml");
     if !toml_path.is_file() {
@@ -453,6 +467,7 @@ pub fn install_remote(
 ) -> Result<InstallReport, EngineError> {
     let temp_dir = TempDirGuard::new().map_err(EngineError::Io)?;
     GitRunner::clone_shallow(&url.clone_url, branch, temp_dir.path())?;
+    validate_dir_no_symlinks(temp_dir.path())?;
 
     let toml_path = temp_dir.path().join("dotler.toml");
     if !toml_path.is_file() {
@@ -526,6 +541,9 @@ pub fn install_remote(
             }
         };
 
+        let home = resolve_home_for_state(state);
+        validate_os_dir_path(&target_base, &home)?;
+
         let group_dir = temp_dir.path().join(g_name);
         if !group_dir.is_dir() {
             continue;
@@ -535,6 +553,12 @@ pub fn install_remote(
 
         for entry in walkdir::WalkDir::new(&group_dir).min_depth(1) {
             let entry = entry.map_err(std::io::Error::from)?;
+            if entry.file_type().is_symlink() || is_symlink(entry.path()) {
+                return Err(EngineError::HardBlockedPath {
+                    path: entry.path().to_path_buf(),
+                    reason: "symbolic links are prohibited inside a dotler repository".to_string(),
+                });
+            }
             if entry.file_type().is_dir() {
                 continue;
             }
@@ -553,6 +577,7 @@ pub fn install_remote(
             };
 
             let target_file_path = target_base.join(&clean_rel);
+            validate_os_target_path(&target_file_path, &home)?;
             let target_str = target_file_path.to_string_lossy().to_string();
 
             // 1. Check existing installed_files record to preserve original backup
@@ -632,7 +657,7 @@ pub fn uninstall_remote(
                 restored_backups.push(target);
             } else {
                 if !dry_run {
-                    if target.is_file() {
+                    if target.is_file() || is_symlink(&target) {
                         let _ = fs::remove_file(&target);
                     }
                     state.remove_installed_file(&record.target_path)?;
@@ -641,7 +666,7 @@ pub fn uninstall_remote(
             }
         } else {
             if !dry_run {
-                if target.is_file() {
+                if target.is_file() || is_symlink(&target) {
                     let _ = fs::remove_file(&target);
                 }
                 state.remove_installed_file(&record.target_path)?;

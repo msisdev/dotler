@@ -14,8 +14,9 @@ use serde::{Deserialize, Serialize};
 use crate::config::StateError;
 use crate::config::local::expand_tilde;
 use crate::config::repo::{
-    OsInfo, RepoConfig, SelectionMode, evaluate_selection, parse_selection_rules,
-    resolve_group_target_path,
+    OsInfo, RepoConfig, SelectionMode, evaluate_selection, is_symlink, parse_selection_rules,
+    resolve_group_target_path, validate_dir_no_symlinks, validate_os_dir_path,
+    validate_os_target_path,
 };
 pub use crate::config::state::{ATOMIC_REPLACE_RETRIES, TMP_FILE_PREFIX};
 use crate::config::state::{
@@ -111,6 +112,14 @@ impl<'a> SyncEngine<'a> {
         self
     }
 
+    fn effective_home_dir(&self) -> PathBuf {
+        if let Some(ref home) = self.home_dir {
+            home.clone()
+        } else {
+            expand_tilde("~")
+        }
+    }
+
     fn expand_target_base(&self, base_str: &str) -> PathBuf {
         if let Some(ref home) = self.home_dir {
             if base_str == "~" {
@@ -132,6 +141,7 @@ impl<'a> SyncEngine<'a> {
         _lock: &DotlerLockGuard,
     ) -> Result<Vec<FileActionPlan>, EngineError> {
         let mut plans = Vec::new();
+        let home_dir = self.effective_home_dir();
 
         for (group_name, group_cfg) in &self.repo_config.groups {
             if let Some(filter) = group_filter
@@ -151,8 +161,9 @@ impl<'a> SyncEngine<'a> {
             // 1. Gather candidate relative paths
             let mut candidates = BTreeSet::new();
 
-            // Repo scan
+            // Repo scan (strictly reject any symbolic links inside repository)
             let group_repo_dir = self.repo_dir.join(group_name);
+            validate_dir_no_symlinks(&group_repo_dir)?;
             if group_repo_dir.is_dir() {
                 for entry in walkdir::WalkDir::new(&group_repo_dir)
                     .into_iter()
@@ -196,6 +207,7 @@ impl<'a> SyncEngine<'a> {
             }
 
             // OS directory scan
+            validate_os_dir_path(&target_base_path, &home_dir)?;
             if target_base_path.is_dir() {
                 let dotler_config_dir = if let Some(ref home) = self.home_dir {
                     home.join(".config").join("dotler")
@@ -233,7 +245,9 @@ impl<'a> SyncEngine<'a> {
                     })
                     .filter_map(|e| e.ok())
                 {
-                    if entry.file_type().is_file() {
+                    if entry.file_type().is_file()
+                        || (entry.file_type().is_symlink() && !entry.path().is_dir())
+                    {
                         let file_name = entry.file_name().to_string_lossy();
                         if file_name.starts_with(TMP_FILE_PREFIX) {
                             continue;
@@ -295,6 +309,8 @@ impl<'a> SyncEngine<'a> {
                     }
                     continue;
                 }
+
+                validate_os_target_path(&target_os_path, &home_dir)?;
 
                 let is_encrypted = mode == Some(SelectionMode::EncryptedInclude);
                 let plain_repo_path = group_repo_dir.join(&rel_path);
@@ -386,8 +402,24 @@ impl<'a> SyncEngine<'a> {
         dry_run: bool,
     ) -> Result<SyncReport, EngineError> {
         let mut report = SyncReport::default();
+        let home_dir = self.effective_home_dir();
 
         for plan in plans {
+            if is_symlink(&plan.repo_file_path) {
+                return Err(EngineError::HardBlockedPath {
+                    path: plan.repo_file_path.clone(),
+                    reason: "symbolic links are prohibited inside a dotler repository".to_string(),
+                });
+            }
+            validate_os_target_path(&plan.target_os_path, &home_dir)?;
+
+            if is_symlink(&plan.target_os_path) && !plan.target_os_path.is_file() {
+                return Err(EngineError::HardBlockedPath {
+                    path: plan.target_os_path.clone(),
+                    reason: "broken symbolic link at OS target path cannot be imported".to_string(),
+                });
+            }
+
             if !plan.target_os_path.is_file() {
                 continue;
             }
@@ -519,8 +551,16 @@ impl<'a> SyncEngine<'a> {
         dry_run: bool,
     ) -> Result<SyncReport, EngineError> {
         let mut report = SyncReport::default();
+        let home_dir = self.effective_home_dir();
 
         for plan in plans {
+            if is_symlink(&plan.repo_file_path) {
+                return Err(EngineError::HardBlockedPath {
+                    path: plan.repo_file_path.clone(),
+                    reason: "symbolic links are prohibited inside a dotler repository".to_string(),
+                });
+            }
+
             if plan.status == FileSyncStatus::EncryptionMismatch {
                 return Err(EngineError::EncryptionMismatch {
                     path: plan.repo_file_path.clone(),
@@ -534,6 +574,8 @@ impl<'a> SyncEngine<'a> {
             if !plan.repo_file_path.is_file() {
                 continue;
             }
+
+            validate_os_target_path(&plan.target_os_path, &home_dir)?;
 
             // Read repo plaintext
             let plaintext_bytes = if plan.is_encrypted {
@@ -550,12 +592,13 @@ impl<'a> SyncEngine<'a> {
 
             let repo_hash = blake3::hash(&plaintext_bytes).to_hex().to_string();
 
-            // Hash-Match Idempotency
+            // Hash-Match Idempotency (always materialize if target is currently a symlink)
+            let target_is_symlink = is_symlink(&plan.target_os_path);
             if plan.target_os_path.is_file() {
                 let os_bytes = fs::read(&plan.target_os_path)?;
                 let os_hash = blake3::hash(&os_bytes).to_hex().to_string();
 
-                if os_hash == repo_hash {
+                if os_hash == repo_hash && !target_is_symlink {
                     if !dry_run {
                         let now = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
@@ -575,7 +618,8 @@ impl<'a> SyncEngine<'a> {
                 }
 
                 // Conflict detection
-                if !force
+                if os_hash != repo_hash
+                    && !force
                     && (plan.status == FileSyncStatus::ModifiedLocally
                         || plan.status == FileSyncStatus::Conflict
                         || (plan.db_hash.is_some() && plan.db_hash.as_deref() != Some(&os_hash)))
@@ -657,6 +701,7 @@ impl<'a> SyncEngine<'a> {
             }
 
             let group_repo_dir = self.repo_dir.join(group_name);
+            validate_dir_no_symlinks(&group_repo_dir)?;
             if !group_repo_dir.is_dir() {
                 continue;
             }
@@ -765,7 +810,7 @@ impl<'a> SyncEngine<'a> {
             let orphan_path = PathBuf::from(&orphan_path_str);
             match policy {
                 TidyOrphanPolicy::PurgeFromOs => {
-                    if orphan_path.is_file() && !dry_run {
+                    if (orphan_path.is_file() || is_symlink(&orphan_path)) && !dry_run {
                         let _ = fs::remove_file(&orphan_path);
                     }
                     if !dry_run {

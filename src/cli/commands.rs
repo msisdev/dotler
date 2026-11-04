@@ -649,7 +649,8 @@ fn handle_check<W: Write>(
     };
     repo_cfg.detect_cross_group_collisions(&devices, &os_info)?;
 
-    // Check repository files for encryption mismatch
+    // Check repository files for symlinks and encryption mismatch
+    let home_dir = expand_tilde("~");
     for (g_name, g_cfg) in &repo_cfg.groups {
         if let Some(ref filter) = args.group
             && filter != g_name
@@ -657,6 +658,13 @@ fn handle_check<W: Write>(
             continue;
         }
         let group_repo_dir = repo_path.join(g_name);
+        crate::config::repo::validate_dir_no_symlinks(&group_repo_dir)?;
+        if let Some(target_base_str) =
+            crate::config::repo::resolve_group_target_path(g_cfg, &devices, &os_info)
+        {
+            let target_base_path = expand_tilde(&target_base_str);
+            crate::config::repo::validate_os_dir_path(&target_base_path, &home_dir)?;
+        }
         if !group_repo_dir.is_dir() {
             continue;
         }

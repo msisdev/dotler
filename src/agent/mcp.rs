@@ -370,6 +370,9 @@ fn dispatch_tool(
                 }
                 parse_selection_rules(&g_cfg.files)
                     .map_err(|e| format!("Selection rule syntax error in group '{g_name}': {e}"))?;
+                let group_repo_dir = repo_path.join(g_name);
+                crate::config::repo::validate_dir_no_symlinks(&group_repo_dir)
+                    .map_err(|e| format!("Security check failed in group '{g_name}': {e}"))?;
             }
 
             Ok(ToolCallResult {

@@ -26,3 +26,7 @@ dotler git <ls | clone | install | uninstall>
 dotler ai
 dotler mcp
 ```
+
+---
+
+*This project was generated with AI.*

@@ -1,12 +1,30 @@
 # Introduction
 
-**Dotler** is a dotfile manager.
+**dotler** is a dotfile manager.
 
-A dotfile manager collects configuration files scattered across your system into a single Git repository and deploys them across your machines.
+A dotfile manager collects configuration files (= dotfiles) scattered across your file system into a single Git repository so you can deploy them across your machines.
 
 ## Core Features
 
-- **Configuration**: Select dotfiles in `dotler.toml` and sync them with `dotler import` and `dotler export`.
-- **Encryption**: Store your passphrase in the OS keyring and mark files with `encrypt` in `dotler.toml` to encrypt and decrypt them automatically.
-- **Git Sharing**: Publish your repository to Git and clone or install your dotfiles onto any machine with a single command.
-- **AI-Ready**: AI-friendly terminal output (`--json`, `dotler ai`), automatic `SKILL.md` generation, and a built-in MCP server (`dotler mcp`).
+**Configuration**
+- Select dotfiles in `dotler.toml` file.
+- `dotler import` to import dotfiles from file system to dotler directory.
+- `dotler export` to export dotfiles from dotler directory to file system.
+
+
+**Encryption**
+- Protect your files with passphrase.
+- Mark files with `encrypt` attribute in `dotler.toml`.
+- `dotler import`/`dotler export` will encrypt/decrypt them automatically.
+
+
+**Git Sharing**
+- Publish your dotler repository to Git.
+- `dotler git clone` will copy dotfiles from remote to current dotler directory.
+- `dotler git install` will copy dotfiles from remote to your OS dotfile.
+
+
+**AI-Ready**
+- AI-friendly terminal output (`--json`, `dotler ai`).
+- Automatic `SKILL.md` generation.
+- Built-in MCP server (`dotler mcp`).

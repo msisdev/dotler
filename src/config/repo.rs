@@ -606,7 +606,36 @@ impl RepoConfig {
         Self::parse(&content)
     }
 
+    pub fn load_without_vault_check(path: &Path) -> Result<Self, ConfigError> {
+        if is_symlink(path) {
+            return Err(ConfigError::HardBlockedPath {
+                path: path.display().to_string(),
+                reason: "symbolic links are prohibited inside a dotler repository".to_string(),
+            });
+        }
+        let content = fs::read_to_string(path)?;
+        let repo: RepoConfig = toml::from_str(&content).map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("unknown field") {
+                ConfigError::UnknownField {
+                    field: msg.clone(),
+                    hint:
+                        "Check dotler.toml for unexpected fields in [vault] or group definitions."
+                            .to_string(),
+                }
+            } else {
+                ConfigError::TomlSyntaxError(msg)
+            }
+        })?;
+        repo.validate_inner(false)?;
+        Ok(repo)
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_inner(true)
+    }
+
+    fn validate_inner(&self, require_vault: bool) -> Result<(), ConfigError> {
         let mut has_encrypted_rules = false;
 
         for (group_name, group) in &self.groups {
@@ -642,7 +671,7 @@ impl RepoConfig {
             }
         }
 
-        if has_encrypted_rules && self.vault.is_none() {
+        if require_vault && has_encrypted_rules && self.vault.is_none() {
             return Err(ConfigError::MissingVaultConfig);
         }
 
@@ -1256,5 +1285,25 @@ os-linux = "~/.config/app"
         assert!(validate_rule_pattern(".gitconfig").is_ok());
         assert!(validate_rule_pattern("custom.conf").is_ok());
         assert!(validate_rule_pattern("*.conf").is_ok());
+    }
+
+    #[test]
+    fn test_load_without_vault_check_allows_encrypted_rules_before_vault_init() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("dotler.toml");
+        fs::write(
+            &manifest_path,
+            "[shell]\nos-linux = \"~\"\nfiles = \"secret.txt encrypt\"\n",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            RepoConfig::load(&manifest_path),
+            Err(ConfigError::MissingVaultConfig)
+        ));
+        let loaded = RepoConfig::load_without_vault_check(&manifest_path)
+            .expect("load_without_vault_check must allow encrypted rules before vault init");
+        assert!(loaded.vault.is_none());
+        assert!(loaded.groups.contains_key("shell"));
     }
 }

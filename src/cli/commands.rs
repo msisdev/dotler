@@ -964,7 +964,7 @@ fn handle_vault<W: Write>(
         VaultCommand::Init(args) => {
             let (_label, repo_path) = resolve_repo_path(&local_cfg, cli.repo.as_deref())?;
             let manifest_path = repo_path.join("dotler.toml");
-            let repo_cfg = RepoConfig::load(&manifest_path)?;
+            let repo_cfg = RepoConfig::load_without_vault_check(&manifest_path)?;
 
             if repo_cfg.vault.is_some() {
                 return Err(EngineError::Config(crate::config::ConfigError::UnknownField {
@@ -1132,12 +1132,19 @@ fn resolve_repo_path(
 ) -> Result<(String, PathBuf), EngineError> {
     if requested_label.is_none() {
         let current_dir = std::env::current_dir()?;
-        if current_dir.join("dotler.toml").is_file() {
-            let label = current_dir
+        if let Some(repo_dir) = crate::config::local::find_ancestor_repo_dir(&current_dir) {
+            let canon_repo = fs::canonicalize(&repo_dir).unwrap_or_else(|_| repo_dir.clone());
+            if let Some((reg_label, _)) = local_cfg.repos.iter().find(|(_, p)| {
+                let exp = expand_tilde(p);
+                fs::canonicalize(&exp).unwrap_or(exp) == canon_repo
+            }) {
+                return Ok((reg_label.clone(), repo_dir));
+            }
+            let label = repo_dir
                 .file_name()
                 .map(|f| f.to_string_lossy().to_string())
                 .unwrap_or_else(|| "default".to_string());
-            return Ok((label, current_dir));
+            return Ok((label, repo_dir));
         }
     }
 
@@ -1166,18 +1173,18 @@ fn rotate_vault_passphrases(
         }
 
         if let Ok(current_dir) = std::env::current_dir()
-            && current_dir.join("dotler.toml").is_file()
+            && let Some(repo_dir) = crate::config::local::find_ancestor_repo_dir(&current_dir)
         {
-            let canon_cwd = fs::canonicalize(&current_dir).unwrap_or_else(|_| current_dir.clone());
+            let canon_cwd = fs::canonicalize(&repo_dir).unwrap_or_else(|_| repo_dir.clone());
             let already_listed = candidates
                 .iter()
                 .any(|(_, p)| fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == canon_cwd);
             if !already_listed {
-                let cwd_label = current_dir
+                let cwd_label = repo_dir
                     .file_name()
                     .map(|f| f.to_string_lossy().to_string())
                     .unwrap_or_else(|| "current".to_string());
-                candidates.push((cwd_label, current_dir));
+                candidates.push((cwd_label, repo_dir));
             }
         }
     }

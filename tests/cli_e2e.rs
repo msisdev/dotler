@@ -779,3 +779,83 @@ fn test_e2e_vault_passwd_rotates_all_matching_registered_repos() {
         serde_json::json!(["personal", "work"])
     );
 }
+
+#[test]
+fn test_e2e_ancestor_dotler_toml_detection_and_vault_init_with_encrypt_rule() {
+    let sandbox = E2eSandbox::new();
+
+    // 1. Initialize repository
+    let init_out = sandbox.cmd().args(["init", "--json"]).output().unwrap();
+    assert_eq!(init_out.status.code(), Some(0));
+
+    // 2. Write dotler.toml with `encrypt` BEFORE `dotler vault init`
+    let toml_with_enc = r#"[shell]
+os-linux = "~"
+os-macos = "~"
+os-windows = "~"
+files = """
+secret.txt encrypt
+"""
+"#;
+    fs::write(sandbox.repo_dir.join("dotler.toml"), toml_with_enc).unwrap();
+    fs::write(sandbox.home_dir.join("secret.txt"), "top-secret\n").unwrap();
+
+    // 3. Running `dotler import` before `dotler vault init` must fail with code 2 and hint 'dotler vault init'
+    let subdir = sandbox.repo_dir.join("shell").join("nested");
+    fs::create_dir_all(&subdir).unwrap();
+
+    let import_before_vault = Command::new(env!("CARGO_BIN_EXE_dotler"))
+        .env("HOME", &sandbox.home_dir)
+        .current_dir(&subdir)
+        .args(["import", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(import_before_vault.status.code(), Some(2));
+    let err_json: Value = serde_json::from_slice(&import_before_vault.stdout).unwrap();
+    assert!(
+        err_json["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("dotler vault init"),
+        "hint must instruct user to run 'dotler vault init': {err_json}"
+    );
+
+    // 4. Running `dotler vault init` from nested subdirectory must detect ancestor dotler.toml
+    //    AND succeed even though `encrypt` rule is already in dotler.toml!
+    let mut vault_child = Command::new(env!("CARGO_BIN_EXE_dotler"))
+        .env("HOME", &sandbox.home_dir)
+        .current_dir(&subdir)
+        .args(["vault", "init", "--password-stdin", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Some(mut stdin) = vault_child.stdin.take() {
+        writeln!(stdin, "ancestor_vault_pass_123").unwrap();
+    }
+    let vault_out = vault_child.wait_with_output().unwrap();
+    assert_eq!(
+        vault_out.status.code(),
+        Some(0),
+        "vault init must succeed when encrypt rule is already present: {}",
+        String::from_utf8_lossy(&vault_out.stdout)
+    );
+
+    // 5. Running `dotler import` from nested subdirectory now succeeds using ancestor dotler.toml
+    let import_after = Command::new(env!("CARGO_BIN_EXE_dotler"))
+        .env("HOME", &sandbox.home_dir)
+        .env("DOTLER_PASSPHRASE", "ancestor_vault_pass_123")
+        .current_dir(&subdir)
+        .args(["import", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(import_after.status.code(), Some(0));
+    assert!(
+        sandbox
+            .repo_dir
+            .join("shell")
+            .join("secret.txt.enc")
+            .is_file()
+    );
+}

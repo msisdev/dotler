@@ -204,6 +204,9 @@ impl CliError {
                     "Target '{path}' is claimed by both '{group1}' and '{group2}'. Disambiguate with explicit pattern negation (!{path})."
                 )
             }
+            CliError::Config(crate::config::ConfigError::MissingVaultConfig) => {
+                "Run 'dotler vault init' to initialize vault encryption before syncing encrypted files.".to_string()
+            }
             CliError::Config(e) => format!("Fix configuration error: {e}"),
             CliError::Lock(crate::config::LockError::Timeout { .. }) => {
                 "Another dotler process holds ~/.config/dotler/dotler.lock. Wait for it to complete or terminate stale processes.".to_string()
@@ -320,10 +323,24 @@ impl InlineRender for crate::engine::remote::RemoteRepoSummary {
     fn render_inline(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!("Remote Repository: {}\n", self.url));
-        out.push_str(&format!("Vault Configured: {}\n", self.has_vault));
-        out.push_str("Groups:\n");
-        for g in &self.groups {
-            out.push_str(&format!("  - {} (targets: {:?})\n", g.name, g.target_paths));
+        if self.manifests.is_empty() {
+            out.push_str(&format!("Vault Configured: {}\n", self.has_vault));
+            out.push_str("Groups:\n");
+            for g in &self.groups {
+                out.push_str(&format!("  - {} (targets: {:?})\n", g.name, g.target_paths));
+            }
+        } else {
+            for m in &self.manifests {
+                out.push_str(&format!("Manifest: {}\n", m.path));
+                out.push_str(&format!("  Vault Configured: {}\n", m.has_vault));
+                out.push_str("  Groups:\n");
+                for g in &m.groups {
+                    out.push_str(&format!(
+                        "    - {} (targets: {:?})\n",
+                        g.name, g.target_paths
+                    ));
+                }
+            }
         }
         out
     }

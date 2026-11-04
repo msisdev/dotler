@@ -23,6 +23,15 @@ pub fn expand_tilde(path: &str) -> PathBuf {
     }
 }
 
+/// Searches `start_dir` and its parent directories upward for a `dotler.toml` manifest.
+/// Returns the directory containing the nearest `dotler.toml`, if found.
+pub fn find_ancestor_repo_dir(start_dir: &Path) -> Option<PathBuf> {
+    start_dir
+        .ancestors()
+        .find(|dir| dir.join("dotler.toml").is_file())
+        .map(Path::to_path_buf)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LocalConfig {
@@ -508,5 +517,19 @@ devices = ["laptop"]
 
         let loaded = LocalConfig::load(&config_path).expect("loaded config must succeed");
         assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn test_find_ancestor_repo_dir_walks_upward_to_nearest_dotler_toml() {
+        let dir = tempdir().expect("tempdir");
+        let repo_root = dir.path().join("my-dotfiles");
+        let nested_sub = repo_root.join("nvim").join("lua").join("plugins");
+        fs::create_dir_all(&nested_sub).unwrap();
+
+        assert_eq!(find_ancestor_repo_dir(&nested_sub), None);
+
+        fs::write(repo_root.join("dotler.toml"), "[nvim]\nfiles = \"*\"\n").unwrap();
+        assert_eq!(find_ancestor_repo_dir(&nested_sub), Some(repo_root.clone()));
+        assert_eq!(find_ancestor_repo_dir(&repo_root), Some(repo_root));
     }
 }

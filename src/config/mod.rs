@@ -2,7 +2,9 @@ pub mod local;
 pub mod repo;
 pub mod state;
 
-pub use local::{LOCAL_CONFIG_DIR, LOCAL_CONFIG_FILE, LocalConfig, RESERVED_OS_PREFIX};
+pub use local::{
+    LOCAL_CONFIG_DIR, LOCAL_CONFIG_FILE, LocalConfig, RESERVED_OS_PREFIX, find_ancestor_repo_dir,
+};
 pub use repo::{GroupConfig, OsInfo, RepoConfig, SelectionMode, SelectionRule, VaultConfig};
 pub use state::{
     ATOMIC_REPLACE_RETRIES, BACKUPS_DIR_PATH, DOTLER_LOCK_PATH, DOTLER_LOCK_POLL_INTERVAL_MS,

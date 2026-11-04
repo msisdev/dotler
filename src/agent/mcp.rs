@@ -349,8 +349,7 @@ fn dispatch_tool(
             let group_arg = args.get("group").and_then(Value::as_str);
 
             let local_cfg = load_or_default_local_config();
-            let (_label, repo_path) = local_cfg
-                .resolve_repo(repo_arg)
+            let (_label, repo_path) = resolve_mcp_repo(&local_cfg, repo_arg)
                 .map_err(|e| format!("Configuration error: {e}"))?;
 
             let manifest_path = repo_path.join("dotler.toml");
@@ -392,8 +391,7 @@ fn dispatch_tool(
             let group_arg = args.get("group").and_then(Value::as_str);
 
             let local_cfg = load_or_default_local_config();
-            let (label, repo_path) = local_cfg
-                .resolve_repo(repo_arg)
+            let (label, repo_path) = resolve_mcp_repo(&local_cfg, repo_arg)
                 .map_err(|e| format!("Configuration error: {e}"))?;
 
             let manifest_path = repo_path.join("dotler.toml");
@@ -439,8 +437,7 @@ fn dispatch_tool(
                 .unwrap_or(false);
 
             let local_cfg = load_or_default_local_config();
-            let (label, repo_path) = local_cfg
-                .resolve_repo(repo_arg)
+            let (label, repo_path) = resolve_mcp_repo(&local_cfg, repo_arg)
                 .map_err(|e| format!("Configuration error: {e}"))?;
 
             let manifest_path = repo_path.join("dotler.toml");
@@ -499,8 +496,7 @@ fn dispatch_tool(
                 .unwrap_or(false);
 
             let local_cfg = load_or_default_local_config();
-            let (label, repo_path) = local_cfg
-                .resolve_repo(repo_arg)
+            let (label, repo_path) = resolve_mcp_repo(&local_cfg, repo_arg)
                 .map_err(|e| format!("Configuration error: {e}"))?;
 
             let manifest_path = repo_path.join("dotler.toml");
@@ -583,8 +579,7 @@ fn dispatch_tool(
             };
 
             let local_cfg = load_or_default_local_config();
-            let (label, repo_path) = local_cfg
-                .resolve_repo(repo_arg)
+            let (label, repo_path) = resolve_mcp_repo(&local_cfg, repo_arg)
                 .map_err(|e| format!("Configuration error: {e}"))?;
 
             let manifest_path = repo_path.join("dotler.toml");
@@ -652,6 +647,31 @@ fn load_or_default_local_config() -> LocalConfig {
     } else {
         LocalConfig::default()
     }
+}
+
+fn resolve_mcp_repo(
+    local_cfg: &LocalConfig,
+    requested_label: Option<&str>,
+) -> Result<(String, std::path::PathBuf), crate::config::ConfigError> {
+    if requested_label.is_none()
+        && let Ok(current_dir) = std::env::current_dir()
+        && let Some(repo_dir) = crate::config::local::find_ancestor_repo_dir(&current_dir)
+    {
+        let canon_repo = fs::canonicalize(&repo_dir).unwrap_or_else(|_| repo_dir.clone());
+        if let Some((reg_label, _)) = local_cfg.repos.iter().find(|(_, p)| {
+            let exp = expand_tilde(p);
+            fs::canonicalize(&exp).unwrap_or(exp) == canon_repo
+        }) {
+            return Ok((reg_label.clone(), repo_dir));
+        }
+        let label = repo_dir
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| "default".to_string());
+        return Ok((label, repo_dir));
+    }
+
+    local_cfg.resolve_repo(requested_label)
 }
 
 fn try_unlock_vault(repo_cfg: &RepoConfig) -> Option<VaultKey> {

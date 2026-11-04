@@ -1,5 +1,8 @@
 # Introduction
 
+> **Warning: Experimental / Pre-Release**
+> `dotler` is currently under active experimentation and has **not** been officially released yet. Commands, configuration formats, and behavior may change without notice.
+
 **dotler** is a dotfile manager.
 
 A dotfile manager collects configuration files (= dotfiles) scattered across your file system into a single Git repository so you can deploy them across your machines.

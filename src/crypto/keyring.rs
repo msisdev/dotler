@@ -1,6 +1,7 @@
 use secrecy::{ExposeSecret, SecretString};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const KEYRING_SERVICE_NAME: &str = "dotler";
 pub const KEYRING_DEFAULT_USER: &str = "default";
@@ -56,6 +57,7 @@ impl std::fmt::Debug for ResolvedPassphrase {
 }
 
 static MOCK_KEYRING: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+static MOCK_EXPLICITLY_DISABLED: AtomicBool = AtomicBool::new(false);
 static MOCK_PROMPT_QUEUE: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 
 pub struct OsKeyring;
@@ -63,13 +65,24 @@ pub struct OsKeyring;
 impl OsKeyring {
     pub fn enable_mock() {
         let mut lock = MOCK_KEYRING.lock().unwrap();
+        MOCK_EXPLICITLY_DISABLED.store(false, Ordering::SeqCst);
         *lock = Some(HashMap::new());
     }
 
     pub fn disable_mock() {
         let mut lock = MOCK_KEYRING.lock().unwrap();
+        MOCK_EXPLICITLY_DISABLED.store(true, Ordering::SeqCst);
         *lock = None;
         Self::clear_mock_prompt_replies();
+    }
+
+    fn ensure_env_mock(lock: &mut Option<HashMap<String, String>>) {
+        if lock.is_none()
+            && !MOCK_EXPLICITLY_DISABLED.load(Ordering::SeqCst)
+            && std::env::var_os("DOTLER_MOCK_KEYRING").is_some()
+        {
+            *lock = Some(HashMap::new());
+        }
     }
 
     pub fn clear_mock() {
@@ -93,11 +106,14 @@ impl OsKeyring {
     }
 
     pub fn is_mock_enabled() -> bool {
-        MOCK_KEYRING.lock().unwrap().is_some()
+        let mut lock = MOCK_KEYRING.lock().unwrap();
+        Self::ensure_env_mock(&mut lock);
+        lock.is_some()
     }
 
     pub fn get() -> Result<Option<SecretString>, KeyringError> {
-        let lock = MOCK_KEYRING.lock().unwrap();
+        let mut lock = MOCK_KEYRING.lock().unwrap();
+        Self::ensure_env_mock(&mut lock);
         if let Some(map) = lock.as_ref() {
             let key = format!("{}:{}", KEYRING_SERVICE_NAME, KEYRING_DEFAULT_USER);
             return Ok(map.get(&key).map(|v| SecretString::new(v.clone())));
@@ -121,6 +137,7 @@ impl OsKeyring {
 
     pub fn set(secret: &SecretString) -> Result<(), KeyringError> {
         let mut lock = MOCK_KEYRING.lock().unwrap();
+        Self::ensure_env_mock(&mut lock);
         if let Some(map) = lock.as_mut() {
             let key = format!("{}:{}", KEYRING_SERVICE_NAME, KEYRING_DEFAULT_USER);
             map.insert(key, secret.expose_secret().to_string());
@@ -138,6 +155,7 @@ impl OsKeyring {
 
     pub fn delete() -> Result<(), KeyringError> {
         let mut lock = MOCK_KEYRING.lock().unwrap();
+        Self::ensure_env_mock(&mut lock);
         if let Some(map) = lock.as_mut() {
             let key = format!("{}:{}", KEYRING_SERVICE_NAME, KEYRING_DEFAULT_USER);
             map.remove(&key);

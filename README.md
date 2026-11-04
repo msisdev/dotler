@@ -1,12 +1,15 @@
 # dotler
 
+> **Warning: Experimental / Pre-Release**
+> `dotler` is currently under active experimentation and has **not** been officially released yet. Commands, configuration formats, and behavior may change without notice.
+
 **Official Documentation & Manual**: **[https://msisdev.github.io/dotler/](https://msisdev.github.io/dotler/)**
 
-`dotler` is a privacy-first, deterministic dotfile synchronization engine with selective envelope encryption (`XChaCha20-Poly1305` + `Argon2id` + 12-word BIP-39 recovery), remote Git sharing, and built-in AI/MCP tooling.
+`dotler` is a dotfile manager with selective encryption, Git sharing, and built-in AI/MCP tooling.
 
 ## Documentation
 
-Read **[The Dotler Book (https://msisdev.github.io/dotler/)](https://msisdev.github.io/dotler/)** for the complete user guide, configuration reference, and command manual.
+Read **[The Dotler Book (https://msisdev.github.io/dotler/)](https://msisdev.github.io/dotler/)** for the user guide, configuration reference, and command manual.
 
 ## Quick Overview
 

@@ -285,6 +285,7 @@ fn test_empirical_headless_execution_fallback_when_dbus_absent() {
         .arg("--")
         .arg("--role-headless-dbus-absent")
         .env_remove("DBUS_SESSION_BUS_ADDRESS")
+        .env_remove("XDG_RUNTIME_DIR")
         .env_remove("DISPLAY")
         .env_remove("WAYLAND_DISPLAY")
         .env("DBUS_SESSION_BUS_ADDRESS", "")
@@ -318,6 +319,7 @@ fn test_empirical_headless_execution_fallback_when_dbus_absent() {
 
 #[test]
 fn test_empirical_in_process_headless_fallback_returns_none() {
+    let _guard = TestKeyringLock::acquire();
     // When mock is disabled, running on any host should gracefully return Ok
     // without crashing or panicking.
     OsKeyring::disable_mock();
@@ -328,6 +330,11 @@ fn test_empirical_in_process_headless_fallback_returns_none() {
         res.is_ok(),
         "OsKeyring::get() must not return Err when daemon missing"
     );
+    if let Ok(Some(ref secret)) = res
+        && secret.expose_secret() == "shared_final_pass_000"
+    {
+        let _ = OsKeyring::delete();
+    }
 
     // Re-enable mock for subsequent tests
     OsKeyring::enable_mock();

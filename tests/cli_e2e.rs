@@ -109,6 +109,7 @@ files = """
     fn cmd(&self) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_dotler"));
         cmd.env("HOME", &self.home_dir)
+            .env("DOTLER_MOCK_KEYRING", "1")
             .env_remove("DOTLER_PASSPHRASE")
             .current_dir(&self.repo_dir)
             .stdin(Stdio::null());
@@ -371,9 +372,8 @@ fn test_e2e_all_12_subcommands_clean_execution() {
     assert_eq!(out_tidy.status.code(), Some(0), "tidy must succeed");
 
     // 7. key set & del
-    let mut key_child = Command::new(env!("CARGO_BIN_EXE_dotler"))
-        .env("HOME", &sandbox.home_dir)
-        .current_dir(&sandbox.repo_dir)
+    let mut key_child = sandbox
+        .cmd()
         .args(["key", "set", "--password-stdin"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -390,9 +390,8 @@ fn test_e2e_all_12_subcommands_clean_execution() {
     assert_eq!(out_key_del.status.code(), Some(0), "key del must succeed");
 
     // 8. vault init, passwd, recover
-    let mut vault_child = Command::new(env!("CARGO_BIN_EXE_dotler"))
-        .env("HOME", &sandbox.home_dir)
-        .current_dir(&sandbox.repo_dir)
+    let mut vault_child = sandbox
+        .cmd()
         .args(["vault", "init", "--password-stdin"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -470,9 +469,8 @@ fn test_e2e_encryption_mismatch_export_and_check_exit_code_1() {
         .unwrap();
     assert_eq!(init_out.status.code(), Some(0));
 
-    let mut vault_child = Command::new(env!("CARGO_BIN_EXE_dotler"))
-        .env("HOME", &sandbox.home_dir)
-        .current_dir(&sandbox.repo_dir)
+    let mut vault_child = sandbox
+        .cmd()
         .args(["vault", "init", "--password-stdin"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -687,8 +685,8 @@ fn test_e2e_vault_passwd_rotates_all_matching_registered_repos() {
         (&repo_plain, "plain"),
     ] {
         fs::create_dir_all(dir).unwrap();
-        let out = Command::new(env!("CARGO_BIN_EXE_dotler"))
-            .env("HOME", &sandbox.home_dir)
+        let out = sandbox
+            .cmd()
             .current_dir(dir)
             .args(["init", "--label", label])
             .output()
@@ -702,8 +700,8 @@ fn test_e2e_vault_passwd_rotates_all_matching_registered_repos() {
         (&repo_work, "shared_old_pass_123"),
         (&repo_other, "separate_foreign_pass_456"),
     ] {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_dotler"))
-            .env("HOME", &sandbox.home_dir)
+        let mut child = sandbox
+            .cmd()
             .current_dir(dir)
             .args(["vault", "init", "--password-stdin"])
             .stdin(Stdio::piped())
@@ -721,8 +719,8 @@ fn test_e2e_vault_passwd_rotates_all_matching_registered_repos() {
     let other_before = fs::read_to_string(repo_other.join("dotler.toml")).unwrap();
 
     // Run `dotler vault passwd` from outside all repo directories (`home_dir`)
-    let mut passwd_child = Command::new(env!("CARGO_BIN_EXE_dotler"))
-        .env("HOME", &sandbox.home_dir)
+    let mut passwd_child = sandbox
+        .cmd()
         .env("DOTLER_PASSPHRASE", "shared_old_pass_123")
         .current_dir(&sandbox.home_dir)
         .args(["vault", "passwd", "--password-stdin", "--json"])
@@ -758,8 +756,8 @@ fn test_e2e_vault_passwd_rotates_all_matching_registered_repos() {
     assert_eq!(other_before, other_after);
 
     // Subsequent rotation using `shared_new_pass_789` must succeed on both `personal` and `work`
-    let mut passwd_child2 = Command::new(env!("CARGO_BIN_EXE_dotler"))
-        .env("HOME", &sandbox.home_dir)
+    let mut passwd_child2 = sandbox
+        .cmd()
         .env("DOTLER_PASSPHRASE", "shared_new_pass_789")
         .current_dir(&sandbox.home_dir)
         .args(["vault", "passwd", "--password-stdin", "--json"])
@@ -804,8 +802,8 @@ secret.txt encrypt
     let subdir = sandbox.repo_dir.join("shell").join("nested");
     fs::create_dir_all(&subdir).unwrap();
 
-    let import_before_vault = Command::new(env!("CARGO_BIN_EXE_dotler"))
-        .env("HOME", &sandbox.home_dir)
+    let import_before_vault = sandbox
+        .cmd()
         .current_dir(&subdir)
         .args(["import", "--json"])
         .output()
@@ -822,8 +820,8 @@ secret.txt encrypt
 
     // 4. Running `dotler vault init` from nested subdirectory must detect ancestor dotler.toml
     //    AND succeed even though `encrypt` rule is already in dotler.toml!
-    let mut vault_child = Command::new(env!("CARGO_BIN_EXE_dotler"))
-        .env("HOME", &sandbox.home_dir)
+    let mut vault_child = sandbox
+        .cmd()
         .current_dir(&subdir)
         .args(["vault", "init", "--password-stdin", "--json"])
         .stdin(Stdio::piped())
@@ -843,8 +841,8 @@ secret.txt encrypt
     );
 
     // 5. Running `dotler import` from nested subdirectory now succeeds using ancestor dotler.toml
-    let import_after = Command::new(env!("CARGO_BIN_EXE_dotler"))
-        .env("HOME", &sandbox.home_dir)
+    let import_after = sandbox
+        .cmd()
         .env("DOTLER_PASSPHRASE", "ancestor_vault_pass_123")
         .current_dir(&subdir)
         .args(["import", "--json"])

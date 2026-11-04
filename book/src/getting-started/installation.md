@@ -2,13 +2,13 @@
 
 ## Install with Cargo
 
-Install `dotler` from GitHub using Cargo (Rust 1.85+):
+Requires Rust `1.85+` and `git`:
 
 ```sh
 cargo install --git https://github.com/msisdev/dotler
 ```
 
-Verify the installation:
+Check the installed version:
 
 ```sh
 dotler --version
@@ -16,16 +16,16 @@ dotler --version
 
 ## Supported Platforms
 
-- **Linux**: Secret Service (`D-Bus`) for OS keyring integration.
-- **macOS**: Keychain Services for OS keyring integration.
-- **Windows**: Credential Manager for OS keyring integration.
-- **BSD**: Secret Service (`D-Bus`) for OS keyring integration.
+- **Linux** (`x86_64`, `aarch64`)
+- **macOS** (`x86_64`, `aarch64`)
+- **Windows** (`x86_64`, `aarch64`)
+- **BSD** (`FreeBSD`, `OpenBSD`, `NetBSD`)
 
 ## Local Files (`~/.config/dotler/`)
 
-Every file under `~/.config/dotler/` is created only when a write operation requires it:
+**dotler** stores machine-local state under `~/.config/dotler/`. Each file is created only when a write operation requires it:
 
-- `config.toml`: Created when `dotler init` or `dotler git clone` registers a repository.
-- `state.db`: Created when `dotler import`, `dotler export`, `dotler tidy`, or `dotler git install` writes file state.
-- `backups/`: Created when `dotler git install` backs up existing local files before replacing them.
-- `dotler.lock`: Created when a command acquires the process lock.
+- `config.toml`: Registered repository paths and default device names (created on `dotler init` or `dotler git clone`).
+- `state.db`: SQLite database tracking synced and installed files (created on `import`, `export`, `tidy`, or `git install`).
+- `backups/`: Original file backups before `dotler git install` overwrites local files.
+- `dotler.lock`: Process lock file used during command execution.

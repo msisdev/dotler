@@ -555,9 +555,6 @@ fn handle_git<W: Write>(
         GitCommand::Install(args) => {
             let parsed_url = parse_url(&args.url)?;
             let state_db_path = expand_tilde(STATE_DB_PATH);
-            if let Some(parent) = state_db_path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
             let state = StateDb::open(&state_db_path)?;
             let override_path = args.path.first().map(Path::new);
 
@@ -585,9 +582,6 @@ fn handle_git<W: Write>(
         }
         GitCommand::Uninstall(args) => {
             let state_db_path = expand_tilde(STATE_DB_PATH);
-            if let Some(parent) = state_db_path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
             let state = StateDb::open(&state_db_path)?;
             let report = uninstall_remote(&args.groups, &state, lock, args.dry_run || cli.dry_run)?;
             Ok(render_success_to(
@@ -746,9 +740,6 @@ fn handle_status<W: Write>(
     let repo_cfg = RepoConfig::load(&manifest_path)?;
 
     let state_db_path = expand_tilde(STATE_DB_PATH);
-    if let Some(parent) = state_db_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
     let state_db = StateDb::open(&state_db_path)?;
 
     let has_enc = has_encrypted_rules(&repo_cfg) || has_encrypted_repo_files(&repo_path, &repo_cfg);
@@ -794,9 +785,6 @@ fn handle_import<W: Write>(
     let repo_cfg = RepoConfig::load(&manifest_path)?;
 
     let state_db_path = expand_tilde(STATE_DB_PATH);
-    if let Some(parent) = state_db_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
     let state_db = StateDb::open(&state_db_path)?;
 
     let needs_vault = has_encrypted_rules(&repo_cfg);
@@ -854,9 +842,6 @@ fn handle_export<W: Write>(
     let repo_cfg = RepoConfig::load(&manifest_path)?;
 
     let state_db_path = expand_tilde(STATE_DB_PATH);
-    if let Some(parent) = state_db_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
     let state_db = StateDb::open(&state_db_path)?;
 
     let needs_vault = has_encrypted_rules(&repo_cfg);
@@ -926,9 +911,6 @@ fn handle_tidy<W: Write>(
     let repo_cfg = RepoConfig::load(&manifest_path)?;
 
     let state_db_path = expand_tilde(STATE_DB_PATH);
-    if let Some(parent) = state_db_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
     let state_db = StateDb::open(&state_db_path)?;
 
     let needs_vault =

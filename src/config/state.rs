@@ -41,12 +41,32 @@ pub struct InstalledFileRecord {
 }
 
 pub struct StateDb {
-    conn: Mutex<Connection>,
+    conn: Mutex<Option<Connection>>,
     db_path: PathBuf,
 }
 
 impl StateDb {
     pub fn open(path: &Path) -> Result<Self, StateError> {
+        if path.is_dir() {
+            return Err(StateError::Io(std::io::Error::new(
+                std::io::ErrorKind::IsADirectory,
+                "state.db path is a directory",
+            )));
+        }
+
+        let conn = if path.exists() {
+            Some(Self::init_conn(path)?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            conn: Mutex::new(conn),
+            db_path: path.to_path_buf(),
+        })
+    }
+
+    fn init_conn(path: &Path) -> Result<Connection, StateError> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -82,10 +102,25 @@ impl StateDb {
             CREATE INDEX IF NOT EXISTS idx_installed_files_group ON installed_files (repo_url, group_name);",
         )?;
 
-        Ok(Self {
-            conn: Mutex::new(conn),
-            db_path: path.to_path_buf(),
-        })
+        Ok(conn)
+    }
+
+    fn ensure_conn(&self) -> Result<std::sync::MutexGuard<'_, Option<Connection>>, StateError> {
+        let mut guard = self.conn.lock().unwrap();
+        if guard.is_none() {
+            *guard = Some(Self::init_conn(&self.db_path)?);
+        }
+        Ok(guard)
+    }
+
+    fn open_existing_conn(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, Option<Connection>>, StateError> {
+        let mut guard = self.conn.lock().unwrap();
+        if guard.is_none() && self.db_path.is_file() {
+            *guard = Some(Self::init_conn(&self.db_path)?);
+        }
+        Ok(guard)
     }
 
     pub fn path(&self) -> &Path {
@@ -93,7 +128,8 @@ impl StateDb {
     }
 
     pub fn upsert_synced_file(&self, record: &SyncedFileRecord) -> Result<(), StateError> {
-        let conn = self.conn.lock().unwrap();
+        let guard = self.ensure_conn()?;
+        let conn = guard.as_ref().unwrap();
         conn.execute(
             "INSERT INTO synced_files (target_path, repo_label, group_name, relative_path, file_hash, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -119,7 +155,10 @@ impl StateDb {
         &self,
         target_path: &str,
     ) -> Result<Option<SyncedFileRecord>, StateError> {
-        let conn = self.conn.lock().unwrap();
+        let guard = self.open_existing_conn()?;
+        let Some(conn) = guard.as_ref() else {
+            return Ok(None);
+        };
         let mut stmt = conn.prepare(
             "SELECT target_path, repo_label, group_name, relative_path, file_hash, updated_at
              FROM synced_files WHERE target_path = ?1;",
@@ -145,7 +184,10 @@ impl StateDb {
         &self,
         repo_label: Option<&str>,
     ) -> Result<Vec<SyncedFileRecord>, StateError> {
-        let conn = self.conn.lock().unwrap();
+        let guard = self.open_existing_conn()?;
+        let Some(conn) = guard.as_ref() else {
+            return Ok(Vec::new());
+        };
         let mut records = Vec::new();
 
         if let Some(label) = repo_label {
@@ -192,7 +234,10 @@ impl StateDb {
     }
 
     pub fn remove_synced_file(&self, target_path: &str) -> Result<bool, StateError> {
-        let conn = self.conn.lock().unwrap();
+        let guard = self.open_existing_conn()?;
+        let Some(conn) = guard.as_ref() else {
+            return Ok(false);
+        };
         let affected = conn.execute(
             "DELETE FROM synced_files WHERE target_path = ?1;",
             params![target_path],
@@ -219,7 +264,8 @@ impl StateDb {
     }
 
     pub fn upsert_installed_file(&self, record: &InstalledFileRecord) -> Result<(), StateError> {
-        let conn = self.conn.lock().unwrap();
+        let guard = self.ensure_conn()?;
+        let conn = guard.as_ref().unwrap();
         conn.execute(
             "INSERT INTO installed_files (target_path, repo_url, group_name, relative_path, file_hash, updated_at, backup_path)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -247,7 +293,10 @@ impl StateDb {
         &self,
         target_path: &str,
     ) -> Result<Option<InstalledFileRecord>, StateError> {
-        let conn = self.conn.lock().unwrap();
+        let guard = self.open_existing_conn()?;
+        let Some(conn) = guard.as_ref() else {
+            return Ok(None);
+        };
         let mut stmt = conn.prepare(
             "SELECT target_path, repo_url, group_name, relative_path, file_hash, updated_at, backup_path
              FROM installed_files WHERE target_path = ?1;",
@@ -274,7 +323,10 @@ impl StateDb {
         &self,
         repo_url: Option<&str>,
     ) -> Result<Vec<InstalledFileRecord>, StateError> {
-        let conn = self.conn.lock().unwrap();
+        let guard = self.open_existing_conn()?;
+        let Some(conn) = guard.as_ref() else {
+            return Ok(Vec::new());
+        };
         let mut records = Vec::new();
 
         if let Some(url) = repo_url {
@@ -328,11 +380,13 @@ impl StateDb {
     ) -> Result<Option<InstalledFileRecord>, StateError> {
         let existing = self.get_installed_file(target_path)?;
         if existing.is_some() {
-            let conn = self.conn.lock().unwrap();
-            conn.execute(
-                "DELETE FROM installed_files WHERE target_path = ?1;",
-                params![target_path],
-            )?;
+            let guard = self.open_existing_conn()?;
+            if let Some(conn) = guard.as_ref() {
+                conn.execute(
+                    "DELETE FROM installed_files WHERE target_path = ?1;",
+                    params![target_path],
+                )?;
+            }
         }
         Ok(existing)
     }
@@ -460,10 +514,27 @@ mod tests {
         let db_path = dir.path().join("state.db");
 
         let db = StateDb::open(&db_path).expect("open should succeed");
+        // Write-On-Demand: opening a non-existent state.db or querying it must NOT create the file
+        assert!(!db_path.exists());
+        assert!(db.list_synced_files(None).expect("list empty").is_empty());
+        assert!(!db_path.exists());
+
+        // First write creates state.db on disk and configures WAL mode
+        let record = SyncedFileRecord {
+            target_path: "/home/user/.zshrc".to_string(),
+            repo_label: "main".to_string(),
+            group_name: "zsh".to_string(),
+            relative_path: ".zshrc".to_string(),
+            file_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string(),
+            updated_at: 1700000000,
+        };
+        db.upsert_synced_file(&record).expect("upsert");
         assert!(db_path.exists());
 
         // Verify journal mode is WAL
-        let conn = db.conn.lock().unwrap();
+        let guard = db.conn.lock().unwrap();
+        let conn = guard.as_ref().expect("connection initialized");
         let mode: String = conn
             .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
             .expect("pragma journal_mode");

@@ -142,9 +142,13 @@ pub fn render_briefing(
     out
 }
 
-/// Scaffolds the default `<repo>/SKILL.md` file in the target repository directory.
+/// Scaffolds the default `<repo>/SKILL.md` file in the target repository directory
+/// if it does not already exist.
 pub fn scaffold_skill_md(repo_dir: &Path) -> Result<PathBuf, AgentError> {
     let skill_path = repo_dir.join("SKILL.md");
+    if skill_path.exists() {
+        return Ok(skill_path);
+    }
 
     let mut content = String::from(
         "# Dotler Repository Operational Manual for AI Coding Agents\n\n\
@@ -175,6 +179,12 @@ mod tests {
         assert!(content.contains("~/"));
         assert!(content.contains("<pattern> encrypt"));
         assert!(content.contains("ZERO SECRET LEAKAGE"));
+
+        // Verify existing SKILL.md is preserved and never overwritten
+        fs::write(&path, "# Custom Skill Guide\n").unwrap();
+        let preserved_path = scaffold_skill_md(temp.path()).unwrap();
+        assert_eq!(preserved_path, path);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# Custom Skill Guide\n");
     }
 
     #[test]

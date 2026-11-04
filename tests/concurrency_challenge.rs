@@ -373,20 +373,13 @@ fn test_empirical_sqlite_wal_concurrency_and_integrity() {
     let dir = tempdir().expect("tempdir");
     let db_path = dir.path().join("state.db");
 
-    // Initialize StateDb and verify WAL pragma configuration
+    // Initialize StateDb and verify lazy Write-On-Demand before first write
     {
         let db = StateDb::open(&db_path).expect("open state db");
         assert_eq!(db.path(), db_path);
-
-        let raw_conn = Connection::open(&db_path).expect("open raw conn");
-        let journal_mode: String = raw_conn
-            .query_row("PRAGMA journal_mode;", [], |r| r.get(0))
-            .expect("query journal_mode");
-
-        assert_eq!(
-            journal_mode.to_uppercase(),
-            "WAL",
-            "Journal mode must be WAL"
+        assert!(
+            !db_path.exists(),
+            "state.db must not be created on disk until a write occurs"
         );
     }
 
@@ -436,8 +429,16 @@ fn test_empirical_sqlite_wal_concurrency_and_integrity() {
         h.join().expect("thread join");
     }
 
-    // Verify database integrity using SQLite PRAGMA integrity_check
+    // Verify database integrity and WAL mode using SQLite PRAGMA
     let raw_conn = Connection::open(&db_path).expect("open raw conn");
+    let journal_mode: String = raw_conn
+        .query_row("PRAGMA journal_mode;", [], |r| r.get(0))
+        .expect("query journal_mode");
+    assert_eq!(
+        journal_mode.to_uppercase(),
+        "WAL",
+        "Journal mode must be WAL"
+    );
     let integrity: String = raw_conn
         .query_row("PRAGMA integrity_check;", [], |r| r.get(0))
         .expect("pragma integrity_check");

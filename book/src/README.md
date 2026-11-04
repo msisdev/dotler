@@ -4,17 +4,17 @@
 
 A dotfile manager collects configuration files (= dotfiles) scattered across your file system into a single Git repository so you can deploy them across your machines.
 
-## Core Features
+## Features
 
 **Configuration**
-- Select dotfiles in `dotler.toml` file.
+- Select dotfiles in `./dotler.toml` file.
 - `dotler import` to import dotfiles from file system to dotler directory.
 - `dotler export` to export dotfiles from dotler directory to file system.
 
 
 **Encryption**
 - Protect your files with passphrase.
-- Mark files with `encrypt` attribute in `dotler.toml`.
+- Mark files with `encrypt` attribute in `./dotler.toml`.
 - `dotler import`/`dotler export` will encrypt/decrypt them automatically.
 
 

@@ -1,0 +1,8 @@
+[book]
+title = "The Dotler Book"
+authors = ["Dotler Contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/msisdev/dotler"

@@ -35,6 +35,8 @@ pub struct VaultConfig {
     pub vault_id: String,
     pub password_slot: String,
     pub recovery_slot: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

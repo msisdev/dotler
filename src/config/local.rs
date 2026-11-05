@@ -32,15 +32,36 @@ pub fn find_ancestor_repo_dir(start_dir: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+fn default_use_keyring() -> bool {
+    true
+}
+
+fn is_true(val: &bool) -> bool {
+    *val
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalConfig {
     #[serde(default)]
     pub default_devices: Vec<String>,
     #[serde(default)]
     pub default_repo: Option<String>,
+    #[serde(default = "default_use_keyring", skip_serializing_if = "is_true")]
+    pub use_keyring: bool,
     #[serde(default)]
     pub repos: BTreeMap<String, String>,
+}
+
+impl Default for LocalConfig {
+    fn default() -> Self {
+        Self {
+            default_devices: Vec::new(),
+            default_repo: None,
+            use_keyring: true,
+            repos: BTreeMap::new(),
+        }
+    }
 }
 
 impl LocalConfig {
@@ -507,6 +528,7 @@ devices = ["laptop"]
         let config = LocalConfig {
             default_devices: vec!["laptop".to_string()],
             default_repo: Some("dotfiles".to_string()),
+            use_keyring: true,
             repos,
         };
 
@@ -517,6 +539,24 @@ devices = ["laptop"]
 
         let loaded = LocalConfig::load(&config_path).expect("loaded config must succeed");
         assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn test_local_config_use_keyring_default_and_explicit_false() {
+        let default_cfg = LocalConfig::parse("").expect("empty config should parse");
+        assert!(default_cfg.use_keyring);
+
+        let disabled_cfg =
+            LocalConfig::parse("use_keyring = false\n").expect("use_keyring = false should parse");
+        assert!(!disabled_cfg.use_keyring);
+
+        let dir = tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        disabled_cfg
+            .save_atomic(&config_path)
+            .expect("atomic save must succeed");
+        let reloaded = LocalConfig::load(&config_path).expect("reload must succeed");
+        assert!(!reloaded.use_keyring);
     }
 
     #[test]

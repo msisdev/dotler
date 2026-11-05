@@ -857,3 +857,112 @@ secret.txt encrypt
             .is_file()
     );
 }
+
+#[test]
+fn test_e2e_vault_hint_and_use_keyring_optout() {
+    let sandbox = E2eSandbox::new();
+
+    // 1. Initialize repo and set `use_keyring = false` in local config.toml
+    let init_out = sandbox.cmd().args(["init", "--json"]).output().unwrap();
+    assert_eq!(init_out.status.code(), Some(0));
+
+    let config_toml_path = sandbox.dotler_dir.join("config.toml");
+    let config_raw = fs::read_to_string(&config_toml_path).unwrap();
+    let updated_config = format!("use_keyring = false\n{config_raw}");
+    fs::write(&config_toml_path, updated_config).unwrap();
+
+    // 2. Initialize vault with `--hint`
+    let mut vault_init = sandbox
+        .cmd()
+        .args([
+            "vault",
+            "init",
+            "--hint",
+            "first pet name",
+            "--password-stdin",
+            "--json",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Some(mut stdin) = vault_init.stdin.take() {
+        writeln!(stdin, "pass_init_111").unwrap();
+    }
+    let vault_init_out = vault_init.wait_with_output().unwrap();
+    assert_eq!(vault_init_out.status.code(), Some(0));
+    let init_json: Value = serde_json::from_slice(&vault_init_out.stdout).unwrap();
+    let mnemonic = init_json["data"]["mnemonic"].as_str().unwrap().to_string();
+
+    let dotler_toml = fs::read_to_string(sandbox.repo_dir.join("dotler.toml")).unwrap();
+    assert!(
+        dotler_toml.contains("hint = \"first pet name\""),
+        "dotler.toml should contain initial hint: {dotler_toml}"
+    );
+
+    // 3. Rotate passphrase with `--hint` updated
+    let mut passwd_child = sandbox
+        .cmd()
+        .env("DOTLER_PASSPHRASE", "pass_init_111")
+        .args([
+            "vault",
+            "passwd",
+            "--hint",
+            "second pet name",
+            "--password-stdin",
+            "--json",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Some(mut stdin) = passwd_child.stdin.take() {
+        writeln!(stdin, "pass_rot_222").unwrap();
+    }
+    let passwd_out = passwd_child.wait_with_output().unwrap();
+    assert_eq!(passwd_out.status.code(), Some(0));
+
+    let dotler_toml_after_passwd =
+        fs::read_to_string(sandbox.repo_dir.join("dotler.toml")).unwrap();
+    assert!(
+        dotler_toml_after_passwd.contains("hint = \"second pet name\""),
+        "dotler.toml should contain updated hint: {dotler_toml_after_passwd}"
+    );
+
+    // 4. Recover vault with `--hint` updated
+    let mut recover_child = sandbox
+        .cmd()
+        .args([
+            "vault",
+            "recover",
+            "--mnemonic",
+            &mnemonic,
+            "--hint",
+            "recovered hint",
+            "--password-stdin",
+            "--json",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Some(mut stdin) = recover_child.stdin.take() {
+        writeln!(stdin, "pass_rec_333").unwrap();
+    }
+    let recover_out = recover_child.wait_with_output().unwrap();
+    assert_eq!(recover_out.status.code(), Some(0));
+
+    let dotler_toml_after_recover =
+        fs::read_to_string(sandbox.repo_dir.join("dotler.toml")).unwrap();
+    assert!(
+        dotler_toml_after_recover.contains("hint = \"recovered hint\""),
+        "dotler.toml should contain recovered hint: {dotler_toml_after_recover}"
+    );
+
+    // Ensure local config still has use_keyring = false
+    let final_local_cfg = fs::read_to_string(&config_toml_path).unwrap();
+    assert!(final_local_cfg.contains("use_keyring = false"));
+}

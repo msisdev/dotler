@@ -333,7 +333,8 @@ fn dispatch_tool(
         "dotler_briefing" => {
             let local_cfg = load_or_default_local_config();
             let os_info = OsInfo::detect();
-            let keyring_ready = OsKeyring::get().map(|opt| opt.is_some()).unwrap_or(false);
+            let keyring_ready =
+                local_cfg.use_keyring && OsKeyring::get().map(|opt| opt.is_some()).unwrap_or(false);
             let briefing_text = render_briefing(&local_cfg, &os_info, keyring_ready);
             Ok(ToolCallResult {
                 content: vec![ToolContent {
@@ -401,7 +402,7 @@ fn dispatch_tool(
             let state_db = StateDb::open(&expand_tilde(STATE_DB_PATH))
                 .map_err(|e| format!("Failed to open state.db: {e}"))?;
 
-            let vault_key = try_unlock_vault(&repo_cfg);
+            let vault_key = try_unlock_vault(&repo_cfg, local_cfg.use_keyring);
             let os_info = OsInfo::detect();
 
             let sync_engine = SyncEngine::new(
@@ -447,7 +448,7 @@ fn dispatch_tool(
             let state_db = StateDb::open(&expand_tilde(STATE_DB_PATH))
                 .map_err(|e| format!("Failed to open state.db: {e}"))?;
 
-            let vault_key = try_unlock_vault(&repo_cfg);
+            let vault_key = try_unlock_vault(&repo_cfg, local_cfg.use_keyring);
             let os_info = OsInfo::detect();
 
             let sync_engine = SyncEngine::new(
@@ -506,7 +507,7 @@ fn dispatch_tool(
             let state_db = StateDb::open(&expand_tilde(STATE_DB_PATH))
                 .map_err(|e| format!("Failed to open state.db: {e}"))?;
 
-            let vault_key = try_unlock_vault(&repo_cfg);
+            let vault_key = try_unlock_vault(&repo_cfg, local_cfg.use_keyring);
             let os_info = OsInfo::detect();
 
             let sync_engine = SyncEngine::new(
@@ -589,7 +590,7 @@ fn dispatch_tool(
             let state_db = StateDb::open(&expand_tilde(STATE_DB_PATH))
                 .map_err(|e| format!("Failed to open state.db: {e}"))?;
 
-            let vault_key = try_unlock_vault(&repo_cfg);
+            let vault_key = try_unlock_vault(&repo_cfg, local_cfg.use_keyring);
             let os_info = OsInfo::detect();
 
             let sync_engine = SyncEngine::new(
@@ -674,7 +675,10 @@ fn resolve_mcp_repo(
     local_cfg.resolve_repo(requested_label)
 }
 
-fn try_unlock_vault(repo_cfg: &RepoConfig) -> Option<VaultKey> {
+fn try_unlock_vault(repo_cfg: &RepoConfig, use_keyring: bool) -> Option<VaultKey> {
+    if !use_keyring {
+        return None;
+    }
     let vault_cfg = repo_cfg.vault.as_ref()?;
     let secret = OsKeyring::get().ok()??;
     let slot = VaultSlot::from_base64(&vault_cfg.password_slot).ok()?;

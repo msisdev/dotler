@@ -882,6 +882,97 @@ impl RepoConfig {
 
         Ok(())
     }
+
+    pub fn save_atomic(&self, path: &Path) -> Result<(), ConfigError> {
+        self.validate()?;
+        if path.is_file()
+            && let Ok(existing_str) = fs::read_to_string(path)
+            && let Ok(existing_cfg) = toml::from_str::<RepoConfig>(&existing_str)
+            && existing_cfg.groups == self.groups
+        {
+            match (&existing_cfg.vault, &self.vault) {
+                (Some(old_v), Some(new_v)) => {
+                    let updated = update_vault_manifest_section(&existing_str, old_v, new_v);
+                    return crate::config::state::atomic_write_file(path, updated.as_bytes())
+                        .map_err(|e| match e {
+                            crate::config::StateError::Io(io) => ConfigError::IoError(io),
+                            other => ConfigError::AtomicRenameFailed(other.to_string()),
+                        });
+                }
+                (None, Some(new_v)) => {
+                    let mut manifest_str = existing_str;
+                    manifest_str.push_str(&format!(
+                        "\n[vault]\nvault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n",
+                        new_v.vault_id, new_v.password_slot, new_v.recovery_slot
+                    ));
+                    if let Some(ref h) = new_v.hint {
+                        let escaped = toml::Value::String(h.clone()).to_string();
+                        manifest_str.push_str(&format!("hint = {escaped}\n"));
+                    }
+                    return crate::config::state::atomic_write_file(path, manifest_str.as_bytes())
+                        .map_err(|e| match e {
+                            crate::config::StateError::Io(io) => ConfigError::IoError(io),
+                            other => ConfigError::AtomicRenameFailed(other.to_string()),
+                        });
+                }
+                _ => {}
+            }
+        }
+
+        let serialized = toml::to_string_pretty(self)
+            .map_err(|e| ConfigError::TomlSyntaxError(e.to_string()))?;
+        crate::config::state::atomic_write_file(path, serialized.as_bytes()).map_err(|e| match e {
+            crate::config::StateError::Io(io) => ConfigError::IoError(io),
+            other => ConfigError::AtomicRenameFailed(other.to_string()),
+        })
+    }
+}
+
+pub fn update_vault_manifest_section(
+    manifest_str: &str,
+    old_cfg: &VaultConfig,
+    new_cfg: &VaultConfig,
+) -> String {
+    let mut updated = manifest_str.replace(
+        &format!("password_slot = \"{}\"", old_cfg.password_slot),
+        &format!("password_slot = \"{}\"", new_cfg.password_slot),
+    );
+    updated = updated.replace(
+        &format!("recovery_slot = \"{}\"", old_cfg.recovery_slot),
+        &format!("recovery_slot = \"{}\"", new_cfg.recovery_slot),
+    );
+    if new_cfg.hint != old_cfg.hint {
+        match (&old_cfg.hint, &new_cfg.hint) {
+            (Some(old_h), Some(new_h)) => {
+                let old_val = toml::Value::String(old_h.clone()).to_string();
+                let new_val = toml::Value::String(new_h.clone()).to_string();
+                updated =
+                    updated.replace(&format!("hint = {old_val}"), &format!("hint = {new_val}"));
+            }
+            (None, Some(new_h)) => {
+                let new_val = toml::Value::String(new_h.clone()).to_string();
+                let target = format!("recovery_slot = \"{}\"", new_cfg.recovery_slot);
+                updated = updated.replace(&target, &format!("{target}\nhint = {new_val}"));
+            }
+            (Some(old_h), None) => {
+                let old_val = toml::Value::String(old_h.clone()).to_string();
+                updated = updated.replace(&format!("hint = {old_val}\n"), "");
+                updated = updated.replace(&format!("hint = {old_val}"), "");
+            }
+            (None, None) => {}
+        }
+    }
+    updated
+}
+
+/// Creates a lazy [`Resource`] for `<repo>/dotler.toml`.
+pub fn get_repo_config(manifest_path: PathBuf) -> crate::config::Resource<RepoConfig, ConfigError> {
+    let load_path = manifest_path.clone();
+    let save_path = manifest_path;
+    crate::config::Resource::new(
+        move || RepoConfig::load(&load_path),
+        move |cfg: &RepoConfig| cfg.save_atomic(&save_path),
+    )
 }
 
 #[cfg(test)]

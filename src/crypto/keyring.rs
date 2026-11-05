@@ -238,6 +238,49 @@ impl OsKeyring {
     }
 }
 
+/// Creates a lazy [`Resource`](crate::config::Resource) for resolving or storing the vault passphrase.
+pub fn get_password(
+    use_keyring: bool,
+    hint: Option<String>,
+    is_interactive: bool,
+    stdin_passphrase: Option<String>,
+) -> crate::config::Resource<SecretString, KeyringError> {
+    crate::config::Resource::new(
+        move || {
+            if use_keyring && let Ok(Some(secret)) = OsKeyring::get() {
+                return Ok(secret);
+            }
+            if let Some(ref pass) = stdin_passphrase {
+                let trimmed = pass.trim_end_matches(['\r', '\n']);
+                if !trimmed.is_empty() {
+                    return Ok(SecretString::new(trimmed.to_string()));
+                }
+            }
+            if let Ok(env_pass) = std::env::var(PASSPHRASE_ENV_VAR) {
+                let trimmed = env_pass.trim_end_matches(['\r', '\n']);
+                if !trimmed.is_empty() {
+                    return Ok(SecretString::new(trimmed.to_string()));
+                }
+            }
+            if !is_interactive {
+                return Err(KeyringError::PassphraseRequiredInNonInteractiveMode);
+            }
+            let prompt = match hint.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                Some(h) => format!("Enter vault passphrase (hint: {h}): "),
+                None => "Enter vault passphrase: ".to_string(),
+            };
+            Ok(OsKeyring::prompt_passphrase_with_message(&prompt)?.secret)
+        },
+        move |secret: &SecretString| {
+            if use_keyring {
+                OsKeyring::set(secret)
+            } else {
+                Ok(())
+            }
+        },
+    )
+}
+
 mod platform {
     use super::{KEYRING_DEFAULT_USER, KEYRING_SERVICE_NAME, KeyringError};
 

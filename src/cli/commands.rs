@@ -10,16 +10,21 @@ use serde_json::json;
 
 use crate::agent::briefing::{render_briefing, scaffold_skill_md};
 use crate::cli::output::{EXIT_SUCCESS, render_success_to};
-use crate::config::local::{LocalConfig, WalkDir, expand_tilde};
+use crate::config::Provider;
+use crate::config::local::{
+    LOCAL_CONFIG_FILE, LocalConfig, WalkDir, expand_tilde, get_local_config,
+    resolve_repo_path_with_cwd,
+};
 use crate::config::repo::{
-    OsInfo, RepoConfig, SelectionMode, parse_selection_rules, validate_path_security,
+    OsInfo, RepoConfig, SelectionMode, get_repo_config, parse_selection_rules,
+    update_vault_manifest_section, validate_path_security,
 };
 use crate::config::state::{
     DOTLER_LOCK_PATH, DOTLER_LOCK_POLL_INTERVAL_MS, DOTLER_LOCK_TIMEOUT_MS, DotlerLock,
-    DotlerLockGuard, STATE_DB_PATH, StateDb,
+    DotlerLockGuard, STATE_DB_PATH, get_state_db,
 };
 use crate::crypto::SecretString;
-use crate::crypto::keyring::OsKeyring;
+use crate::crypto::keyring::{OsKeyring, get_password};
 use crate::crypto::vault::{VaultKey, VaultSlot, change_password, init_vault, recover_vault};
 use crate::engine::EngineError;
 use crate::engine::remote::{
@@ -456,13 +461,9 @@ files = """
     let skill_path = scaffold_skill_md(&repo_dir)
         .map_err(|e| EngineError::Io(std::io::Error::other(e.to_string())))?;
 
-    // Register in ~/.config/dotler/config.toml
-    let local_cfg_path = expand_tilde("~/.config/dotler/config.toml");
-    let mut local_cfg = if local_cfg_path.is_file() {
-        LocalConfig::load(&local_cfg_path).unwrap_or_default()
-    } else {
-        LocalConfig::default()
-    };
+    // Register in ~/.config/dotler/config.toml via LocalConfig resource provider
+    let mut local_cfg_res = get_local_config(expand_tilde(LOCAL_CONFIG_FILE));
+    let mut local_cfg = local_cfg_res.get().cloned().unwrap_or_default();
 
     let label = args
         .label
@@ -507,7 +508,7 @@ files = """
         local_cfg.default_devices.push(device.clone());
     }
 
-    local_cfg.save_atomic(&local_cfg_path)?;
+    local_cfg_res.set(local_cfg)?;
 
     let data = json!({
         "label": label,
@@ -547,7 +548,7 @@ fn handle_git<W: Write>(
                 .next()
                 .unwrap_or("dotfiles");
             let dest = std::env::current_dir()?.join(repo_name);
-            let cfg_path = expand_tilde("~/.config/dotler/config.toml");
+            let cfg_path = expand_tilde(LOCAL_CONFIG_FILE);
 
             let report = clone_repo(
                 &parsed_url,
@@ -563,17 +564,13 @@ fn handle_git<W: Write>(
         }
         GitCommand::Install(args) => {
             let parsed_url = parse_url(&args.url)?;
-            let state_db_path = expand_tilde(STATE_DB_PATH);
-            let state = StateDb::open(&state_db_path)?;
+            let state_res = get_state_db(expand_tilde(STATE_DB_PATH));
+            let state = state_res.get()?;
             let override_path = args.path.first().map(Path::new);
 
-            let local_cfg_path = expand_tilde("~/.config/dotler/config.toml");
-            let local_cfg = if local_cfg_path.is_file() {
-                LocalConfig::load(&local_cfg_path)?
-            } else {
-                LocalConfig::default()
-            };
-            let mut devices = local_cfg.default_devices;
+            let local_cfg_res = get_local_config(expand_tilde(LOCAL_CONFIG_FILE));
+            let local_cfg = local_cfg_res.get()?;
+            let mut devices = local_cfg.default_devices.clone();
             if let Some(ref d) = args.device.as_deref().or(cli.device.as_deref()) {
                 devices.insert(0, d.to_string());
             }
@@ -584,15 +581,15 @@ fn handle_git<W: Write>(
                 override_path,
                 args.branch.as_deref(),
                 &devices,
-                &state,
+                state,
                 lock,
             )?;
             Ok(render_success_to(stdout, "git install", &report, cli.json))
         }
         GitCommand::Uninstall(args) => {
-            let state_db_path = expand_tilde(STATE_DB_PATH);
-            let state = StateDb::open(&state_db_path)?;
-            let report = uninstall_remote(&args.groups, &state, lock, args.dry_run || cli.dry_run)?;
+            let state_res = get_state_db(expand_tilde(STATE_DB_PATH));
+            let state = state_res.get()?;
+            let report = uninstall_remote(&args.groups, state, lock, args.dry_run || cli.dry_run)?;
             Ok(render_success_to(
                 stdout,
                 "git uninstall",
@@ -609,16 +606,12 @@ fn handle_check<W: Write>(
     stdout: &mut W,
     _lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
-    let local_cfg_path = expand_tilde("~/.config/dotler/config.toml");
-    let local_cfg = if local_cfg_path.is_file() {
-        LocalConfig::load(&local_cfg_path)?
-    } else {
-        LocalConfig::default()
-    };
+    let local_cfg_res = get_local_config(expand_tilde(LOCAL_CONFIG_FILE));
+    let local_cfg = local_cfg_res.get()?;
 
-    let (_label, repo_path) = resolve_repo_path(&local_cfg, cli.repo.as_deref())?;
-    let manifest_path = repo_path.join("dotler.toml");
-    let repo_cfg = RepoConfig::load(&manifest_path)?;
+    let (_label, repo_path) = resolve_repo_path_with_cwd(local_cfg, cli.repo.as_deref())?;
+    let repo_cfg_res = get_repo_config(repo_path.join("dotler.toml"));
+    let repo_cfg = repo_cfg_res.get()?;
 
     if let Some(ref filter_grp) = args.group
         && !repo_cfg.groups.contains_key(filter_grp)
@@ -737,23 +730,19 @@ fn handle_status<W: Write>(
     stdout: &mut W,
     lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
-    let local_cfg_path = expand_tilde("~/.config/dotler/config.toml");
-    let local_cfg = if local_cfg_path.is_file() {
-        LocalConfig::load(&local_cfg_path)?
-    } else {
-        LocalConfig::default()
-    };
+    let local_cfg_res = get_local_config(expand_tilde(LOCAL_CONFIG_FILE));
+    let local_cfg = local_cfg_res.get()?;
 
-    let (label, repo_path) = resolve_repo_path(&local_cfg, cli.repo.as_deref())?;
-    let manifest_path = repo_path.join("dotler.toml");
-    let repo_cfg = RepoConfig::load(&manifest_path)?;
+    let (label, repo_path) = resolve_repo_path_with_cwd(local_cfg, cli.repo.as_deref())?;
+    let repo_cfg_res = get_repo_config(repo_path.join("dotler.toml"));
+    let repo_cfg = repo_cfg_res.get()?;
 
-    let state_db_path = expand_tilde(STATE_DB_PATH);
-    let state_db = StateDb::open(&state_db_path)?;
+    let state_db_res = get_state_db(expand_tilde(STATE_DB_PATH));
+    let state_db = state_db_res.get()?;
 
-    let has_enc = has_encrypted_rules(&repo_cfg) || has_encrypted_repo_files(&repo_path, &repo_cfg);
+    let has_enc = has_encrypted_rules(repo_cfg) || has_encrypted_repo_files(&repo_path, repo_cfg);
     let vault_key = unlock_vault_if_needed(
-        &repo_cfg,
+        repo_cfg,
         local_cfg.use_keyring,
         is_interactive,
         has_enc && is_interactive,
@@ -768,8 +757,8 @@ fn handle_status<W: Write>(
     let sync_engine = SyncEngine::new(
         &label,
         &repo_path,
-        &repo_cfg,
-        &state_db,
+        repo_cfg,
+        state_db,
         devices,
         os_info,
         vault_key.as_ref(),
@@ -787,27 +776,19 @@ fn handle_import<W: Write>(
     stdout: &mut W,
     lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
-    let local_cfg_path = expand_tilde("~/.config/dotler/config.toml");
-    let local_cfg = if local_cfg_path.is_file() {
-        LocalConfig::load(&local_cfg_path)?
-    } else {
-        LocalConfig::default()
-    };
+    let local_cfg_res = get_local_config(expand_tilde(LOCAL_CONFIG_FILE));
+    let local_cfg = local_cfg_res.get()?;
 
-    let (label, repo_path) = resolve_repo_path(&local_cfg, cli.repo.as_deref())?;
-    let manifest_path = repo_path.join("dotler.toml");
-    let repo_cfg = RepoConfig::load(&manifest_path)?;
+    let (label, repo_path) = resolve_repo_path_with_cwd(local_cfg, cli.repo.as_deref())?;
+    let repo_cfg_res = get_repo_config(repo_path.join("dotler.toml"));
+    let repo_cfg = repo_cfg_res.get()?;
 
-    let state_db_path = expand_tilde(STATE_DB_PATH);
-    let state_db = StateDb::open(&state_db_path)?;
+    let state_db_res = get_state_db(expand_tilde(STATE_DB_PATH));
+    let state_db = state_db_res.get()?;
 
-    let needs_vault = has_encrypted_rules(&repo_cfg);
-    let vault_key = unlock_vault_if_needed(
-        &repo_cfg,
-        local_cfg.use_keyring,
-        is_interactive,
-        needs_vault,
-    )?;
+    let needs_vault = has_encrypted_rules(repo_cfg);
+    let vault_key =
+        unlock_vault_if_needed(repo_cfg, local_cfg.use_keyring, is_interactive, needs_vault)?;
     let os_info = OsInfo::detect();
 
     let mut devices = local_cfg.default_devices.clone();
@@ -818,8 +799,8 @@ fn handle_import<W: Write>(
     let sync_engine = SyncEngine::new(
         &label,
         &repo_path,
-        &repo_cfg,
-        &state_db,
+        repo_cfg,
+        state_db,
         devices,
         os_info,
         vault_key.as_ref(),
@@ -849,27 +830,19 @@ fn handle_export<W: Write>(
     stdout: &mut W,
     lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
-    let local_cfg_path = expand_tilde("~/.config/dotler/config.toml");
-    let local_cfg = if local_cfg_path.is_file() {
-        LocalConfig::load(&local_cfg_path)?
-    } else {
-        LocalConfig::default()
-    };
+    let local_cfg_res = get_local_config(expand_tilde(LOCAL_CONFIG_FILE));
+    let local_cfg = local_cfg_res.get()?;
 
-    let (label, repo_path) = resolve_repo_path(&local_cfg, cli.repo.as_deref())?;
-    let manifest_path = repo_path.join("dotler.toml");
-    let repo_cfg = RepoConfig::load(&manifest_path)?;
+    let (label, repo_path) = resolve_repo_path_with_cwd(local_cfg, cli.repo.as_deref())?;
+    let repo_cfg_res = get_repo_config(repo_path.join("dotler.toml"));
+    let repo_cfg = repo_cfg_res.get()?;
 
-    let state_db_path = expand_tilde(STATE_DB_PATH);
-    let state_db = StateDb::open(&state_db_path)?;
+    let state_db_res = get_state_db(expand_tilde(STATE_DB_PATH));
+    let state_db = state_db_res.get()?;
 
-    let needs_vault = has_encrypted_rules(&repo_cfg);
-    let vault_key = unlock_vault_if_needed(
-        &repo_cfg,
-        local_cfg.use_keyring,
-        is_interactive,
-        needs_vault,
-    )?;
+    let needs_vault = has_encrypted_rules(repo_cfg);
+    let vault_key =
+        unlock_vault_if_needed(repo_cfg, local_cfg.use_keyring, is_interactive, needs_vault)?;
     let os_info = OsInfo::detect();
 
     let mut devices = local_cfg.default_devices.clone();
@@ -880,8 +853,8 @@ fn handle_export<W: Write>(
     let sync_engine = SyncEngine::new(
         &label,
         &repo_path,
-        &repo_cfg,
-        &state_db,
+        repo_cfg,
+        state_db,
         devices,
         os_info,
         vault_key.as_ref(),
@@ -923,28 +896,20 @@ fn handle_tidy<W: Write>(
     stdout: &mut W,
     lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
-    let local_cfg_path = expand_tilde("~/.config/dotler/config.toml");
-    let local_cfg = if local_cfg_path.is_file() {
-        LocalConfig::load(&local_cfg_path)?
-    } else {
-        LocalConfig::default()
-    };
+    let local_cfg_res = get_local_config(expand_tilde(LOCAL_CONFIG_FILE));
+    let local_cfg = local_cfg_res.get()?;
 
-    let (label, repo_path) = resolve_repo_path(&local_cfg, cli.repo.as_deref())?;
-    let manifest_path = repo_path.join("dotler.toml");
-    let repo_cfg = RepoConfig::load(&manifest_path)?;
+    let (label, repo_path) = resolve_repo_path_with_cwd(local_cfg, cli.repo.as_deref())?;
+    let repo_cfg_res = get_repo_config(repo_path.join("dotler.toml"));
+    let repo_cfg = repo_cfg_res.get()?;
 
-    let state_db_path = expand_tilde(STATE_DB_PATH);
-    let state_db = StateDb::open(&state_db_path)?;
+    let state_db_res = get_state_db(expand_tilde(STATE_DB_PATH));
+    let state_db = state_db_res.get()?;
 
     let needs_vault =
-        has_encrypted_rules(&repo_cfg) || has_encrypted_repo_files(&repo_path, &repo_cfg);
-    let vault_key = unlock_vault_if_needed(
-        &repo_cfg,
-        local_cfg.use_keyring,
-        is_interactive,
-        needs_vault,
-    )?;
+        has_encrypted_rules(repo_cfg) || has_encrypted_repo_files(&repo_path, repo_cfg);
+    let vault_key =
+        unlock_vault_if_needed(repo_cfg, local_cfg.use_keyring, is_interactive, needs_vault)?;
     let os_info = OsInfo::detect();
 
     let mut devices = local_cfg.default_devices.clone();
@@ -955,8 +920,8 @@ fn handle_tidy<W: Write>(
     let sync_engine = SyncEngine::new(
         &label,
         &repo_path,
-        &repo_cfg,
-        &state_db,
+        repo_cfg,
+        state_db,
         devices,
         os_info,
         vault_key.as_ref(),
@@ -982,18 +947,14 @@ fn handle_vault<W: Write>(
     stdout: &mut W,
     _lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
-    let local_cfg_path = expand_tilde("~/.config/dotler/config.toml");
-    let local_cfg = if local_cfg_path.is_file() {
-        LocalConfig::load(&local_cfg_path)?
-    } else {
-        LocalConfig::default()
-    };
+    let local_cfg_res = get_local_config(expand_tilde(LOCAL_CONFIG_FILE));
+    let local_cfg = local_cfg_res.get()?;
 
     match cmd {
         VaultCommand::Init(args) => {
-            let (_label, repo_path) = resolve_repo_path(&local_cfg, cli.repo.as_deref())?;
+            let (_label, repo_path) = resolve_repo_path_with_cwd(local_cfg, cli.repo.as_deref())?;
             let manifest_path = repo_path.join("dotler.toml");
-            let repo_cfg = RepoConfig::load_without_vault_check(&manifest_path)?;
+            let mut repo_cfg = RepoConfig::load_without_vault_check(&manifest_path)?;
 
             if repo_cfg.vault.is_some() {
                 return Err(EngineError::Config(crate::config::ConfigError::UnknownField {
@@ -1015,28 +976,21 @@ fn handle_vault<W: Write>(
                 .filter(|s| !s.is_empty())
                 .map(str::to_string);
 
-            // Update dotler.toml atomically
-            let mut manifest_str = fs::read_to_string(&manifest_path)?;
-            manifest_str.push_str(&format!(
-                "\n[vault]\nvault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n",
-                vault_cfg.vault_id, vault_cfg.password_slot, vault_cfg.recovery_slot
-            ));
-            if let Some(ref h) = vault_cfg.hint {
-                let escaped = toml::Value::String(h.clone()).to_string();
-                manifest_str.push_str(&format!("hint = {escaped}\n"));
-            }
-            atomic_write_file(&manifest_path, manifest_str.as_bytes())?;
+            let vault_id = vault_cfg.vault_id.clone();
+            let vault_hint = vault_cfg.hint.clone();
+            repo_cfg.vault = Some(vault_cfg);
 
-            // Attempt to store in keyring if enabled
-            if local_cfg.use_keyring {
-                let _ = OsKeyring::set(&pass);
-            }
+            let mut repo_cfg_res = get_repo_config(manifest_path);
+            repo_cfg_res.set(repo_cfg)?;
+
+            let mut password_res = get_password(local_cfg.use_keyring, None, is_interactive, None);
+            let _ = password_res.set(pass);
 
             let mut data = json!({
-                "vault_id": vault_cfg.vault_id,
+                "vault_id": vault_id,
                 "mnemonic": mnemonic.phrase(),
             });
-            if let Some(ref h) = vault_cfg.hint {
+            if let Some(ref h) = vault_hint {
                 data["hint"] = json!(h);
             }
             Ok(render_success_to(stdout, "vault init", &data, cli.json))
@@ -1044,7 +998,7 @@ fn handle_vault<W: Write>(
 
         VaultCommand::Passwd(args) => {
             let data = rotate_vault_passphrases(
-                &local_cfg,
+                local_cfg,
                 cli.repo.as_deref(),
                 args.password_stdin,
                 args.hint.as_deref(),
@@ -1054,9 +1008,10 @@ fn handle_vault<W: Write>(
         }
 
         VaultCommand::Recover(args) => {
-            let (_label, repo_path) = resolve_repo_path(&local_cfg, cli.repo.as_deref())?;
+            let (_label, repo_path) = resolve_repo_path_with_cwd(local_cfg, cli.repo.as_deref())?;
             let manifest_path = repo_path.join("dotler.toml");
-            let repo_cfg = RepoConfig::load(&manifest_path)?;
+            let mut repo_cfg_res = get_repo_config(manifest_path);
+            let mut repo_cfg = repo_cfg_res.get()?.clone();
 
             let vault_cfg = repo_cfg
                 .vault
@@ -1092,19 +1047,20 @@ fn handle_vault<W: Write>(
                 };
             }
 
-            let manifest_str = fs::read_to_string(&manifest_path)?;
-            let updated = update_vault_manifest(&manifest_str, vault_cfg, &new_cfg);
-            atomic_write_file(&manifest_path, updated.as_bytes())?;
-            if local_cfg.use_keyring {
-                let _ = OsKeyring::set(&new_pass);
-            }
+            let vault_id = new_cfg.vault_id.clone();
+            let vault_hint = new_cfg.hint.clone();
+            repo_cfg.vault = Some(new_cfg);
+            repo_cfg_res.set(repo_cfg)?;
+
+            let mut password_res = get_password(local_cfg.use_keyring, None, is_interactive, None);
+            let _ = password_res.set(new_pass);
 
             let mut data = json!({
-                "vault_id": new_cfg.vault_id,
+                "vault_id": vault_id,
                 "status": "recovered",
                 "new_mnemonic": new_mnemonic.phrase(),
             });
-            if let Some(ref h) = new_cfg.hint {
+            if let Some(ref h) = vault_hint {
                 data["hint"] = json!(h);
             }
             Ok(render_success_to(stdout, "vault recover", &data, cli.json))
@@ -1127,7 +1083,9 @@ fn handle_key<W: Write>(
                 is_interactive,
                 "Enter vault passphrase to store in keyring: ",
             )?;
-            OsKeyring::set(&pass)
+            let mut password_res = get_password(true, None, is_interactive, None);
+            password_res
+                .set(pass)
                 .map_err(|e| EngineError::Crypto(crate::crypto::CryptoError::Keyring(e)))?;
             let data = json!({ "status": "keyring_updated" });
             Ok(render_success_to(stdout, "key set", &data, cli.json))
@@ -1146,17 +1104,14 @@ fn handle_ai<W: Write>(
     stdout: &mut W,
     _lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
-    let local_cfg_path = expand_tilde("~/.config/dotler/config.toml");
-    let local_cfg = if local_cfg_path.is_file() {
-        LocalConfig::load(&local_cfg_path).unwrap_or_default()
-    } else {
-        LocalConfig::default()
-    };
+    let local_cfg_res = get_local_config(expand_tilde(LOCAL_CONFIG_FILE));
+    let default_cfg = LocalConfig::default();
+    let local_cfg = local_cfg_res.get().unwrap_or(&default_cfg);
     let os_info = OsInfo::detect();
     let keyring_ready =
         local_cfg.use_keyring && OsKeyring::get().map(|opt| opt.is_some()).unwrap_or(false);
 
-    let briefing_markdown = render_briefing(&local_cfg, &os_info, keyring_ready);
+    let briefing_markdown = render_briefing(local_cfg, &os_info, keyring_ready);
     Ok(render_success_to(
         stdout,
         "ai",
@@ -1177,70 +1132,6 @@ fn handle_update<W: Write>(
         "version": env!("CARGO_PKG_VERSION"),
     });
     Ok(render_success_to(stdout, "update", &data, cli.json))
-}
-
-fn resolve_repo_path(
-    local_cfg: &LocalConfig,
-    requested_label: Option<&str>,
-) -> Result<(String, PathBuf), EngineError> {
-    if requested_label.is_none() {
-        let current_dir = std::env::current_dir()?;
-        if let Some(repo_dir) = crate::config::local::find_ancestor_repo_dir(&current_dir) {
-            let canon_repo = fs::canonicalize(&repo_dir).unwrap_or_else(|_| repo_dir.clone());
-            if let Some((reg_label, _)) = local_cfg.repos.iter().find(|(_, p)| {
-                let exp = expand_tilde(p);
-                fs::canonicalize(&exp).unwrap_or(exp) == canon_repo
-            }) {
-                return Ok((reg_label.clone(), repo_dir));
-            }
-            let label = repo_dir
-                .file_name()
-                .map(|f| f.to_string_lossy().to_string())
-                .unwrap_or_else(|| "default".to_string());
-            return Ok((label, repo_dir));
-        }
-    }
-
-    local_cfg
-        .resolve_repo(requested_label)
-        .map_err(EngineError::Config)
-}
-
-fn update_vault_manifest(
-    manifest_str: &str,
-    old_cfg: &crate::config::repo::VaultConfig,
-    new_cfg: &crate::config::repo::VaultConfig,
-) -> String {
-    let mut updated = manifest_str.replace(
-        &format!("password_slot = \"{}\"", old_cfg.password_slot),
-        &format!("password_slot = \"{}\"", new_cfg.password_slot),
-    );
-    updated = updated.replace(
-        &format!("recovery_slot = \"{}\"", old_cfg.recovery_slot),
-        &format!("recovery_slot = \"{}\"", new_cfg.recovery_slot),
-    );
-    if new_cfg.hint != old_cfg.hint {
-        match (&old_cfg.hint, &new_cfg.hint) {
-            (Some(old_h), Some(new_h)) => {
-                let old_val = toml::Value::String(old_h.clone()).to_string();
-                let new_val = toml::Value::String(new_h.clone()).to_string();
-                updated =
-                    updated.replace(&format!("hint = {old_val}"), &format!("hint = {new_val}"));
-            }
-            (None, Some(new_h)) => {
-                let new_val = toml::Value::String(new_h.clone()).to_string();
-                let target = format!("recovery_slot = \"{}\"", new_cfg.recovery_slot);
-                updated = updated.replace(&target, &format!("{target}\nhint = {new_val}"));
-            }
-            (Some(old_h), None) => {
-                let old_val = toml::Value::String(old_h.clone()).to_string();
-                updated = updated.replace(&format!("hint = {old_val}\n"), "");
-                updated = updated.replace(&format!("hint = {old_val}"), "");
-            }
-            (None, None) => {}
-        }
-    }
-    updated
 }
 
 fn rotate_vault_passphrases(
@@ -1351,7 +1242,8 @@ fn rotate_vault_passphrases(
                     };
                 }
                 let manifest_str = fs::read_to_string(&manifest_path)?;
-                let updated_manifest = update_vault_manifest(&manifest_str, &vault_cfg, &new_cfg);
+                let updated_manifest =
+                    update_vault_manifest_section(&manifest_str, &vault_cfg, &new_cfg);
                 pending_writes.push((label, manifest_path, updated_manifest, new_cfg.vault_id));
             }
             Err(crate::crypto::vault::VaultError::WeakPassphrase(msg)) => {

@@ -126,7 +126,14 @@ impl StateDb {
     pub fn path(&self) -> &Path {
         &self.db_path
     }
+}
 
+/// Creates a lazy [`Resource`] for `~/.config/dotler/state.db` (or a custom path).
+pub fn get_state_db(db_path: PathBuf) -> crate::config::Resource<StateDb, StateError> {
+    crate::config::Resource::new(move || StateDb::open(&db_path), |_| Ok(()))
+}
+
+impl StateDb {
     pub fn upsert_synced_file(&self, record: &SyncedFileRecord) -> Result<(), StateError> {
         let guard = self.ensure_conn()?;
         let conn = guard.as_ref().unwrap();

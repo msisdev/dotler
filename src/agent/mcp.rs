@@ -11,13 +11,18 @@ use serde_json::{Value, json};
 
 use crate::agent::AgentError;
 use crate::agent::briefing::render_briefing;
-use crate::config::local::{LocalConfig, expand_tilde};
-use crate::config::repo::{OsInfo, RepoConfig, parse_selection_rules, validate_path_security};
+use crate::config::local::{
+    LOCAL_CONFIG_FILE, expand_tilde, get_local_config, resolve_repo_path_with_cwd,
+};
+use crate::config::repo::{
+    OsInfo, RepoConfig, get_repo_config, parse_selection_rules, validate_path_security,
+};
 use crate::config::state::{
     DOTLER_LOCK_PATH, DOTLER_LOCK_POLL_INTERVAL_MS, DOTLER_LOCK_TIMEOUT_MS, DotlerLock,
-    DotlerLockGuard, STATE_DB_PATH, StateDb,
+    DotlerLockGuard, STATE_DB_PATH, get_state_db,
 };
-use crate::crypto::keyring::OsKeyring;
+use crate::config::{Provider, Resource};
+use crate::crypto::keyring::{OsKeyring, get_password};
 use crate::crypto::vault::{VaultKey, VaultSlot};
 use crate::engine::remote::{list_remote, parse_url};
 use crate::engine::sync::{
@@ -329,13 +334,17 @@ fn dispatch_tool(
     args: Value,
     lock: &DotlerLockGuard,
 ) -> Result<ToolCallResult, String> {
+    let local_cfg_res = get_local_config(expand_tilde(LOCAL_CONFIG_FILE));
+    let state_db_res = get_state_db(expand_tilde(STATE_DB_PATH));
+
     match name {
         "dotler_briefing" => {
-            let local_cfg = load_or_default_local_config();
+            let default_cfg = crate::config::local::LocalConfig::default();
+            let local_cfg = local_cfg_res.get().unwrap_or(&default_cfg);
             let os_info = OsInfo::detect();
             let keyring_ready =
                 local_cfg.use_keyring && OsKeyring::get().map(|opt| opt.is_some()).unwrap_or(false);
-            let briefing_text = render_briefing(&local_cfg, &os_info, keyring_ready);
+            let briefing_text = render_briefing(local_cfg, &os_info, keyring_ready);
             Ok(ToolCallResult {
                 content: vec![ToolContent {
                     r#type: "text".to_string(),
@@ -349,12 +358,14 @@ fn dispatch_tool(
             let repo_arg = args.get("repo").and_then(Value::as_str);
             let group_arg = args.get("group").and_then(Value::as_str);
 
-            let local_cfg = load_or_default_local_config();
-            let (_label, repo_path) = resolve_mcp_repo(&local_cfg, repo_arg)
+            let default_cfg = crate::config::local::LocalConfig::default();
+            let local_cfg = local_cfg_res.get().unwrap_or(&default_cfg);
+            let (_label, repo_path) = resolve_repo_path_with_cwd(local_cfg, repo_arg)
                 .map_err(|e| format!("Configuration error: {e}"))?;
 
-            let manifest_path = repo_path.join("dotler.toml");
-            let repo_cfg = RepoConfig::load(&manifest_path)
+            let repo_cfg_res = get_repo_config(repo_path.join("dotler.toml"));
+            let repo_cfg = repo_cfg_res
+                .get()
                 .map_err(|e| format!("Failed to load dotler.toml: {e}"))?;
 
             // Validate path safety and syntax
@@ -391,25 +402,29 @@ fn dispatch_tool(
             let repo_arg = args.get("repo").and_then(Value::as_str);
             let group_arg = args.get("group").and_then(Value::as_str);
 
-            let local_cfg = load_or_default_local_config();
-            let (label, repo_path) = resolve_mcp_repo(&local_cfg, repo_arg)
+            let default_cfg = crate::config::local::LocalConfig::default();
+            let local_cfg = local_cfg_res.get().unwrap_or(&default_cfg);
+            let (label, repo_path) = resolve_repo_path_with_cwd(local_cfg, repo_arg)
                 .map_err(|e| format!("Configuration error: {e}"))?;
 
-            let manifest_path = repo_path.join("dotler.toml");
-            let repo_cfg = RepoConfig::load(&manifest_path)
+            let repo_cfg_res = get_repo_config(repo_path.join("dotler.toml"));
+            let repo_cfg = repo_cfg_res
+                .get()
                 .map_err(|e| format!("Failed to load dotler.toml: {e}"))?;
 
-            let state_db = StateDb::open(&expand_tilde(STATE_DB_PATH))
+            let state_db = state_db_res
+                .get()
                 .map_err(|e| format!("Failed to open state.db: {e}"))?;
 
-            let vault_key = try_unlock_vault(&repo_cfg, local_cfg.use_keyring);
+            let password_res = get_password(local_cfg.use_keyring, None, false, None);
+            let vault_key = try_unlock_vault(repo_cfg, local_cfg.use_keyring, &password_res);
             let os_info = OsInfo::detect();
 
             let sync_engine = SyncEngine::new(
                 &label,
                 &repo_path,
-                &repo_cfg,
-                &state_db,
+                repo_cfg,
+                state_db,
                 local_cfg.default_devices.clone(),
                 os_info,
                 vault_key.as_ref(),
@@ -437,25 +452,29 @@ fn dispatch_tool(
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
 
-            let local_cfg = load_or_default_local_config();
-            let (label, repo_path) = resolve_mcp_repo(&local_cfg, repo_arg)
+            let default_cfg = crate::config::local::LocalConfig::default();
+            let local_cfg = local_cfg_res.get().unwrap_or(&default_cfg);
+            let (label, repo_path) = resolve_repo_path_with_cwd(local_cfg, repo_arg)
                 .map_err(|e| format!("Configuration error: {e}"))?;
 
-            let manifest_path = repo_path.join("dotler.toml");
-            let repo_cfg = RepoConfig::load(&manifest_path)
+            let repo_cfg_res = get_repo_config(repo_path.join("dotler.toml"));
+            let repo_cfg = repo_cfg_res
+                .get()
                 .map_err(|e| format!("Failed to load dotler.toml: {e}"))?;
 
-            let state_db = StateDb::open(&expand_tilde(STATE_DB_PATH))
+            let state_db = state_db_res
+                .get()
                 .map_err(|e| format!("Failed to open state.db: {e}"))?;
 
-            let vault_key = try_unlock_vault(&repo_cfg, local_cfg.use_keyring);
+            let password_res = get_password(local_cfg.use_keyring, None, false, None);
+            let vault_key = try_unlock_vault(repo_cfg, local_cfg.use_keyring, &password_res);
             let os_info = OsInfo::detect();
 
             let sync_engine = SyncEngine::new(
                 &label,
                 &repo_path,
-                &repo_cfg,
-                &state_db,
+                repo_cfg,
+                state_db,
                 local_cfg.default_devices.clone(),
                 os_info,
                 vault_key.as_ref(),
@@ -496,25 +515,29 @@ fn dispatch_tool(
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
 
-            let local_cfg = load_or_default_local_config();
-            let (label, repo_path) = resolve_mcp_repo(&local_cfg, repo_arg)
+            let default_cfg = crate::config::local::LocalConfig::default();
+            let local_cfg = local_cfg_res.get().unwrap_or(&default_cfg);
+            let (label, repo_path) = resolve_repo_path_with_cwd(local_cfg, repo_arg)
                 .map_err(|e| format!("Configuration error: {e}"))?;
 
-            let manifest_path = repo_path.join("dotler.toml");
-            let repo_cfg = RepoConfig::load(&manifest_path)
+            let repo_cfg_res = get_repo_config(repo_path.join("dotler.toml"));
+            let repo_cfg = repo_cfg_res
+                .get()
                 .map_err(|e| format!("Failed to load dotler.toml: {e}"))?;
 
-            let state_db = StateDb::open(&expand_tilde(STATE_DB_PATH))
+            let state_db = state_db_res
+                .get()
                 .map_err(|e| format!("Failed to open state.db: {e}"))?;
 
-            let vault_key = try_unlock_vault(&repo_cfg, local_cfg.use_keyring);
+            let password_res = get_password(local_cfg.use_keyring, None, false, None);
+            let vault_key = try_unlock_vault(repo_cfg, local_cfg.use_keyring, &password_res);
             let os_info = OsInfo::detect();
 
             let sync_engine = SyncEngine::new(
                 &label,
                 &repo_path,
-                &repo_cfg,
-                &state_db,
+                repo_cfg,
+                state_db,
                 local_cfg.default_devices.clone(),
                 os_info,
                 vault_key.as_ref(),
@@ -579,25 +602,29 @@ fn dispatch_tool(
                 TidyOrphanPolicy::KeepOnOs
             };
 
-            let local_cfg = load_or_default_local_config();
-            let (label, repo_path) = resolve_mcp_repo(&local_cfg, repo_arg)
+            let default_cfg = crate::config::local::LocalConfig::default();
+            let local_cfg = local_cfg_res.get().unwrap_or(&default_cfg);
+            let (label, repo_path) = resolve_repo_path_with_cwd(local_cfg, repo_arg)
                 .map_err(|e| format!("Configuration error: {e}"))?;
 
-            let manifest_path = repo_path.join("dotler.toml");
-            let repo_cfg = RepoConfig::load(&manifest_path)
+            let repo_cfg_res = get_repo_config(repo_path.join("dotler.toml"));
+            let repo_cfg = repo_cfg_res
+                .get()
                 .map_err(|e| format!("Failed to load dotler.toml: {e}"))?;
 
-            let state_db = StateDb::open(&expand_tilde(STATE_DB_PATH))
+            let state_db = state_db_res
+                .get()
                 .map_err(|e| format!("Failed to open state.db: {e}"))?;
 
-            let vault_key = try_unlock_vault(&repo_cfg, local_cfg.use_keyring);
+            let password_res = get_password(local_cfg.use_keyring, None, false, None);
+            let vault_key = try_unlock_vault(repo_cfg, local_cfg.use_keyring, &password_res);
             let os_info = OsInfo::detect();
 
             let sync_engine = SyncEngine::new(
                 &label,
                 &repo_path,
-                &repo_cfg,
-                &state_db,
+                repo_cfg,
+                state_db,
                 local_cfg.default_devices.clone(),
                 os_info,
                 vault_key.as_ref(),
@@ -641,48 +668,18 @@ fn dispatch_tool(
     }
 }
 
-fn load_or_default_local_config() -> LocalConfig {
-    let config_path = expand_tilde("~/.config/dotler/config.toml");
-    if config_path.is_file() {
-        LocalConfig::load(&config_path).unwrap_or_default()
-    } else {
-        LocalConfig::default()
-    }
-}
-
-fn resolve_mcp_repo(
-    local_cfg: &LocalConfig,
-    requested_label: Option<&str>,
-) -> Result<(String, std::path::PathBuf), crate::config::ConfigError> {
-    if requested_label.is_none()
-        && let Ok(current_dir) = std::env::current_dir()
-        && let Some(repo_dir) = crate::config::local::find_ancestor_repo_dir(&current_dir)
-    {
-        let canon_repo = fs::canonicalize(&repo_dir).unwrap_or_else(|_| repo_dir.clone());
-        if let Some((reg_label, _)) = local_cfg.repos.iter().find(|(_, p)| {
-            let exp = expand_tilde(p);
-            fs::canonicalize(&exp).unwrap_or(exp) == canon_repo
-        }) {
-            return Ok((reg_label.clone(), repo_dir));
-        }
-        let label = repo_dir
-            .file_name()
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_else(|| "default".to_string());
-        return Ok((label, repo_dir));
-    }
-
-    local_cfg.resolve_repo(requested_label)
-}
-
-fn try_unlock_vault(repo_cfg: &RepoConfig, use_keyring: bool) -> Option<VaultKey> {
+fn try_unlock_vault(
+    repo_cfg: &RepoConfig,
+    use_keyring: bool,
+    password_res: &Resource<crate::crypto::SecretString, crate::crypto::KeyringError>,
+) -> Option<VaultKey> {
     if !use_keyring {
         return None;
     }
     let vault_cfg = repo_cfg.vault.as_ref()?;
-    let secret = OsKeyring::get().ok()??;
+    let secret = password_res.get().ok()?;
     let slot = VaultSlot::from_base64(&vault_cfg.password_slot).ok()?;
-    slot.unwrap(&secret, Some(&vault_cfg.vault_id)).ok()
+    slot.unwrap(secret, Some(&vault_cfg.vault_id)).ok()
 }
 
 #[cfg(test)]

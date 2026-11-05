@@ -343,6 +343,50 @@ impl LocalConfig {
     }
 }
 
+/// Creates a lazy [`Resource`] for `~/.config/dotler/config.toml` (or a custom path).
+pub fn get_local_config(path: PathBuf) -> crate::config::Resource<LocalConfig, ConfigError> {
+    let load_path = path.clone();
+    let save_path = path;
+    crate::config::Resource::new(
+        move || {
+            if load_path.is_file() {
+                LocalConfig::load(&load_path)
+            } else {
+                Ok(LocalConfig::default())
+            }
+        },
+        move |cfg: &LocalConfig| cfg.save_atomic(&save_path),
+    )
+}
+
+/// Resolves the active `(repo_label, repo_dir)` by checking the current working directory's
+/// ancestor chain for `dotler.toml` first (when `requested_label` is `None`), falling back
+/// to `local_cfg.resolve_repo(requested_label)`.
+pub fn resolve_repo_path_with_cwd(
+    local_cfg: &LocalConfig,
+    requested_label: Option<&str>,
+) -> Result<(String, PathBuf), ConfigError> {
+    if requested_label.is_none()
+        && let Ok(current_dir) = std::env::current_dir()
+        && let Some(repo_dir) = find_ancestor_repo_dir(&current_dir)
+    {
+        let canon_repo = fs::canonicalize(&repo_dir).unwrap_or_else(|_| repo_dir.clone());
+        if let Some((reg_label, _)) = local_cfg.repos.iter().find(|(_, p)| {
+            let exp = expand_tilde(p);
+            fs::canonicalize(&exp).unwrap_or(exp) == canon_repo
+        }) {
+            return Ok((reg_label.clone(), repo_dir));
+        }
+        let label = repo_dir
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| "default".to_string());
+        return Ok((label, repo_dir));
+    }
+
+    local_cfg.resolve_repo(requested_label)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

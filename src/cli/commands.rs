@@ -10,7 +10,6 @@ use serde_json::json;
 
 use crate::agent::briefing::{render_briefing, scaffold_skill_md};
 use crate::cli::output::{EXIT_SUCCESS, render_success_to};
-use crate::config::Provider;
 use crate::config::local::{
     LOCAL_CONFIG_FILE, LocalConfig, WalkDir, expand_tilde, get_local_config,
     resolve_repo_path_with_cwd,

@@ -1,7 +1,6 @@
-use std::cell::OnceCell;
-
 pub mod local;
 pub mod repo;
+pub mod resource;
 pub mod state;
 
 pub use local::{
@@ -11,66 +10,13 @@ pub use local::{
 pub use repo::{
     GroupConfig, OsInfo, RepoConfig, SelectionMode, SelectionRule, VaultConfig, get_repo_config,
 };
+pub use resource::Resource;
 pub use state::{
     ATOMIC_REPLACE_RETRIES, BACKUPS_DIR_PATH, DOTLER_LOCK_PATH, DOTLER_LOCK_POLL_INTERVAL_MS,
     DOTLER_LOCK_TIMEOUT_MS, DotlerLock, DotlerLockGuard, InstalledFileRecord,
     SQLITE_BUSY_TIMEOUT_MS, SQLITE_JOURNAL_MODE, SQLITE_SYNCHRONOUS, STATE_DB_PATH, StateDb,
     SyncedFileRecord, TMP_FILE_PREFIX, atomic_write_file, get_state_db,
 };
-
-/// Generic lazy resource provider interface.
-///
-/// Underlying resources (configuration files, SQLite connections, OS keyring secrets)
-/// are accessed only on the first call to [`Provider::get`], and updated via [`Provider::set`].
-pub trait Provider<T> {
-    type Error;
-
-    fn get(&self) -> Result<&T, Self::Error>;
-    fn set(&mut self, value: T) -> Result<(), Self::Error>;
-}
-
-type ResourceLoader<T, E> = Box<dyn Fn() -> Result<T, E>>;
-type ResourceSaver<T, E> = Box<dyn Fn(&T) -> Result<(), E>>;
-
-/// Functional lazy resource container backed by [`OnceCell`] and `loader`/`saver` closures.
-pub struct Resource<T, E> {
-    cache: OnceCell<T>,
-    loader: ResourceLoader<T, E>,
-    saver: ResourceSaver<T, E>,
-}
-
-impl<T, E> Resource<T, E> {
-    pub fn new<L, S>(loader: L, saver: S) -> Self
-    where
-        L: Fn() -> Result<T, E> + 'static,
-        S: Fn(&T) -> Result<(), E> + 'static,
-    {
-        Self {
-            cache: OnceCell::new(),
-            loader: Box::new(loader),
-            saver: Box::new(saver),
-        }
-    }
-}
-
-impl<T, E> Provider<T> for Resource<T, E> {
-    type Error = E;
-
-    fn get(&self) -> Result<&T, Self::Error> {
-        if let Some(val) = self.cache.get() {
-            return Ok(val);
-        }
-        let loaded = (self.loader)()?;
-        let _ = self.cache.set(loaded);
-        Ok(self.cache.get().expect("OnceCell initialized"))
-    }
-
-    fn set(&mut self, value: T) -> Result<(), Self::Error> {
-        (self.saver)(&value)?;
-        self.cache = OnceCell::from(value);
-        Ok(())
-    }
-}
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -277,43 +223,5 @@ impl LockError {
             LockError::Timeout { .. } => 4,
             LockError::Io(_) => 2,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::cell::Cell;
-    use std::rc::Rc;
-
-    #[test]
-    fn resource_provider_loads_lazily_and_persists_via_set() {
-        let load_count = Rc::new(Cell::new(0usize));
-        let save_count = Rc::new(Cell::new(0usize));
-
-        let lc = Rc::clone(&load_count);
-        let sc = Rc::clone(&save_count);
-
-        let mut res = Resource::new(
-            move || {
-                lc.set(lc.get() + 1);
-                Ok::<String, &'static str>("initial".to_string())
-            },
-            move |_val: &String| {
-                sc.set(sc.get() + 1);
-                Ok::<(), &'static str>(())
-            },
-        );
-
-        assert_eq!(load_count.get(), 0, "loader must not run before get()");
-        assert_eq!(res.get().unwrap(), "initial");
-        assert_eq!(load_count.get(), 1, "loader runs once on first get()");
-        assert_eq!(res.get().unwrap(), "initial");
-        assert_eq!(load_count.get(), 1, "subsequent get() returns cached value");
-
-        res.set("updated".to_string()).unwrap();
-        assert_eq!(save_count.get(), 1, "saver runs on set()");
-        assert_eq!(res.get().unwrap(), "updated");
-        assert_eq!(load_count.get(), 1, "get() after set() uses updated cache");
     }
 }

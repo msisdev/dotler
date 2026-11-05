@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use crate::agent::AgentError;
 use crate::agent::briefing::render_briefing;
+use crate::config::Resource;
 use crate::config::local::{
     LOCAL_CONFIG_FILE, expand_tilde, get_local_config, resolve_repo_path_with_cwd,
 };
@@ -21,7 +22,6 @@ use crate::config::state::{
     DOTLER_LOCK_PATH, DOTLER_LOCK_POLL_INTERVAL_MS, DOTLER_LOCK_TIMEOUT_MS, DotlerLock,
     DotlerLockGuard, STATE_DB_PATH, get_state_db,
 };
-use crate::config::{Provider, Resource};
 use crate::crypto::keyring::{OsKeyring, get_password};
 use crate::crypto::vault::{VaultKey, VaultSlot};
 use crate::engine::remote::{list_remote, parse_url};

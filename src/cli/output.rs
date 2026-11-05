@@ -57,34 +57,83 @@ impl JsonErrorPayload {
 }
 
 /// Unified error enum for the CLI boundary layer.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum CliError {
-    #[error("Configuration error: {0}")]
-    Config(#[from] crate::config::ConfigError),
-
-    #[error("State ledger error: {0}")]
-    State(#[from] crate::config::StateError),
-
-    #[error("Lock error: {0}")]
-    Lock(#[from] crate::config::LockError),
-
-    #[error("Cryptographic error: {0}")]
-    Crypto(#[from] crate::crypto::CryptoError),
-
-    #[error("Vault error: {0}")]
-    Vault(#[from] crate::crypto::vault::VaultError),
-
-    #[error("Keyring error: {0}")]
-    Keyring(#[from] crate::crypto::keyring::KeyringError),
-
-    #[error("Engine error: {0}")]
-    Engine(#[from] crate::engine::EngineError),
-
-    #[error("CLI argument error: {0}")]
+    Config(crate::config::ConfigError),
+    State(crate::config::StateError),
+    Lock(crate::config::LockError),
+    Crypto(crate::crypto::CryptoError),
+    Vault(crate::crypto::vault::VaultError),
+    Keyring(crate::crypto::keyring::KeyringError),
+    Engine(crate::engine::EngineError),
     Args(String),
+    Io(std::io::Error),
+}
 
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+impl std::fmt::Display for CliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Config(e) => write!(f, "Configuration error: {e}"),
+            Self::State(e) => write!(f, "State ledger error: {e}"),
+            Self::Lock(e) => write!(f, "Lock error: {e}"),
+            Self::Crypto(e) => write!(f, "Cryptographic error: {e}"),
+            Self::Vault(e) => write!(f, "Vault error: {e}"),
+            Self::Keyring(e) => write!(f, "Keyring error: {e}"),
+            Self::Engine(e) => write!(f, "Engine error: {e}"),
+            Self::Args(m) => write!(f, "CLI argument error: {m}"),
+            Self::Io(e) => write!(f, "I/O error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for CliError {}
+
+impl From<crate::config::ConfigError> for CliError {
+    fn from(e: crate::config::ConfigError) -> Self {
+        Self::Config(e)
+    }
+}
+
+impl From<crate::config::StateError> for CliError {
+    fn from(e: crate::config::StateError) -> Self {
+        Self::State(e)
+    }
+}
+
+impl From<crate::config::LockError> for CliError {
+    fn from(e: crate::config::LockError) -> Self {
+        Self::Lock(e)
+    }
+}
+
+impl From<crate::crypto::CryptoError> for CliError {
+    fn from(e: crate::crypto::CryptoError) -> Self {
+        Self::Crypto(e)
+    }
+}
+
+impl From<crate::crypto::vault::VaultError> for CliError {
+    fn from(e: crate::crypto::vault::VaultError) -> Self {
+        Self::Vault(e)
+    }
+}
+
+impl From<crate::crypto::keyring::KeyringError> for CliError {
+    fn from(e: crate::crypto::keyring::KeyringError) -> Self {
+        Self::Keyring(e)
+    }
+}
+
+impl From<crate::engine::EngineError> for CliError {
+    fn from(e: crate::engine::EngineError) -> Self {
+        Self::Engine(e)
+    }
+}
+
+impl From<std::io::Error> for CliError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
 }
 
 impl CliError {

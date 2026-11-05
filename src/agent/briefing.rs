@@ -210,8 +210,10 @@ mod tests {
         let secret = "my_super_secret_password_never_leak_me";
 
         crate::crypto::keyring::OsKeyring::enable_mock();
-        crate::crypto::keyring::OsKeyring::set(&secrecy::SecretString::new(secret.to_string()))
-            .unwrap();
+        crate::crypto::keyring::OsKeyring::set(&crate::crypto::SecretString::new(
+            secret.to_string(),
+        ))
+        .unwrap();
 
         let briefing = render_briefing(&cfg, &os_info, true);
 

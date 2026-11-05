@@ -11,10 +11,10 @@ use dotler::config::state::{
 };
 use dotler::crypto::keyring::OsKeyring;
 use dotler::crypto::vault::{EncryptedFile, VaultKey, init_vault};
+use dotler::crypto::{ExposeSecret, SecretString};
 use dotler::engine::{
     EngineError, FileSyncStatus, SyncEngine, TidyOrphanPolicy, atomic_write_file,
 };
-use secrecy::{ExposeSecret, SecretString};
 use tempfile::TempDir;
 
 static TEST_KEYRING_LOCK: Mutex<()> = Mutex::new(());

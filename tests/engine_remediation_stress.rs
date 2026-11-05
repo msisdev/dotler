@@ -15,11 +15,11 @@ use tempfile::TempDir;
 use dotler::config::ConfigError;
 use dotler::config::repo::{OsInfo, RepoConfig};
 use dotler::config::state::{DotlerLock, DotlerLockGuard, StateDb};
+use dotler::crypto::SecretString;
 use dotler::crypto::vault::init_vault;
 use dotler::engine::EngineError;
 use dotler::engine::remote::{install_remote, parse_url, uninstall_remote};
 use dotler::engine::sync::{FileSyncStatus, SyncEngine};
-use secrecy::SecretString;
 
 struct TestSandbox {
     _root: TempDir,

@@ -7,7 +7,7 @@ use dotler::crypto::{
     EncryptedFile, RecoveryMnemonic, VaultError, VaultKey, VaultSlot, XCHACHA_NONCE_LEN,
     change_password, init_vault, recover_vault,
 };
-use secrecy::{ExposeSecret, SecretString};
+use dotler::crypto::{ExposeSecret, SecretString};
 
 // ---------------------------------------------------------------------------
 // Suite 1: Tampering Attacks

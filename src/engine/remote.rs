@@ -9,16 +9,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
-use crate::config::local::{LocalConfig, expand_tilde};
+use crate::config::local::{LocalConfig, WalkDir, expand_tilde};
 use crate::config::repo::{
     OsInfo, RepoConfig, SelectionMode, evaluate_selection, is_symlink, parse_selection_rules,
     resolve_group_target_path, validate_dir_no_symlinks, validate_os_dir_path,
     validate_os_target_path, validate_path_security,
 };
 use crate::config::state::{BACKUPS_DIR_PATH, DotlerLockGuard, InstalledFileRecord, StateDb};
+use crate::crypto::ExposeSecret;
 use crate::crypto::vault::{EncryptedFile, VaultKey};
 use crate::engine::EngineError;
 use crate::engine::sync::atomic_write_file;
@@ -27,7 +27,7 @@ struct TempDirGuard(PathBuf);
 
 impl TempDirGuard {
     fn new() -> Result<Self, std::io::Error> {
-        let rand_id: u64 = rand::random();
+        let rand_id: u64 = crate::crypto::random_u64();
         let path = std::env::temp_dir().join(format!(".dotler-tmp-{rand_id:016x}"));
         fs::create_dir_all(&path)?;
         Ok(Self(path))
@@ -511,11 +511,8 @@ fn discover_manifests_in_tree(
     }
 
     let mut found_paths: Vec<(usize, String, PathBuf, PathBuf)> = Vec::new();
-    for entry in walkdir::WalkDir::new(repo_root)
-        .into_iter()
-        .filter_entry(|e| e.file_name() != ".git")
-    {
-        let entry = entry.map_err(std::io::Error::from)?;
+    for entry in WalkDir::new(repo_root).filter_entry(|e| e.file_name() != ".git") {
+        let entry = entry?;
         if entry.file_type().is_file() && entry.file_name() == "dotler.toml" {
             let full_path = entry.path().to_path_buf();
             let manifest_dir = full_path.parent().unwrap_or(repo_root).to_path_buf();
@@ -636,7 +633,7 @@ pub fn clone_repo(
     let parent = target_dir.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(parent)?;
 
-    let rand_id: u32 = rand::random();
+    let rand_id: u32 = crate::crypto::random_u32();
     let staging_dir = parent.join(format!("{STAGING_CLONE_PREFIX}{:08x}", rand_id));
 
     struct AutoCleanup<'a>(&'a Path, bool);
@@ -680,8 +677,8 @@ pub fn clone_repo(
     if let (Some(r_key), Some(l_key)) = (remote_vault_key, local_vault_key)
         && r_key.vault_id() != l_key.vault_id()
     {
-        for entry in walkdir::WalkDir::new(manifest_dir).min_depth(1) {
-            let entry = entry.map_err(std::io::Error::from)?;
+        for entry in WalkDir::new(manifest_dir).min_depth(1) {
+            let entry = entry?;
             if entry.file_type().is_file()
                 && entry.path().extension().and_then(|s| s.to_str()) == Some("enc")
             {
@@ -716,7 +713,7 @@ pub fn clone_repo(
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
+        let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("~"));
         let repo_path_entry = if let Ok(rel) = target_dir.strip_prefix(&home) {
             if rel.as_os_str().is_empty() {
                 "~".to_string()
@@ -833,8 +830,8 @@ pub fn install_remote(
 
         let rules = parse_selection_rules(&group.files).unwrap_or_default();
 
-        for entry in walkdir::WalkDir::new(&group_dir).min_depth(1) {
-            let entry = entry.map_err(std::io::Error::from)?;
+        for entry in WalkDir::new(&group_dir).min_depth(1) {
+            let entry = entry?;
             if entry.file_type().is_symlink() || is_symlink(entry.path()) {
                 return Err(EngineError::HardBlockedPath {
                     path: entry.path().to_path_buf(),
@@ -993,6 +990,6 @@ fn resolve_home_for_state(state: &StateDb) -> PathBuf {
     {
         home.to_path_buf()
     } else {
-        dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+        std::env::home_dir().unwrap_or_else(|| PathBuf::from("."))
     }
 }

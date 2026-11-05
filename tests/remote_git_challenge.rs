@@ -14,12 +14,12 @@ use tempfile::TempDir;
 
 use dotler::config::state::{DotlerLock, DotlerLockGuard, StateDb};
 use dotler::crypto::vault::{EncryptedFile, init_vault};
+use dotler::crypto::{ExposeSecret, SecretString};
 use dotler::engine::EngineError;
 use dotler::engine::remote::{
     REMOTE_TOML_FETCH_MAX_BYTES, STAGING_CLONE_PREFIX, clone_repo, install_remote, list_remote,
     parse_url, uninstall_remote,
 };
-use secrecy::{ExposeSecret, SecretString};
 
 pub struct ChallengeSandbox {
     pub root: TempDir,

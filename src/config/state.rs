@@ -460,7 +460,7 @@ pub fn atomic_write_file(dest: &Path, content: &[u8]) -> Result<(), StateError> 
     };
     fs::create_dir_all(parent)?;
 
-    let rand_id: u64 = rand::random();
+    let rand_id: u64 = crate::crypto::random_u64();
     let tmp_path = parent.join(format!("{TMP_FILE_PREFIX}{rand_id:016x}"));
 
     {

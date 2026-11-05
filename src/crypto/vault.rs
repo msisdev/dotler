@@ -4,12 +4,11 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
 };
 use hkdf::Hkdf;
-use rand::{RngCore, rngs::OsRng};
-use secrecy::{ExposeSecret, Secret, SecretString};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::config::repo::VaultConfig;
+use crate::crypto::{ExposeSecret, Secret, SecretString, bip39_words::WORDS, fill_random_bytes};
 
 pub const VAULT_KEY_LEN: usize = 32;
 pub const VAULT_SLOT_LEN: usize = 88;
@@ -23,37 +22,49 @@ pub const XCHACHA_NONCE_LEN: usize = 24;
 pub const POLY1305_TAG_LEN: usize = 16;
 pub const BIP39_ENTROPY_BITS: usize = 128;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum VaultError {
-    #[error("Weak passphrase: {0}")]
     WeakPassphrase(String),
-
-    #[error("RNG error: {0}")]
     RngError(String),
-
-    #[error("Invalid secret or passphrase: authentication tag check failed")]
     InvalidSecret,
-
-    #[error("Vault ID mismatch: expected '{expected}', found '{actual}'")]
     VaultIdMismatch { expected: String, actual: String },
-
-    #[error("Invalid mnemonic: {0}")]
     InvalidMnemonic(String),
-
-    #[error("Encryption failed: {0}")]
     EncryptionFailed(String),
-
-    #[error("Invalid encrypted file format: {0}")]
     InvalidEncFormat(String),
-
-    #[error("Decryption failed: {0}")]
     DecryptionFailed(String),
-
-    #[error("Invalid slot format: {0}")]
     InvalidSlotFormat(String),
+    Io(std::io::Error),
+}
 
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+impl std::fmt::Display for VaultError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WeakPassphrase(m) => write!(f, "Weak passphrase: {m}"),
+            Self::RngError(m) => write!(f, "RNG error: {m}"),
+            Self::InvalidSecret => write!(
+                f,
+                "Invalid secret or passphrase: authentication tag check failed"
+            ),
+            Self::VaultIdMismatch { expected, actual } => write!(
+                f,
+                "Vault ID mismatch: expected '{expected}', found '{actual}'"
+            ),
+            Self::InvalidMnemonic(m) => write!(f, "Invalid mnemonic: {m}"),
+            Self::EncryptionFailed(m) => write!(f, "Encryption failed: {m}"),
+            Self::InvalidEncFormat(m) => write!(f, "Invalid encrypted file format: {m}"),
+            Self::DecryptionFailed(m) => write!(f, "Decryption failed: {m}"),
+            Self::InvalidSlotFormat(m) => write!(f, "Invalid slot format: {m}"),
+            Self::Io(e) => write!(f, "I/O error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for VaultError {}
+
+impl From<std::io::Error> for VaultError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
 }
 
 impl VaultError {
@@ -90,8 +101,14 @@ pub fn derive_kek(
 
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut kek = [0u8; VAULT_KEY_LEN];
+    let mut blocks = vec![argon2::Block::default(); ARGON2_M_COST_KIB as usize];
     argon2
-        .hash_password_into(passphrase.expose_secret().as_bytes(), salt, &mut kek)
+        .hash_password_into_with_memory(
+            passphrase.expose_secret().as_bytes(),
+            salt,
+            &mut kek,
+            &mut blocks,
+        )
         .map_err(|e| {
             VaultError::EncryptionFailed(format!("Argon2 key derivation failed: {}", e))
         })?;
@@ -110,7 +127,7 @@ impl std::fmt::Debug for VaultKey {
 impl VaultKey {
     pub fn generate() -> Result<Self, VaultError> {
         let mut bytes = [0u8; VAULT_KEY_LEN];
-        OsRng.fill_bytes(&mut bytes);
+        fill_random_bytes(&mut bytes);
         Ok(Self::from_bytes(bytes))
     }
 
@@ -136,7 +153,7 @@ impl VaultKey {
 
     pub fn encrypt_file(&self, plaintext: &[u8]) -> Result<EncryptedFile, VaultError> {
         let mut nonce = [0u8; XCHACHA_NONCE_LEN];
-        OsRng.fill_bytes(&mut nonce);
+        fill_random_bytes(&mut nonce);
 
         let cipher = XChaCha20Poly1305::new(Key::from_slice(self.0.expose_secret()));
         let x_nonce = XNonce::from_slice(&nonce);
@@ -194,8 +211,8 @@ impl VaultSlot {
     pub fn wrap(secret: &SecretString, vault_key: &VaultKey) -> Result<Self, VaultError> {
         let mut salt = [0u8; ARGON2_SALT_LEN];
         let mut nonce = [0u8; XCHACHA_NONCE_LEN];
-        OsRng.fill_bytes(&mut salt);
-        OsRng.fill_bytes(&mut nonce);
+        fill_random_bytes(&mut salt);
+        fill_random_bytes(&mut nonce);
 
         let kek = derive_kek(secret, &salt)?;
         let cipher = XChaCha20Poly1305::new(Key::from_slice(kek.expose_secret()));
@@ -363,11 +380,23 @@ impl std::fmt::Debug for RecoveryMnemonic {
 impl RecoveryMnemonic {
     pub fn generate() -> Result<Self, VaultError> {
         let mut entropy = [0u8; 16];
-        OsRng.fill_bytes(&mut entropy);
-        let mnemonic = bip39::Mnemonic::from_entropy(&entropy).map_err(|e| {
-            VaultError::InvalidMnemonic(format!("Mnemonic generation failed: {}", e))
-        })?;
-        Ok(Self(SecretString::new(mnemonic.to_string())))
+        fill_random_bytes(&mut entropy);
+        let checksum_byte = Sha256::digest(entropy)[0] & 0xF0;
+        let mut buf = [0u8; 17];
+        buf[0..16].copy_from_slice(&entropy);
+        buf[16] = checksum_byte;
+
+        let mut words = Vec::with_capacity(12);
+        for i in 0..12 {
+            let mut idx: usize = 0;
+            for b in 0..11 {
+                let pos = i * 11 + b;
+                let bit = (buf[pos / 8] >> (7 - (pos % 8))) & 1;
+                idx = (idx << 1) | (bit as usize);
+            }
+            words.push(WORDS[idx]);
+        }
+        Ok(Self(SecretString::new(words.join(" "))))
     }
 
     pub fn validate(phrase: &str) -> Result<(), VaultError> {
@@ -378,9 +407,24 @@ impl RecoveryMnemonic {
                 words.len()
             )));
         }
-        let normalized = words.join(" ");
-        bip39::Mnemonic::parse(&normalized)
-            .map_err(|e| VaultError::InvalidMnemonic(format!("Invalid mnemonic phrase: {}", e)))?;
+        let mut buf = [0u8; 17];
+        for (i, &word) in words.iter().enumerate() {
+            let idx = WORDS.binary_search(&word).map_err(|_| {
+                VaultError::InvalidMnemonic(format!("Invalid mnemonic word: '{word}'"))
+            })?;
+            for b in 0..11 {
+                if ((idx >> (10 - b)) & 1) == 1 {
+                    let pos = i * 11 + b;
+                    buf[pos / 8] |= 1 << (7 - (pos % 8));
+                }
+            }
+        }
+        let expected_cs = Sha256::digest(&buf[0..16])[0] & 0xF0;
+        if buf[16] != expected_cs {
+            return Err(VaultError::InvalidMnemonic(
+                "Invalid mnemonic phrase: checksum mismatch".to_string(),
+            ));
+        }
         Ok(())
     }
 

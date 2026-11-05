@@ -8,11 +8,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
 use crate::config::StateError;
-use crate::config::local::expand_tilde;
+use crate::config::local::{WalkDir, expand_tilde};
 use crate::config::repo::{
     OsInfo, RepoConfig, SelectionMode, evaluate_selection, is_symlink, parse_selection_rules,
     resolve_group_target_path, validate_dir_no_symlinks, validate_os_dir_path,
@@ -22,6 +21,7 @@ pub use crate::config::state::{ATOMIC_REPLACE_RETRIES, TMP_FILE_PREFIX};
 use crate::config::state::{
     DotlerLockGuard, StateDb, SyncedFileRecord, atomic_write_file as shared_atomic_write_file,
 };
+use crate::crypto::ExposeSecret;
 use crate::crypto::vault::{EncryptedFile, VaultKey};
 use crate::engine::EngineError;
 
@@ -165,7 +165,7 @@ impl<'a> SyncEngine<'a> {
             let group_repo_dir = self.repo_dir.join(group_name);
             validate_dir_no_symlinks(&group_repo_dir)?;
             if group_repo_dir.is_dir() {
-                for entry in walkdir::WalkDir::new(&group_repo_dir)
+                for entry in WalkDir::new(&group_repo_dir)
                     .into_iter()
                     .filter_map(|e| e.ok())
                 {
@@ -215,8 +215,7 @@ impl<'a> SyncEngine<'a> {
                     expand_tilde("~/.config/dotler")
                 };
 
-                for entry in walkdir::WalkDir::new(&target_base_path)
-                    .into_iter()
+                for entry in WalkDir::new(&target_base_path)
                     .filter_entry(|e| {
                         if e.depth() == 0 {
                             return true;
@@ -708,7 +707,7 @@ impl<'a> SyncEngine<'a> {
 
             let rules = parse_selection_rules(&group_cfg.files)?;
 
-            for entry in walkdir::WalkDir::new(&group_repo_dir)
+            for entry in WalkDir::new(&group_repo_dir)
                 .into_iter()
                 .filter_map(|e| e.ok())
             {

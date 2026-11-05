@@ -13,74 +13,118 @@ pub use state::{
     SyncedFileRecord, TMP_FILE_PREFIX, atomic_write_file,
 };
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum ConfigError {
-    #[error("TOML syntax error: {0}")]
     TomlSyntaxError(String),
-
-    #[error("I/O error: {0}")]
-    IoError(#[from] std::io::Error),
-
-    #[error("Unknown field '{field}'. {hint}")]
-    UnknownField { field: String, hint: String },
-
-    #[error("Invalid device name '{device}': {reason}")]
-    InvalidDeviceName { device: String, reason: String },
-
-    #[error("Invalid default repository '{label}': repository is not configured in [repos]")]
-    InvalidDefaultRepo { label: String },
-
-    #[error(
-        "Invalid repository label '{label}': label must contain only alphanumeric characters, dashes, and underscores"
-    )]
-    InvalidRepoLabel { label: String },
-
-    #[error("Unknown repository label '{label}'")]
-    UnknownRepoLabel { label: String },
-
-    #[error(
-        "Ambiguous default repository: multiple repositories configured but no default_repo specified"
-    )]
+    IoError(std::io::Error),
+    UnknownField {
+        field: String,
+        hint: String,
+    },
+    InvalidDeviceName {
+        device: String,
+        reason: String,
+    },
+    InvalidDefaultRepo {
+        label: String,
+    },
+    InvalidRepoLabel {
+        label: String,
+    },
+    UnknownRepoLabel {
+        label: String,
+    },
     AmbiguousDefaultRepo,
-
-    #[error("No repositories configured")]
     NoReposConfigured,
-
-    #[error("Invalid home path '{path}': {reason}")]
-    InvalidHomePath { path: String, reason: String },
-
-    #[error("Path '{path}' is blocked by security policy: {reason}")]
-    HardBlockedPath { path: String, reason: String },
-
-    #[error("Invalid selection attribute '{attribute}' at line {line_no}. {hint}")]
+    InvalidHomePath {
+        path: String,
+        reason: String,
+    },
+    HardBlockedPath {
+        path: String,
+        reason: String,
+    },
     InvalidSelectionAttribute {
         attribute: String,
         line_no: usize,
         hint: String,
     },
-
-    #[error("Unknown OS key '{key}'. {hint}")]
-    UnknownOsKey { key: String, hint: String },
-
-    #[error(
-        "Missing [vault] configuration in repository manifest: encrypted files are declared but vault is not configured"
-    )]
+    UnknownOsKey {
+        key: String,
+        hint: String,
+    },
     MissingVaultConfig,
-
-    #[error(
-        "Cross-group target file collision: target path '{path}' is claimed by both group '{group1}' and group '{group2}'"
-    )]
     CrossGroupFileCollision {
         path: String,
         group1: String,
         group2: String,
     },
-
-    #[error("Atomic rename failed for '{0}'")]
     AtomicRenameFailed(String),
-
-    #[error("Repository path not found: '{0}'")]
     RepoPathNotFound(String),
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TomlSyntaxError(m) => write!(f, "TOML syntax error: {m}"),
+            Self::IoError(e) => write!(f, "I/O error: {e}"),
+            Self::UnknownField { field, hint } => write!(f, "Unknown field '{field}'. {hint}"),
+            Self::InvalidDeviceName { device, reason } => {
+                write!(f, "Invalid device name '{device}': {reason}")
+            }
+            Self::InvalidDefaultRepo { label } => write!(
+                f,
+                "Invalid default repository '{label}': repository is not configured in [repos]"
+            ),
+            Self::InvalidRepoLabel { label } => write!(
+                f,
+                "Invalid repository label '{label}': label must contain only alphanumeric characters, dashes, and underscores"
+            ),
+            Self::UnknownRepoLabel { label } => write!(f, "Unknown repository label '{label}'"),
+            Self::AmbiguousDefaultRepo => write!(
+                f,
+                "Ambiguous default repository: multiple repositories configured but no default_repo specified"
+            ),
+            Self::NoReposConfigured => write!(f, "No repositories configured"),
+            Self::InvalidHomePath { path, reason } => {
+                write!(f, "Invalid home path '{path}': {reason}")
+            }
+            Self::HardBlockedPath { path, reason } => {
+                write!(f, "Path '{path}' is blocked by security policy: {reason}")
+            }
+            Self::InvalidSelectionAttribute {
+                attribute,
+                line_no,
+                hint,
+            } => write!(
+                f,
+                "Invalid selection attribute '{attribute}' at line {line_no}. {hint}"
+            ),
+            Self::UnknownOsKey { key, hint } => write!(f, "Unknown OS key '{key}'. {hint}"),
+            Self::MissingVaultConfig => write!(
+                f,
+                "Missing [vault] configuration in repository manifest: encrypted files are declared but vault is not configured"
+            ),
+            Self::CrossGroupFileCollision {
+                path,
+                group1,
+                group2,
+            } => write!(
+                f,
+                "Cross-group target file collision: target path '{path}' is claimed by both group '{group1}' and group '{group2}'"
+            ),
+            Self::AtomicRenameFailed(m) => write!(f, "Atomic rename failed for '{m}'"),
+            Self::RepoPathNotFound(m) => write!(f, "Repository path not found: '{m}'"),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+impl From<std::io::Error> for ConfigError {
+    fn from(e: std::io::Error) -> Self {
+        Self::IoError(e)
+    }
 }
 
 impl ConfigError {
@@ -92,22 +136,45 @@ impl ConfigError {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum StateError {
-    #[error("SQLite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
-
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("Lock error: {0}")]
-    Lock(#[from] LockError),
-
-    #[error("Transaction error: {0}")]
+    Sqlite(rusqlite::Error),
+    Io(std::io::Error),
+    Lock(LockError),
     Transaction(String),
-
-    #[error("Atomic file replacement failed: {0}")]
     AtomicReplaceFailed(String),
+}
+
+impl std::fmt::Display for StateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sqlite(e) => write!(f, "SQLite error: {e}"),
+            Self::Io(e) => write!(f, "I/O error: {e}"),
+            Self::Lock(e) => write!(f, "Lock error: {e}"),
+            Self::Transaction(m) => write!(f, "Transaction error: {m}"),
+            Self::AtomicReplaceFailed(m) => write!(f, "Atomic file replacement failed: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for StateError {}
+
+impl From<rusqlite::Error> for StateError {
+    fn from(e: rusqlite::Error) -> Self {
+        Self::Sqlite(e)
+    }
+}
+
+impl From<std::io::Error> for StateError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+impl From<LockError> for StateError {
+    fn from(e: LockError) -> Self {
+        Self::Lock(e)
+    }
 }
 
 impl StateError {
@@ -119,13 +186,30 @@ impl StateError {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum LockError {
-    #[error("Failed to acquire dotler.lock: timed out after {timeout_ms}ms")]
     Timeout { timeout_ms: u64 },
+    Io(std::io::Error),
+}
 
-    #[error("I/O error while operating on lock file: {0}")]
-    Io(#[from] std::io::Error),
+impl std::fmt::Display for LockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timeout { timeout_ms } => write!(
+                f,
+                "Failed to acquire dotler.lock: timed out after {timeout_ms}ms"
+            ),
+            Self::Io(e) => write!(f, "I/O error while operating on lock file: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for LockError {}
+
+impl From<std::io::Error> for LockError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
 }
 
 impl LockError {

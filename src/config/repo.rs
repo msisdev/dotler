@@ -181,7 +181,7 @@ pub fn validate_dir_no_symlinks(dir: &Path) -> Result<(), ConfigError> {
     if !dir.exists() {
         return Ok(());
     }
-    for entry in walkdir::WalkDir::new(dir) {
+    for entry in crate::config::local::WalkDir::new(dir) {
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue,

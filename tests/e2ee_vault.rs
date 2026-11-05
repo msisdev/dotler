@@ -5,7 +5,7 @@ use dotler::crypto::{
     EncryptedFile, KeyringError, OsKeyring, PassphraseSource, VaultError, VaultKey, VaultSlot,
     change_password, init_vault, recover_vault,
 };
-use secrecy::{ExposeSecret, SecretString};
+use dotler::crypto::{ExposeSecret, SecretString};
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 

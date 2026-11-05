@@ -21,67 +21,146 @@ pub use sync::{
 use std::path::PathBuf;
 
 /// Top-level error enum for all engine synchronization and remote operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum EngineError {
-    #[error("Failed to acquire dotler.lock: timed out after {timeout_ms}ms")]
-    LockTimeout { timeout_ms: u64 },
-
-    #[error("Vault is locked: {reason}")]
-    VaultLocked { reason: String },
-
-    #[error("Local modification conflict on '{path}': {reason}")]
-    SyncConflict { path: PathBuf, reason: String },
-
-    #[error("Encryption mismatch on '{path}': {reason}")]
-    EncryptionMismatch { path: PathBuf, reason: String },
-
-    #[error("Security policy violation on '{path}': {reason}")]
-    HardBlockedPath { path: PathBuf, reason: String },
-
-    #[error("Remote payload exceeded {limit_bytes} bytes (got {size_bytes} bytes)")]
+    LockTimeout {
+        timeout_ms: u64,
+    },
+    VaultLocked {
+        reason: String,
+    },
+    SyncConflict {
+        path: PathBuf,
+        reason: String,
+    },
+    EncryptionMismatch {
+        path: PathBuf,
+        reason: String,
+    },
+    HardBlockedPath {
+        path: PathBuf,
+        reason: String,
+    },
     PayloadExceeded {
         size_bytes: usize,
         limit_bytes: usize,
     },
-
-    #[error("Invalid remote URL '{url}': {reason}")]
-    InvalidUrlFormat { url: String, reason: String },
-
-    #[error("Git {operation} failed: {message}")]
-    GitError { operation: String, message: String },
-
-    #[error("Group '{group}' not found in repository (available: {available:?})")]
+    InvalidUrlFormat {
+        url: String,
+        reason: String,
+    },
+    GitError {
+        operation: String,
+        message: String,
+    },
     GroupNotFound {
         group: String,
         available: Vec<String>,
     },
-
-    #[error("Missing remote dotler.toml in repository '{url}'")]
-    MissingRemoteToml { url: String },
-
-    #[error("File not found: '{path}'")]
-    FileNotFound { path: PathBuf },
-
-    #[error("Atomic replace failed for '{0}'")]
+    MissingRemoteToml {
+        url: String,
+    },
+    FileNotFound {
+        path: PathBuf,
+    },
     AtomicReplaceFailed(String),
+    Config(crate::config::ConfigError),
+    State(crate::config::StateError),
+    Crypto(crate::crypto::CryptoError),
+    Vault(crate::crypto::vault::VaultError),
+    Lock(crate::config::LockError),
+    Io(std::io::Error),
+}
 
-    #[error("Configuration error: {0}")]
-    Config(#[from] crate::config::ConfigError),
+impl std::fmt::Display for EngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LockTimeout { timeout_ms } => write!(
+                f,
+                "Failed to acquire dotler.lock: timed out after {timeout_ms}ms"
+            ),
+            Self::VaultLocked { reason } => write!(f, "Vault is locked: {reason}"),
+            Self::SyncConflict { path, reason } => write!(
+                f,
+                "Local modification conflict on '{}': {reason}",
+                path.display()
+            ),
+            Self::EncryptionMismatch { path, reason } => {
+                write!(f, "Encryption mismatch on '{}': {reason}", path.display())
+            }
+            Self::HardBlockedPath { path, reason } => write!(
+                f,
+                "Security policy violation on '{}': {reason}",
+                path.display()
+            ),
+            Self::PayloadExceeded {
+                size_bytes,
+                limit_bytes,
+            } => write!(
+                f,
+                "Remote payload exceeded {limit_bytes} bytes (got {size_bytes} bytes)"
+            ),
+            Self::InvalidUrlFormat { url, reason } => {
+                write!(f, "Invalid remote URL '{url}': {reason}")
+            }
+            Self::GitError { operation, message } => {
+                write!(f, "Git {operation} failed: {message}")
+            }
+            Self::GroupNotFound { group, available } => write!(
+                f,
+                "Group '{group}' not found in repository (available: {available:?})"
+            ),
+            Self::MissingRemoteToml { url } => {
+                write!(f, "Missing remote dotler.toml in repository '{url}'")
+            }
+            Self::FileNotFound { path } => write!(f, "File not found: '{}'", path.display()),
+            Self::AtomicReplaceFailed(m) => write!(f, "Atomic replace failed for '{m}'"),
+            Self::Config(e) => write!(f, "Configuration error: {e}"),
+            Self::State(e) => write!(f, "State ledger error: {e}"),
+            Self::Crypto(e) => write!(f, "Cryptographic error: {e}"),
+            Self::Vault(e) => write!(f, "Vault error: {e}"),
+            Self::Lock(e) => write!(f, "Lock error: {e}"),
+            Self::Io(e) => write!(f, "I/O error: {e}"),
+        }
+    }
+}
 
-    #[error("State ledger error: {0}")]
-    State(#[from] crate::config::StateError),
+impl std::error::Error for EngineError {}
 
-    #[error("Cryptographic error: {0}")]
-    Crypto(#[from] crate::crypto::CryptoError),
+impl From<crate::config::ConfigError> for EngineError {
+    fn from(e: crate::config::ConfigError) -> Self {
+        Self::Config(e)
+    }
+}
 
-    #[error("Vault error: {0}")]
-    Vault(#[from] crate::crypto::vault::VaultError),
+impl From<crate::config::StateError> for EngineError {
+    fn from(e: crate::config::StateError) -> Self {
+        Self::State(e)
+    }
+}
 
-    #[error("Lock error: {0}")]
-    Lock(#[from] crate::config::LockError),
+impl From<crate::crypto::CryptoError> for EngineError {
+    fn from(e: crate::crypto::CryptoError) -> Self {
+        Self::Crypto(e)
+    }
+}
 
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+impl From<crate::crypto::vault::VaultError> for EngineError {
+    fn from(e: crate::crypto::vault::VaultError) -> Self {
+        Self::Vault(e)
+    }
+}
+
+impl From<crate::config::LockError> for EngineError {
+    fn from(e: crate::config::LockError) -> Self {
+        Self::Lock(e)
+    }
+}
+
+impl From<std::io::Error> for EngineError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
 }
 
 impl EngineError {

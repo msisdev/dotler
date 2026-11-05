@@ -13,32 +13,81 @@ pub use mcp::{
 };
 
 /// Agent subsystem error types.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum AgentError {
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("JSON serialization error: {0}")]
-    Json(#[from] serde_json::Error),
-
-    #[error("Configuration error: {0}")]
-    Config(#[from] crate::config::ConfigError),
-
-    #[error("Lock error: {0}")]
-    Lock(#[from] crate::config::LockError),
-
-    #[error("State error: {0}")]
-    State(#[from] crate::config::StateError),
-
-    #[error("Engine error: {0}")]
-    Engine(#[from] crate::engine::EngineError),
-
-    #[error("Keyring error: {0}")]
-    Keyring(#[from] crate::crypto::keyring::KeyringError),
-
-    #[error("Vault error: {0}")]
-    Vault(#[from] crate::crypto::vault::VaultError),
-
-    #[error("Protocol error: {0}")]
+    Io(std::io::Error),
+    Json(serde_json::Error),
+    Config(crate::config::ConfigError),
+    Lock(crate::config::LockError),
+    State(crate::config::StateError),
+    Engine(crate::engine::EngineError),
+    Keyring(crate::crypto::keyring::KeyringError),
+    Vault(crate::crypto::vault::VaultError),
     Protocol(String),
+}
+
+impl std::fmt::Display for AgentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "I/O error: {e}"),
+            Self::Json(e) => write!(f, "JSON serialization error: {e}"),
+            Self::Config(e) => write!(f, "Configuration error: {e}"),
+            Self::Lock(e) => write!(f, "Lock error: {e}"),
+            Self::State(e) => write!(f, "State error: {e}"),
+            Self::Engine(e) => write!(f, "Engine error: {e}"),
+            Self::Keyring(e) => write!(f, "Keyring error: {e}"),
+            Self::Vault(e) => write!(f, "Vault error: {e}"),
+            Self::Protocol(m) => write!(f, "Protocol error: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for AgentError {}
+
+impl From<std::io::Error> for AgentError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+impl From<serde_json::Error> for AgentError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Json(e)
+    }
+}
+
+impl From<crate::config::ConfigError> for AgentError {
+    fn from(e: crate::config::ConfigError) -> Self {
+        Self::Config(e)
+    }
+}
+
+impl From<crate::config::LockError> for AgentError {
+    fn from(e: crate::config::LockError) -> Self {
+        Self::Lock(e)
+    }
+}
+
+impl From<crate::config::StateError> for AgentError {
+    fn from(e: crate::config::StateError) -> Self {
+        Self::State(e)
+    }
+}
+
+impl From<crate::engine::EngineError> for AgentError {
+    fn from(e: crate::engine::EngineError) -> Self {
+        Self::Engine(e)
+    }
+}
+
+impl From<crate::crypto::keyring::KeyringError> for AgentError {
+    fn from(e: crate::crypto::keyring::KeyringError) -> Self {
+        Self::Keyring(e)
+    }
+}
+
+impl From<crate::crypto::vault::VaultError> for AgentError {
+    fn from(e: crate::crypto::vault::VaultError) -> Self {
+        Self::Vault(e)
+    }
 }

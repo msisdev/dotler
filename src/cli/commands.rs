@@ -6,12 +6,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
-use secrecy::SecretString;
 use serde_json::json;
 
 use crate::agent::briefing::{render_briefing, scaffold_skill_md};
 use crate::cli::output::{EXIT_SUCCESS, render_success_to};
-use crate::config::local::{LocalConfig, expand_tilde};
+use crate::config::local::{LocalConfig, WalkDir, expand_tilde};
 use crate::config::repo::{
     OsInfo, RepoConfig, SelectionMode, parse_selection_rules, validate_path_security,
 };
@@ -19,6 +18,7 @@ use crate::config::state::{
     DOTLER_LOCK_PATH, DOTLER_LOCK_POLL_INTERVAL_MS, DOTLER_LOCK_TIMEOUT_MS, DotlerLock,
     DotlerLockGuard, STATE_DB_PATH, StateDb,
 };
+use crate::crypto::SecretString;
 use crate::crypto::keyring::OsKeyring;
 use crate::crypto::vault::{VaultKey, VaultSlot, change_password, init_vault, recover_vault};
 use crate::engine::EngineError;
@@ -481,7 +481,7 @@ files = """
         .or_else(|| cli.device.clone())
         .unwrap_or_else(|| "default".to_string());
 
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
+    let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("~"));
     let repo_path_entry = if let Ok(rel) = repo_dir.strip_prefix(&home) {
         if rel.as_os_str().is_empty() {
             "~".to_string()
@@ -672,7 +672,7 @@ fn handle_check<W: Write>(
             continue;
         }
         let rules = parse_selection_rules(&g_cfg.files)?;
-        for entry in walkdir::WalkDir::new(&group_repo_dir)
+        for entry in WalkDir::new(&group_repo_dir)
             .into_iter()
             .filter_map(|e| e.ok())
         {
@@ -1560,10 +1560,7 @@ fn has_encrypted_repo_files(repo_path: &Path, repo_cfg: &RepoConfig) -> bool {
         if !group_dir.is_dir() {
             continue;
         }
-        for entry in walkdir::WalkDir::new(&group_dir)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
+        for entry in WalkDir::new(&group_dir).into_iter().filter_map(|e| e.ok()) {
             if entry.file_type().is_file()
                 && entry.path().extension().and_then(|s| s.to_str()) == Some("enc")
             {
@@ -1660,7 +1657,7 @@ mod tests {
 
     #[test]
     fn test_interactive_prompt_unlocks_vault_and_autosaves_to_keyring() {
-        use secrecy::ExposeSecret;
+        use crate::crypto::ExposeSecret;
 
         let _guard = crate::crypto::keyring::MOCK_KEYRING_TEST_LOCK
             .lock()
@@ -1722,7 +1719,7 @@ mod tests {
 
     #[test]
     fn test_rotate_vault_passphrases_updates_all_matching_repos_and_keyring() {
-        use secrecy::ExposeSecret;
+        use crate::crypto::ExposeSecret;
 
         let _guard = crate::crypto::keyring::MOCK_KEYRING_TEST_LOCK
             .lock()

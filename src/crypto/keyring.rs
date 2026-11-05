@@ -1,4 +1,4 @@
-use secrecy::{ExposeSecret, SecretString};
+use crate::crypto::{ExposeSecret, SecretString};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,21 +7,34 @@ pub const KEYRING_SERVICE_NAME: &str = "dotler";
 pub const KEYRING_DEFAULT_USER: &str = "default";
 pub const PASSPHRASE_ENV_VAR: &str = "DOTLER_PASSPHRASE";
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum KeyringError {
-    #[error("Keyring backend error: {0}")]
     BackendError(String),
-
-    #[error(
-        "Passphrase required in non-interactive mode. Please register password using 'dotler key set' or export DOTLER_PASSPHRASE"
-    )]
     PassphraseRequiredInNonInteractiveMode,
-
-    #[error("Terminal prompt cancelled or unavailable")]
     PromptCancelled,
+    Io(std::io::Error),
+}
 
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+impl std::fmt::Display for KeyringError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BackendError(msg) => write!(f, "Keyring backend error: {msg}"),
+            Self::PassphraseRequiredInNonInteractiveMode => write!(
+                f,
+                "Passphrase required in non-interactive mode. Please register password using 'dotler key set' or export DOTLER_PASSPHRASE"
+            ),
+            Self::PromptCancelled => write!(f, "Terminal prompt cancelled or unavailable"),
+            Self::Io(e) => write!(f, "I/O error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for KeyringError {}
+
+impl From<std::io::Error> for KeyringError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
 }
 
 impl KeyringError {
@@ -120,19 +133,10 @@ impl OsKeyring {
         }
         drop(lock);
 
-        let entry = match keyring::Entry::new(KEYRING_SERVICE_NAME, KEYRING_DEFAULT_USER) {
-            Ok(e) => e,
-            Err(_) => return Ok(None),
-        };
-
-        match entry.get_password() {
-            Ok(p) => Ok(Some(SecretString::new(p))),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => {
-                // Graceful fallback for headless environments when Secret Service daemon is unavailable
-                Ok(None)
-            }
-        }
+        Ok(platform::get_password()
+            .ok()
+            .flatten()
+            .map(SecretString::new))
     }
 
     pub fn set(secret: &SecretString) -> Result<(), KeyringError> {
@@ -145,12 +149,7 @@ impl OsKeyring {
         }
         drop(lock);
 
-        let entry = keyring::Entry::new(KEYRING_SERVICE_NAME, KEYRING_DEFAULT_USER)
-            .map_err(|e| KeyringError::BackendError(e.to_string()))?;
-        entry
-            .set_password(secret.expose_secret())
-            .map_err(|e| KeyringError::BackendError(e.to_string()))?;
-        Ok(())
+        platform::set_password(secret.expose_secret())
     }
 
     pub fn delete() -> Result<(), KeyringError> {
@@ -163,13 +162,7 @@ impl OsKeyring {
         }
         drop(lock);
 
-        let entry = keyring::Entry::new(KEYRING_SERVICE_NAME, KEYRING_DEFAULT_USER)
-            .map_err(|e| KeyringError::BackendError(e.to_string()))?;
-        match entry.delete_credential() {
-            Ok(_) => Ok(()),
-            Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(KeyringError::BackendError(e.to_string())),
-        }
+        platform::delete_password()
     }
 
     pub fn resolve(
@@ -241,6 +234,273 @@ impl OsKeyring {
                 }
             }
             Err(_) => Err(KeyringError::PromptCancelled),
+        }
+    }
+}
+
+mod platform {
+    use super::{KEYRING_DEFAULT_USER, KEYRING_SERVICE_NAME, KeyringError};
+
+    #[cfg(target_os = "macos")]
+    pub fn get_password() -> Result<Option<String>, KeyringError> {
+        let out = std::process::Command::new("/usr/bin/security")
+            .args([
+                "find-generic-password",
+                "-s",
+                KEYRING_SERVICE_NAME,
+                "-a",
+                KEYRING_DEFAULT_USER,
+                "-w",
+            ])
+            .output()
+            .map_err(|e| KeyringError::BackendError(e.to_string()))?;
+        if !out.status.success() {
+            return Ok(None);
+        }
+        let pass = String::from_utf8_lossy(&out.stdout)
+            .trim_end_matches(['\r', '\n'])
+            .to_string();
+        Ok(if pass.is_empty() { None } else { Some(pass) })
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn set_password(secret: &str) -> Result<(), KeyringError> {
+        let out = std::process::Command::new("/usr/bin/security")
+            .args([
+                "add-generic-password",
+                "-U",
+                "-s",
+                KEYRING_SERVICE_NAME,
+                "-a",
+                KEYRING_DEFAULT_USER,
+                "-w",
+                secret,
+            ])
+            .output()
+            .map_err(|e| KeyringError::BackendError(e.to_string()))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(KeyringError::BackendError(
+                String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            ))
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn delete_password() -> Result<(), KeyringError> {
+        let _ = std::process::Command::new("/usr/bin/security")
+            .args([
+                "delete-generic-password",
+                "-s",
+                KEYRING_SERVICE_NAME,
+                "-a",
+                KEYRING_DEFAULT_USER,
+            ])
+            .output()
+            .map_err(|e| KeyringError::BackendError(e.to_string()))?;
+        Ok(())
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn get_password() -> Result<Option<String>, KeyringError> {
+        if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+            return Ok(None);
+        }
+        let out = match std::process::Command::new("secret-tool")
+            .args([
+                "lookup",
+                "service",
+                KEYRING_SERVICE_NAME,
+                "username",
+                KEYRING_DEFAULT_USER,
+            ])
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return Ok(None),
+        };
+        if !out.status.success() {
+            return Ok(None);
+        }
+        let pass = String::from_utf8_lossy(&out.stdout)
+            .trim_end_matches(['\r', '\n'])
+            .to_string();
+        Ok(if pass.is_empty() { None } else { Some(pass) })
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn set_password(secret: &str) -> Result<(), KeyringError> {
+        use std::io::Write;
+        use std::process::Stdio;
+        if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+            return Err(KeyringError::BackendError(
+                "DBUS_SESSION_BUS_ADDRESS is not set".to_string(),
+            ));
+        }
+        let mut child = std::process::Command::new("secret-tool")
+            .args([
+                "store",
+                "--label=dotler",
+                "service",
+                KEYRING_SERVICE_NAME,
+                "username",
+                KEYRING_DEFAULT_USER,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| KeyringError::BackendError(format!("secret-tool unavailable: {e}")))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(secret.as_bytes());
+        }
+        let out = child
+            .wait_with_output()
+            .map_err(|e| KeyringError::BackendError(e.to_string()))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(KeyringError::BackendError(
+                String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            ))
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn delete_password() -> Result<(), KeyringError> {
+        if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+            return Err(KeyringError::BackendError(
+                "DBUS_SESSION_BUS_ADDRESS is not set".to_string(),
+            ));
+        }
+        let _ = std::process::Command::new("secret-tool")
+            .args([
+                "clear",
+                "service",
+                KEYRING_SERVICE_NAME,
+                "username",
+                KEYRING_DEFAULT_USER,
+            ])
+            .output()
+            .map_err(|e| KeyringError::BackendError(format!("secret-tool unavailable: {e}")))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn get_password() -> Result<Option<String>, KeyringError> {
+        win_cred::read()
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn set_password(secret: &str) -> Result<(), KeyringError> {
+        win_cred::write(secret)
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn delete_password() -> Result<(), KeyringError> {
+        win_cred::delete()
+    }
+
+    #[cfg(target_os = "windows")]
+    mod win_cred {
+        use super::{KEYRING_DEFAULT_USER, KEYRING_SERVICE_NAME, KeyringError};
+        use std::ffi::c_void;
+
+        const CRED_TYPE_GENERIC: u32 = 1;
+        const CRED_PERSIST_LOCAL_MACHINE: u32 = 2;
+
+        #[repr(C)]
+        struct CredentialW {
+            flags: u32,
+            cred_type: u32,
+            target_name: *mut u16,
+            comment: *mut u16,
+            last_written: u64,
+            credential_blob_size: u32,
+            credential_blob: *mut u8,
+            persist: u32,
+            attribute_count: u32,
+            attributes: *mut c_void,
+            target_alias: *mut u16,
+            user_name: *mut u16,
+        }
+
+        #[link(name = "Advapi32")]
+        unsafe extern "system" {
+            fn CredReadW(
+                target_name: *const u16,
+                cred_type: u32,
+                flags: u32,
+                credential: *mut *mut CredentialW,
+            ) -> i32;
+            fn CredWriteW(credential: *const CredentialW, flags: u32) -> i32;
+            fn CredDeleteW(target_name: *const u16, cred_type: u32, flags: u32) -> i32;
+            fn CredFree(buffer: *mut c_void);
+        }
+
+        fn to_wide(s: &str) -> Vec<u16> {
+            s.encode_utf16().chain(std::iter::once(0)).collect()
+        }
+
+        fn target_name() -> Vec<u16> {
+            to_wide(&format!("{KEYRING_DEFAULT_USER}.{KEYRING_SERVICE_NAME}"))
+        }
+
+        pub fn read() -> Result<Option<String>, KeyringError> {
+            let target = target_name();
+            let mut cred_ptr: *mut CredentialW = std::ptr::null_mut();
+            let ok = unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut cred_ptr) };
+            if ok == 0 || cred_ptr.is_null() {
+                return Ok(None);
+            }
+            let pass = unsafe {
+                let cred = &*cred_ptr;
+                let slice = std::slice::from_raw_parts(
+                    cred.credential_blob,
+                    cred.credential_blob_size as usize,
+                );
+                let s = String::from_utf8_lossy(slice).to_string();
+                CredFree(cred_ptr.cast());
+                s
+            };
+            Ok(Some(pass))
+        }
+
+        pub fn write(secret: &str) -> Result<(), KeyringError> {
+            let mut target = target_name();
+            let mut user = to_wide(KEYRING_DEFAULT_USER);
+            let mut blob = secret.as_bytes().to_vec();
+            let cred = CredentialW {
+                flags: 0,
+                cred_type: CRED_TYPE_GENERIC,
+                target_name: target.as_mut_ptr(),
+                comment: std::ptr::null_mut(),
+                last_written: 0,
+                credential_blob_size: blob.len() as u32,
+                credential_blob: blob.as_mut_ptr(),
+                persist: CRED_PERSIST_LOCAL_MACHINE,
+                attribute_count: 0,
+                attributes: std::ptr::null_mut(),
+                target_alias: std::ptr::null_mut(),
+                user_name: user.as_mut_ptr(),
+            };
+            let ok = unsafe { CredWriteW(&cred, 0) };
+            if ok != 0 {
+                Ok(())
+            } else {
+                Err(KeyringError::BackendError(
+                    std::io::Error::last_os_error().to_string(),
+                ))
+            }
+        }
+
+        pub fn delete() -> Result<(), KeyringError> {
+            let target = target_name();
+            unsafe {
+                let _ = CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0);
+            }
+            Ok(())
         }
     }
 }

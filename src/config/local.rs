@@ -13,13 +13,124 @@ pub const RESERVED_OS_PREFIX: &str = "os-";
 
 pub fn expand_tilde(path: &str) -> PathBuf {
     if path == "~" {
-        dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+        std::env::home_dir().unwrap_or_else(|| PathBuf::from("."))
     } else if let Some(stripped) = path.strip_prefix("~/") {
-        dirs::home_dir()
+        std::env::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(stripped)
     } else {
         PathBuf::from(path)
+    }
+}
+
+pub struct WalkEntry {
+    path: PathBuf,
+    file_name: std::ffi::OsString,
+    file_type: fs::FileType,
+    depth: usize,
+}
+
+impl WalkEntry {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn file_name(&self) -> &std::ffi::OsStr {
+        &self.file_name
+    }
+
+    pub fn file_type(&self) -> fs::FileType {
+        self.file_type
+    }
+
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+}
+
+pub struct WalkDir {
+    root: PathBuf,
+    min_depth: usize,
+}
+
+impl WalkDir {
+    pub fn new(root: impl AsRef<Path>) -> Self {
+        Self {
+            root: root.as_ref().to_path_buf(),
+            min_depth: 0,
+        }
+    }
+
+    pub fn min_depth(mut self, depth: usize) -> Self {
+        self.min_depth = depth;
+        self
+    }
+
+    pub fn filter_entry<P>(self, mut predicate: P) -> std::vec::IntoIter<std::io::Result<WalkEntry>>
+    where
+        P: FnMut(&WalkEntry) -> bool,
+    {
+        let mut out = Vec::new();
+        Self::collect_entries(&self.root, 0, self.min_depth, &mut predicate, &mut out);
+        out.into_iter()
+    }
+
+    fn collect_entries<P>(
+        path: &Path,
+        depth: usize,
+        min_depth: usize,
+        predicate: &mut P,
+        out: &mut Vec<std::io::Result<WalkEntry>>,
+    ) where
+        P: FnMut(&WalkEntry) -> bool,
+    {
+        let meta = match fs::symlink_metadata(path) {
+            Ok(m) => m,
+            Err(e) => {
+                out.push(Err(e));
+                return;
+            }
+        };
+        let file_type = meta.file_type();
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_else(|| path.as_os_str().to_os_string());
+        let entry = WalkEntry {
+            path: path.to_path_buf(),
+            file_name,
+            file_type,
+            depth,
+        };
+        if !predicate(&entry) {
+            return;
+        }
+        let is_real_dir = file_type.is_dir() && !file_type.is_symlink();
+        if depth >= min_depth {
+            out.push(Ok(entry));
+        }
+        if is_real_dir {
+            match fs::read_dir(path) {
+                Ok(rd) => {
+                    let mut children: Vec<PathBuf> =
+                        rd.filter_map(|r| r.ok().map(|e| e.path())).collect();
+                    children.sort();
+                    for child in children {
+                        Self::collect_entries(&child, depth + 1, min_depth, predicate, out);
+                    }
+                }
+                Err(e) => out.push(Err(e)),
+            }
+        }
+    }
+}
+
+impl IntoIterator for WalkDir {
+    type Item = std::io::Result<WalkEntry>;
+    type IntoIter = std::vec::IntoIter<std::io::Result<WalkEntry>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.filter_entry(|_| true)
     }
 }
 

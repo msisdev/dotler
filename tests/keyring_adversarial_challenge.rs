@@ -5,10 +5,10 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use dotler::crypto::{ExposeSecret, SecretString};
 use dotler::crypto::{
     KeyringError, OsKeyring, PASSPHRASE_ENV_VAR, PassphraseSource, ResolvedPassphrase,
 };
-use secrecy::{ExposeSecret, SecretString};
 
 static GLOBAL_TEST_MUTEX: Mutex<()> = Mutex::new(());
 

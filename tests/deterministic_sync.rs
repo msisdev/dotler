@@ -10,13 +10,13 @@ use dotler::config::state::{
 };
 use dotler::crypto::keyring::OsKeyring;
 use dotler::crypto::vault::{EncryptedFile, VaultKey, init_vault};
+use dotler::crypto::{ExposeSecret, SecretString};
 use dotler::engine::EngineError;
 use dotler::engine::remote::{
     REMOTE_TOML_FETCH_MAX_BYTES, clone_repo, install_remote, list_remote, parse_url,
     uninstall_remote,
 };
 use dotler::engine::sync::{FileSyncStatus, SyncEngine, TidyOrphanPolicy};
-use secrecy::{ExposeSecret, SecretString};
 use tempfile::TempDir;
 
 #[allow(dead_code)]

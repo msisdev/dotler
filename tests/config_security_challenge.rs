@@ -43,9 +43,9 @@ fn test_selection_rule_multiple_trailing_tokens_reports_error_and_line() {
 }
 
 #[test]
-fn test_selection_rule_shorthand_rejects_typos_in_pattern() {
-    let content = "@secret.key encrpyt";
-    let err = parse_selection_rules(content).expect_err("shorthand with trailing words must fail");
+fn test_selection_rule_rejects_typos_in_attribute() {
+    let content = "secret.key encrpyt";
+    let err = parse_selection_rules(content).expect_err("misspelled attribute must fail");
     match err {
         ConfigError::InvalidSelectionAttribute {
             attribute,
@@ -598,14 +598,14 @@ os-nux = "~/.config/app"
 fn test_empirical_path_traversal_and_malicious_patterns_with_prefixes() {
     let malicious_cases = [
         ("!../../../../etc/shadow", 3),
-        ("@$HOME/.bashrc", 3),
-        ("+folder\\traversal", 3),
+        ("$HOME/.bashrc encrypt", 3),
+        ("folder\\traversal", 3),
         ("!/etc/shadow", 3),
-        ("@.config/dotler", 3),
-        ("@.config/dotler/state.db", 3),
+        (".config/dotler encrypt", 3),
+        (".config/dotler/state.db encrypt", 3),
         ("!.git", 3),
-        ("+../relative_escape", 3),
-        ("@~/.secret", 3),
+        ("../relative_escape", 3),
+        ("~/.secret encrypt", 3),
         ("!%APPDATA%/secret", 3),
     ];
 
@@ -637,22 +637,16 @@ os-nux = "~/.config/app"
 }
 
 #[test]
-fn test_empirical_shorthand_typos_and_malformed_tokens() {
+fn test_empirical_selection_rule_typos_and_malformed_tokens() {
     let typo_cases = [
-        ("@secret.key encrpyt", "encrpyt", 1, Some("encrypt")),
         ("!config.toml typo", "typo", 1, None),
         (
-            "+file.txt encrypt",
+            "!file.txt encrypt",
             "encrypt",
             1,
             Some("already specifies selection mode"),
         ),
-        (
-            "@secret.key encrypt",
-            "encrypt",
-            1,
-            Some("already specifies selection mode"),
-        ),
+        ("!secret.key encrpyt", "encrpyt", 1, Some("encrypt")),
         ("regular_file.txt encrpyt", "encrpyt", 1, Some("encrypt")),
         (
             "regular_file.txt extra attribute tokens",
@@ -684,14 +678,10 @@ fn test_empirical_shorthand_typos_and_malformed_tokens() {
         }
     }
 
-    // Also verify empty pattern after prefix fails
-    let empty_prefix_cases = ["!", "@", "+"];
-    for prefix in empty_prefix_cases {
-        let err =
-            parse_selection_rules(prefix).expect_err(&format!("empty prefix '{prefix}' must fail"));
-        assert!(
-            matches!(err, ConfigError::InvalidSelectionAttribute { .. }),
-            "empty prefix '{prefix}' must produce InvalidSelectionAttribute, got: {err:?}"
-        );
-    }
+    // Also verify empty pattern after '!' prefix fails
+    let err = parse_selection_rules("!").expect_err("empty prefix '!' must fail");
+    assert!(
+        matches!(err, ConfigError::InvalidSelectionAttribute { .. }),
+        "empty prefix '!' must produce InvalidSelectionAttribute, got: {err:?}"
+    );
 }

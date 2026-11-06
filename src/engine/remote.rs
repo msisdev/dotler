@@ -555,9 +555,7 @@ fn build_manifest_summary(m: &DiscoveredManifest) -> RemoteManifestSummary {
     let mut groups = Vec::new();
     for (group_name, group) in &m.config.groups {
         let rules = parse_selection_rules(&group.files).unwrap_or_default();
-        let has_encrypted = rules
-            .iter()
-            .any(|r| r.mode == SelectionMode::EncryptedInclude);
+        let has_encrypted = crate::config::repo::rules_have_effective_encryption(&rules);
 
         groups.push(RemoteGroupInfo {
             name: group_name.clone(),

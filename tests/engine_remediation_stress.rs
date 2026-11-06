@@ -556,7 +556,7 @@ recovery_slot = "{}"
 
 [secure]
 os-nux = "~"
-files = "@secret.env"
+files = "secret.env encrypt"
 "#,
         vault_cfg.vault_id, vault_cfg.password_slot, vault_cfg.recovery_slot
     );

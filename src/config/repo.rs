@@ -434,28 +434,14 @@ pub fn parse_selection_rules(files_content: &str) -> Result<Vec<SelectionRule>, 
             continue;
         }
 
-        let prefix_match = trimmed
-            .strip_prefix('!')
-            .map(|s| (s, SelectionMode::Exclude, '!'))
-            .or_else(|| {
-                trimmed
-                    .strip_prefix('@')
-                    .map(|s| (s, SelectionMode::EncryptedInclude, '@'))
-            })
-            .or_else(|| {
-                trimmed
-                    .strip_prefix('+')
-                    .map(|s| (s, SelectionMode::PlaintextInclude, '+'))
-            });
-
-        if let Some((stripped, mode, prefix_char)) = prefix_match {
+        if let Some(stripped) = trimmed.strip_prefix('!') {
             let tokens: Vec<&str> = stripped.split_whitespace().collect();
             match tokens.len() {
                 0 => {
                     return Err(ConfigError::InvalidSelectionAttribute {
                         attribute: trimmed.to_string(),
                         line_no,
-                        hint: format!("Pattern cannot be empty after prefix '{prefix_char}'."),
+                        hint: "Pattern cannot be empty after prefix '!'.".to_string(),
                     });
                 }
                 1 => {
@@ -463,22 +449,20 @@ pub fn parse_selection_rules(files_content: &str) -> Result<Vec<SelectionRule>, 
                     validate_rule_pattern(&pattern)?;
                     rules.push(SelectionRule {
                         pattern,
-                        mode,
+                        mode: SelectionMode::Exclude,
                         line_no,
                     });
                 }
                 _ => {
                     let trailing = tokens[1..].join(" ");
                     let hint = if tokens[1] == "encrypt" {
-                        format!(
-                            "Shorthand prefix '{prefix_char}' already specifies selection mode; trailing attribute is redundant."
-                        )
+                        "Exclusion prefix '!' already specifies selection mode; trailing attribute is redundant."
+                            .to_string()
                     } else if tokens[1] == "encrpyt" || tokens[1].contains("encr") {
                         "Supported selection attribute is 'encrypt'. Check for typos.".to_string()
                     } else {
-                        format!(
-                            "Expected single pattern after prefix '{prefix_char}' with no trailing attributes."
-                        )
+                        "Expected single pattern after prefix '!' with no trailing attributes."
+                            .to_string()
                     };
                     return Err(ConfigError::InvalidSelectionAttribute {
                         attribute: trailing,
@@ -543,6 +527,13 @@ pub fn evaluate_selection(rules: &[SelectionRule], relative_path: &str) -> Optio
     }
 
     last_mode
+}
+
+pub fn rules_have_effective_encryption(rules: &[SelectionRule]) -> bool {
+    rules.iter().any(|rule| {
+        rule.mode == SelectionMode::EncryptedInclude
+            && evaluate_selection(rules, &rule.pattern) == Some(SelectionMode::EncryptedInclude)
+    })
 }
 
 fn matches_pattern(pattern: &str, path: &str) -> bool {
@@ -667,11 +658,10 @@ impl RepoConfig {
             }
 
             let rules = parse_selection_rules(&group.files)?;
+            if rules_have_effective_encryption(&rules) {
+                has_encrypted_rules = true;
+            }
             for rule in &rules {
-                if rule.mode == SelectionMode::EncryptedInclude {
-                    has_encrypted_rules = true;
-                }
-
                 // Cross-validate resolved target path against path security policy
                 for path in group.paths.values() {
                     let combined = format!("{}/{}", path.trim_end_matches('/'), rule.pattern);
@@ -1077,20 +1067,27 @@ id_ed25519 encrypt
     }
 
     #[test]
-    fn test_selection_rules_parsing_shorthand_syntax() {
+    fn test_overridden_encrypt_rule_does_not_require_vault() {
         let content = r#"
-+plain.txt
-@secret.key
-!ignored.log
+[bash]
+os-nux = "~"
+os-mac = "~"
+os-win = "~"
+os-bsd = "~"
+files = """
+!*
+.bashrc encrypt
+.bashrc
+"""
 "#;
-        let rules = parse_selection_rules(content).expect("shorthand rules should parse");
-        assert_eq!(rules.len(), 3);
-        assert_eq!(rules[0].mode, SelectionMode::PlaintextInclude);
-        assert_eq!(rules[0].pattern, "plain.txt");
-        assert_eq!(rules[1].mode, SelectionMode::EncryptedInclude);
-        assert_eq!(rules[1].pattern, "secret.key");
-        assert_eq!(rules[2].mode, SelectionMode::Exclude);
-        assert_eq!(rules[2].pattern, "ignored.log");
+        let config = RepoConfig::parse(content)
+            .expect("overridden encrypt rule must not require [vault] section");
+        let rules = parse_selection_rules(&config.groups["bash"].files).unwrap();
+        assert!(!rules_have_effective_encryption(&rules));
+        assert_eq!(
+            evaluate_selection(&rules, ".bashrc"),
+            Some(SelectionMode::PlaintextInclude)
+        );
     }
 
     #[test]

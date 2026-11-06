@@ -460,6 +460,7 @@ fn handle_init<W: Write>(
 #
 # files = """
 # !*
+# .bashrc encrypt
 # .bashrc
 # """
 "#;
@@ -1443,12 +1444,10 @@ fn unlock_vault_if_needed(
 
 fn has_encrypted_rules(repo_cfg: &RepoConfig) -> bool {
     for g in repo_cfg.groups.values() {
-        if let Ok(rules) = parse_selection_rules(&g.files) {
-            for r in rules {
-                if r.mode == SelectionMode::EncryptedInclude {
-                    return true;
-                }
-            }
+        if let Ok(rules) = parse_selection_rules(&g.files)
+            && crate::config::repo::rules_have_effective_encryption(&rules)
+        {
+            return true;
         }
     }
     false

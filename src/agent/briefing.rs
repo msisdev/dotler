@@ -48,8 +48,8 @@ pub const SHARED_OPERATIONAL_GUIDE: &str = r#"## 2. Group Layout & Selection Rul
 - Official Documentation: https://msisdev.github.io/dotler/
 - Single Home Path Rule: All dotfile target paths MUST start with `~` or `~/` (e.g. `~/.bashrc`, `~/.config/nvim`). Directory traversal (`..`), backslashes, and shell variables (`$HOME`, `%VAR%`) are strictly prohibited.
 - 3-State Selection Rules (Last-Match-Wins):
-  - `<pattern>` (or `+<pattern>`): Include matching files as plaintext.
-  - `<pattern> encrypt` (or `@<pattern>`): Include matching files and encrypt using XChaCha20-Poly1305 (`.enc`).
+  - `<pattern>`: Include matching files as plaintext.
+  - `<pattern> encrypt`: Include matching files and encrypt using XChaCha20-Poly1305 (`.enc`).
   - `!<pattern>`: Exclude matching files.
   - Sequential line-by-line evaluation: rules appearing later override earlier declarations.
 - Manifest Example:

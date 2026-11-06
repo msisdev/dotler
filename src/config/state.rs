@@ -457,6 +457,22 @@ impl Drop for DotlerLockGuard {
     }
 }
 
+/// Creates a lazy [`Resource`] for `~/.config/dotler/dotler.lock`.
+///
+/// - `.get()` acquires an exclusive kernel file lock with a 5000ms timeout and 50ms poll interval on first access.
+/// - `.set()` is a no-op since [`DotlerLockGuard`] releases its lock automatically on [`Drop`].
+pub fn get_lock(lock_path: PathBuf) -> crate::config::Resource<DotlerLockGuard, LockError> {
+    crate::config::Resource::new(
+        move || {
+            DotlerLock::new(lock_path.clone()).acquire(
+                Duration::from_millis(DOTLER_LOCK_TIMEOUT_MS),
+                Duration::from_millis(DOTLER_LOCK_POLL_INTERVAL_MS),
+            )
+        },
+        |_guard| Ok(()),
+    )
+}
+
 /// Writes `content` to `dest` atomically by creating a `.dotler-tmp-*` file
 /// in the same parent directory, syncing to disk (`fsync`), preserving permissions
 /// when replacing an existing file, and renaming into place with bounded retries.

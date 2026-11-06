@@ -3,7 +3,6 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
@@ -19,8 +18,7 @@ use crate::config::repo::{
     update_vault_manifest_section, validate_path_security,
 };
 use crate::config::state::{
-    DOTLER_LOCK_PATH, DOTLER_LOCK_POLL_INTERVAL_MS, DOTLER_LOCK_TIMEOUT_MS, DotlerLock,
-    DotlerLockGuard, STATE_DB_PATH, get_state_db,
+    DOTLER_LOCK_PATH, DotlerLockGuard, STATE_DB_PATH, get_lock, get_state_db,
 };
 use crate::crypto::SecretString;
 use crate::crypto::keyring::{OsKeyring, get_password};
@@ -404,31 +402,24 @@ pub fn dispatch<W1: Write, W2: Write>(
         };
     }
 
-    // Acquire single exclusive dotler.lock for all standard CLI commands
-    let lock_path = expand_tilde(DOTLER_LOCK_PATH);
-    if let Some(parent) = lock_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let lock = DotlerLock::new(lock_path);
-    let lock_guard = lock.acquire(
-        Duration::from_millis(DOTLER_LOCK_TIMEOUT_MS),
-        Duration::from_millis(DOTLER_LOCK_POLL_INTERVAL_MS),
-    )?;
+    // Acquire single exclusive dotler.lock for all standard CLI commands via lazy resource
+    let lock_res = get_lock(expand_tilde(DOTLER_LOCK_PATH));
+    let lock_guard = lock_res.get()?;
 
     match &cli.command {
-        Command::Init(args) => handle_init(args, cli, stdout, &lock_guard),
-        Command::Git { command } => handle_git(command, cli, stdout, &lock_guard),
-        Command::Check(args) => handle_check(args, cli, stdout, &lock_guard),
-        Command::Status(args) => handle_status(args, cli, is_interactive, stdout, &lock_guard),
-        Command::Import(args) => handle_import(args, cli, is_interactive, stdout, &lock_guard),
-        Command::Export(args) => handle_export(args, cli, is_interactive, stdout, &lock_guard),
-        Command::Tidy(args) => handle_tidy(args, cli, is_interactive, stdout, &lock_guard),
+        Command::Init(args) => handle_init(args, cli, stdout, lock_guard),
+        Command::Git { command } => handle_git(command, cli, stdout, lock_guard),
+        Command::Check(args) => handle_check(args, cli, stdout, lock_guard),
+        Command::Status(args) => handle_status(args, cli, is_interactive, stdout, lock_guard),
+        Command::Import(args) => handle_import(args, cli, is_interactive, stdout, lock_guard),
+        Command::Export(args) => handle_export(args, cli, is_interactive, stdout, lock_guard),
+        Command::Tidy(args) => handle_tidy(args, cli, is_interactive, stdout, lock_guard),
         Command::Vault { command } => {
-            handle_vault(command, cli, is_interactive, stdout, &lock_guard)
+            handle_vault(command, cli, is_interactive, stdout, lock_guard)
         }
-        Command::Key { command } => handle_key(command, cli, is_interactive, stdout, &lock_guard),
-        Command::Ai(_) => handle_ai(cli, stdout, &lock_guard),
-        Command::Update(args) => handle_update(args, cli, stdout, &lock_guard),
+        Command::Key { command } => handle_key(command, cli, is_interactive, stdout, lock_guard),
+        Command::Ai(_) => handle_ai(cli, stdout, lock_guard),
+        Command::Update(args) => handle_update(args, cli, stdout, lock_guard),
         Command::Mcp(_) => unreachable!(),
     }
 }

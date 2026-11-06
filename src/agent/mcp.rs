@@ -2,9 +2,7 @@
 //!
 //! Provides a stateless, idle-zero-lock stdio server exposing 7 dotfile management tools.
 
-use std::fs;
 use std::io::{BufRead, Write};
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -19,8 +17,7 @@ use crate::config::repo::{
     OsInfo, RepoConfig, get_repo_config, parse_selection_rules, validate_path_security,
 };
 use crate::config::state::{
-    DOTLER_LOCK_PATH, DOTLER_LOCK_POLL_INTERVAL_MS, DOTLER_LOCK_TIMEOUT_MS, DotlerLock,
-    DotlerLockGuard, STATE_DB_PATH, get_state_db,
+    DOTLER_LOCK_PATH, DotlerLockGuard, STATE_DB_PATH, get_lock, get_state_db,
 };
 use crate::crypto::keyring::{OsKeyring, get_password};
 use crate::crypto::vault::{VaultKey, VaultSlot};
@@ -274,17 +271,10 @@ fn handle_raw_line(line: &str) -> Option<McpResponse> {
 
 /// Executes a tool call under a single exclusive `DotlerLockGuard`.
 fn execute_tool_with_lock(id: Value, name: &str, args: Value) -> McpResponse {
-    let lock_path = expand_tilde(DOTLER_LOCK_PATH);
-    if let Some(parent) = lock_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let lock = DotlerLock::new(lock_path);
+    let lock_res = get_lock(expand_tilde(DOTLER_LOCK_PATH));
 
     // Acquire lock with 5000ms timeout
-    let guard = match lock.acquire(
-        Duration::from_millis(DOTLER_LOCK_TIMEOUT_MS),
-        Duration::from_millis(DOTLER_LOCK_POLL_INTERVAL_MS),
-    ) {
+    let guard = match lock_res.get() {
         Ok(g) => g,
         Err(_) => {
             return McpResponse {
@@ -304,7 +294,7 @@ fn execute_tool_with_lock(id: Value, name: &str, args: Value) -> McpResponse {
     };
 
     // Dispatch tool execution under DotlerLockGuard
-    let tool_res = dispatch_tool(name, args, &guard);
+    let tool_res = dispatch_tool(name, args, guard);
 
     // Guard drops here upon function return: Lock released cleanly, No-Unlink preserved
     match tool_res {

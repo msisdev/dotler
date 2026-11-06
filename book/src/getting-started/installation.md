@@ -14,12 +14,27 @@ Check the installed version:
 dotler --version
 ```
 
-## Supported Platforms
+## Prebuilt Release Binaries
 
-- **Linux** (`x86_64`, `aarch64`)
-- **macOS** (`x86_64`, `aarch64`)
-- **Windows** (`x86_64`, `aarch64`)
-- **BSD** (`FreeBSD`, `OpenBSD`, `NetBSD`)
+Download the archive matching your operating system and CPU architecture from [GitHub Releases](https://github.com/msisdev/dotler/releases):
+
+| OS | Architecture | C Library / Linkage | Release Archive |
+| :--- | :--- | :--- | :--- |
+| **Linux** | `x86_64` (Intel / AMD 64-bit) | `musl` (Static, Portable) | `dotler-x86_64-unknown-linux-musl.tar.gz` |
+| **Linux** | `x86_64` (Intel / AMD 64-bit) | `glibc` (`2.39+`, Dynamic) | `dotler-x86_64-unknown-linux-gnu.tar.gz` |
+| **Linux** | `aarch64` (`ARM64`) | `musl` (Static, Portable) | `dotler-aarch64-unknown-linux-musl.tar.gz` |
+| **Linux** | `aarch64` (`ARM64`) | `glibc` (`2.39+`, Dynamic) | `dotler-aarch64-unknown-linux-gnu.tar.gz` |
+| **macOS** | `aarch64` (Apple Silicon M1–M4) | System | `dotler-aarch64-apple-darwin.tar.gz` |
+| **macOS** | `x86_64` (Intel Mac) | System | `dotler-x86_64-apple-darwin.tar.gz` |
+| **Windows** | `x86_64` (Intel / AMD 64-bit) | MSVC | `dotler-x86_64-pc-windows-msvc.zip` |
+| **Windows** | `aarch64` (`ARM64`) | MSVC | `dotler-aarch64-pc-windows-msvc.zip` |
+
+> **BSD (`FreeBSD`, `OpenBSD`, `NetBSD`)**: Install from source using `cargo install dotler`.
+
+### Linux: `glibc` (`-linux-gnu`) vs. `musl` (`-linux-musl`)
+
+- **`-linux-musl` (Recommended for compatibility)**: Statically linked with `musl` libc and has **zero runtime dependency on host `glibc`**. Choose this archive on Alpine Linux, older distributions (Ubuntu 22.04, Debian 12, RHEL 9, etc.), or if you see a `weak version 'GLIBC_2.39' not found` warning.
+- **`-linux-gnu`**: Dynamically linked against the system's GNU C Library (`glibc 2.39+`, built on Ubuntu 24.04). Choose this on recent `glibc`-based distributions (Ubuntu 24.04+, Arch Linux, Fedora 40+, Debian Trixie/Sid).
 
 ## Local Files (`~/.config/dotler/`)
 

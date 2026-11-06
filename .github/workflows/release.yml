@@ -250,7 +250,26 @@ jobs:
             fi
             if [ -n "${PREV_TAG}" ]; then
               echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${CURRENT_TAG}"
+              echo ""
             fi
+            cat << 'EOF'
+          ### Prebuilt Binary Download Guide
+
+          | OS | Architecture | C Library / Linkage | Archive File |
+          | :--- | :--- | :--- | :--- |
+          | **Linux** | `x86_64` (64-bit Intel/AMD) | `musl` (Static, Portable) | `dotler-x86_64-unknown-linux-musl.tar.gz` |
+          | **Linux** | `x86_64` (64-bit Intel/AMD) | `glibc 2.39+` (Dynamic) | `dotler-x86_64-unknown-linux-gnu.tar.gz` |
+          | **Linux** | `aarch64` (`ARM64`) | `musl` (Static, Portable) | `dotler-aarch64-unknown-linux-musl.tar.gz` |
+          | **Linux** | `aarch64` (`ARM64`) | `glibc 2.39+` (Dynamic) | `dotler-aarch64-unknown-linux-gnu.tar.gz` |
+          | **macOS** | `aarch64` (Apple Silicon) | System | `dotler-aarch64-apple-darwin.tar.gz` |
+          | **macOS** | `x86_64` (Intel Mac) | System | `dotler-x86_64-apple-darwin.tar.gz` |
+          | **Windows** | `x86_64` (64-bit Intel/AMD) | MSVC | `dotler-x86_64-pc-windows-msvc.zip` |
+          | **Windows** | `aarch64` (`ARM64`) | MSVC | `dotler-aarch64-pc-windows-msvc.zip` |
+
+          > **Linux (`glibc` vs. `musl`)**:
+          > - **`-linux-musl` (Recommended for broad compatibility)**: Statically linked with zero host `glibc` dependency. Use this on Alpine Linux, older distributions (`glibc < 2.39` such as Ubuntu 22.04 or Debian 12), or if you encounter a `GLIBC_2.39 not found` warning.
+          > - **`-linux-gnu`**: Dynamically linked against `glibc 2.39+` (built on Ubuntu 24.04). Use this on modern `glibc` systems (Ubuntu 24.04+, Arch Linux, Fedora 40+).
+          EOF
           } > RELEASE_NOTES.md
 
           cat RELEASE_NOTES.md

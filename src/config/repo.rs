@@ -15,9 +15,9 @@ pub const RECOGNIZED_OS_KEYS: &[&str] = &[
     "os-alpine",
     "os-freebsd",
     "os-openbsd",
-    "os-linux",
-    "os-macos",
-    "os-windows",
+    "os-nux",
+    "os-mac",
+    "os-win",
     "os-bsd",
 ];
 
@@ -69,19 +69,26 @@ pub struct OsInfo {
 
 impl OsInfo {
     pub fn new(distro: impl Into<String>, family: impl Into<String>) -> Self {
+        let family_raw = family.into().to_lowercase();
+        let family = match family_raw.as_str() {
+            "linux" => "nux".to_string(),
+            "macos" => "mac".to_string(),
+            "windows" => "win".to_string(),
+            _ => family_raw,
+        };
         Self {
             distro: distro.into().to_lowercase(),
-            family: family.into().to_lowercase(),
+            family,
         }
     }
 
     pub fn detect() -> Self {
         let family = if cfg!(target_os = "linux") {
-            "linux".to_string()
+            "nux".to_string()
         } else if cfg!(target_os = "macos") {
-            "macos".to_string()
+            "mac".to_string()
         } else if cfg!(target_os = "windows") {
-            "windows".to_string()
+            "win".to_string()
         } else if cfg!(any(
             target_os = "freebsd",
             target_os = "openbsd",
@@ -93,7 +100,7 @@ impl OsInfo {
         };
 
         let mut distro = "unknown".to_string();
-        if family == "linux" {
+        if family == "nux" {
             if let Ok(content) = fs::read_to_string("/etc/os-release")
                 .or_else(|_| fs::read_to_string("/usr/lib/os-release"))
             {
@@ -993,7 +1000,7 @@ init.lua
 lua/*
 """
 laptop = "~/.config/nvim"
-os-linux = "~/.config/nvim"
+os-nux = "~/.config/nvim"
 "#;
         let config = RepoConfig::parse(content).expect("repo config with vault should parse");
         assert!(config.vault.is_some());
@@ -1008,7 +1015,7 @@ os-linux = "~/.config/nvim"
         let content = r#"
 [git]
 files = "config"
-os-linux = "~/.config/git"
+os-nux = "~/.config/git"
 "#;
         let config = RepoConfig::parse(content).expect("repo config without vault should parse");
         assert!(config.vault.is_none());
@@ -1137,10 +1144,10 @@ id_ed25519 encrypt
             .insert("os-arch".to_string(), "~/arch/path".to_string());
         group
             .paths
-            .insert("os-linux".to_string(), "~/linux/path".to_string());
+            .insert("os-nux".to_string(), "~/linux/path".to_string());
 
         let devices = vec!["laptop".to_string()];
-        let os_info = OsInfo::new("arch", "linux");
+        let os_info = OsInfo::new("arch", "nux");
 
         let resolved = resolve_group_target_path(&group, &devices, &os_info);
         assert_eq!(resolved.as_deref(), Some("~/laptop/path"));
@@ -1157,10 +1164,10 @@ id_ed25519 encrypt
             .insert("os-arch".to_string(), "~/arch/path".to_string());
         group
             .paths
-            .insert("os-linux".to_string(), "~/linux/path".to_string());
+            .insert("os-nux".to_string(), "~/linux/path".to_string());
 
         let devices = vec!["laptop".to_string()];
-        let os_info = OsInfo::new("arch", "linux");
+        let os_info = OsInfo::new("arch", "nux");
 
         let resolved = resolve_group_target_path(&group, &devices, &os_info);
         assert_eq!(resolved.as_deref(), Some("~/arch/path"));
@@ -1177,10 +1184,10 @@ id_ed25519 encrypt
             .insert("os-debian".to_string(), "~/debian/path".to_string());
         group
             .paths
-            .insert("os-linux".to_string(), "~/linux/path".to_string());
+            .insert("os-nux".to_string(), "~/linux/path".to_string());
 
         let devices = vec!["laptop".to_string()];
-        let os_info = OsInfo::new("arch", "linux");
+        let os_info = OsInfo::new("arch", "nux");
 
         let resolved = resolve_group_target_path(&group, &devices, &os_info);
         assert_eq!(resolved.as_deref(), Some("~/linux/path"));
@@ -1194,10 +1201,10 @@ id_ed25519 encrypt
             .insert("workstation".to_string(), "~/work/path".to_string());
         group
             .paths
-            .insert("os-macos".to_string(), "~/mac/path".to_string());
+            .insert("os-mac".to_string(), "~/mac/path".to_string());
 
         let devices = vec!["laptop".to_string()];
-        let os_info = OsInfo::new("arch", "linux");
+        let os_info = OsInfo::new("arch", "nux");
 
         let resolved = resolve_group_target_path(&group, &devices, &os_info);
         assert_eq!(resolved, None);
@@ -1247,7 +1254,7 @@ os-ubntu = "~/.zshrc"
         let content = r#"
 [secrets]
 files = "id_rsa encrypt"
-os-linux = "~/.ssh"
+os-nux = "~/.ssh"
 "#;
         let err = RepoConfig::parse(content).expect_err("encrypt rule without vault must fail");
         assert!(matches!(err, ConfigError::MissingVaultConfig));
@@ -1258,15 +1265,15 @@ os-linux = "~/.ssh"
         let content = r#"
 [nvim]
 files = "conf"
-os-linux = "~/.config/app"
+os-nux = "~/.config/app"
 
 [vim]
 files = "conf"
-os-linux = "~/.config/app"
+os-nux = "~/.config/app"
 "#;
         let repo = RepoConfig::parse(content).expect("valid syntax");
         let devices = vec![];
-        let os_info = OsInfo::new("arch", "linux");
+        let os_info = OsInfo::new("arch", "nux");
         let err = repo
             .detect_cross_group_collisions(&devices, &os_info)
             .expect_err("collision must be detected");
@@ -1289,14 +1296,14 @@ os-linux = "~/.config/app"
         let content = r#"
 [zsh]
 files = ".zshrc"
-os-linux = "~"
+os-nux = "~"
 
 [git]
 files = ".gitconfig"
-os-linux = "~"
+os-nux = "~"
 "#;
         let repo = RepoConfig::parse(content).expect("valid syntax");
-        let os_info = OsInfo::new("arch", "linux");
+        let os_info = OsInfo::new("arch", "nux");
         assert!(
             repo.detect_cross_group_collisions(&[], &os_info).is_ok(),
             "groups sharing '~' with distinct files must be allowed"
@@ -1308,14 +1315,14 @@ os-linux = "~"
         let content = r#"
 [all_conf]
 files = "*.conf"
-os-linux = "~/.config/app"
+os-nux = "~/.config/app"
 
 [app_conf]
 files = "custom.conf"
-os-linux = "~/.config/app"
+os-nux = "~/.config/app"
 "#;
         let repo = RepoConfig::parse(content).expect("valid syntax");
-        let os_info = OsInfo::new("arch", "linux");
+        let os_info = OsInfo::new("arch", "nux");
         let err = repo
             .detect_cross_group_collisions(&[], &os_info)
             .expect_err("wildcard overlapping concrete file must collide");
@@ -1335,14 +1342,14 @@ files = """
 *.conf
 !custom.conf
 """
-os-linux = "~/.config/app"
+os-nux = "~/.config/app"
 
 [app_conf]
 files = "custom.conf"
-os-linux = "~/.config/app"
+os-nux = "~/.config/app"
 "#;
         let repo = RepoConfig::parse(content).expect("valid syntax");
-        let os_info = OsInfo::new("arch", "linux");
+        let os_info = OsInfo::new("arch", "nux");
         assert!(
             repo.detect_cross_group_collisions(&[], &os_info).is_ok(),
             "excluded file from wildcard group must allow another group to claim it"
@@ -1386,7 +1393,7 @@ os-linux = "~/.config/app"
         let manifest_path = dir.path().join("dotler.toml");
         fs::write(
             &manifest_path,
-            "[shell]\nos-linux = \"~\"\nfiles = \"secret.txt encrypt\"\n",
+            "[shell]\nos-nux = \"~\"\nfiles = \"secret.txt encrypt\"\n",
         )
         .unwrap();
 

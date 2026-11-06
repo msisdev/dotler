@@ -510,7 +510,7 @@ devices = ["laptop"]
     #[test]
     fn test_validate_default_devices_reject_reserved_os_prefix() {
         let config = LocalConfig {
-            default_devices: vec!["os-linux".to_string()],
+            default_devices: vec!["os-nux".to_string()],
             ..Default::default()
         };
         let err = config

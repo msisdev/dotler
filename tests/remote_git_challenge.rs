@@ -148,7 +148,7 @@ fn test_list_remote_payload_exact_1mib_passes() {
     let sandbox = ChallengeSandbox::new();
     let lock = sandbox.acquire_lock();
 
-    let base = "[shell]\nos-linux = \"~\"\nfiles = \"*.sh\"\n";
+    let base = "[shell]\nos-nux = \"~\"\nfiles = \"*.sh\"\n";
     let target_len = REMOTE_TOML_FETCH_MAX_BYTES; // 1,048,576 bytes
     assert!(target_len > base.len());
 
@@ -174,7 +174,7 @@ fn test_list_remote_payload_1mib_plus_one_byte_aborts() {
     let sandbox = ChallengeSandbox::new();
     let lock = sandbox.acquire_lock();
 
-    let base = "[shell]\nos-linux = \"~\"\nfiles = \"*.sh\"\n";
+    let base = "[shell]\nos-nux = \"~\"\nfiles = \"*.sh\"\n";
     let target_len = REMOTE_TOML_FETCH_MAX_BYTES + 1; // 1,048,577 bytes
 
     let mut padded = String::with_capacity(target_len);
@@ -224,7 +224,7 @@ fn test_clone_repo_path_traversal_dot_dot_aborts_exit_code_3() {
 
     let malicious_toml = r#"
 [attack]
-os-linux = "~/../../etc"
+os-nux = "~/../../etc"
 files = "passwd"
 "#;
     let mock_repo = MockGitRepo::new(malicious_toml, &[("attack/passwd", b"evil")]);
@@ -257,7 +257,7 @@ fn test_clone_repo_absolute_path_aborts_exit_code_3() {
 
     let malicious_toml = r#"
 [attack]
-os-linux = "/etc/passwd"
+os-nux = "/etc/passwd"
 files = "passwd"
 "#;
     let mock_repo = MockGitRepo::new(malicious_toml, &[("attack/passwd", b"evil")]);
@@ -279,7 +279,7 @@ fn test_clone_repo_target_git_directory_aborts_exit_code_3() {
 
     let malicious_toml = r#"
 [attack]
-os-linux = "~/.git/hooks"
+os-nux = "~/.git/hooks"
 files = "pre-commit"
 "#;
     let mock_repo = MockGitRepo::new(malicious_toml, &[("attack/pre-commit", b"evil")]);
@@ -301,7 +301,7 @@ fn test_clone_repo_target_internal_dotler_config_aborts_exit_code_3() {
 
     let malicious_toml = r#"
 [attack]
-os-linux = "~/.config/dotler/evil"
+os-nux = "~/.config/dotler/evil"
 files = "evil.db"
 "#;
     let mock_repo = MockGitRepo::new(malicious_toml, &[("attack/evil.db", b"evil")]);
@@ -323,7 +323,7 @@ fn test_clone_repo_selection_pattern_traversal_aborts_exit_code_3() {
 
     let malicious_toml = r#"
 [attack]
-os-linux = "~"
+os-nux = "~"
 files = "../../../etc/shadow"
 "#;
     let mock_repo = MockGitRepo::new(malicious_toml, &[]);
@@ -364,7 +364,7 @@ password_slot = "{}"
 recovery_slot = "{}"
 
 [secure]
-os-linux = "~/.config/app"
+os-nux = "~/.config/app"
 files = "@token.enc"
 "#,
         remote_vault_cfg.vault_id, remote_vault_cfg.password_slot, remote_vault_cfg.recovery_slot,
@@ -414,7 +414,7 @@ fn test_install_remote_path_traversal_aborts_exit_code_3_and_cleans_staging() {
 
     let malicious_toml = r#"
 [attack]
-os-linux = "~/../../etc"
+os-nux = "~/../../etc"
 files = "shadow"
 "#;
     let mock_repo = MockGitRepo::new(malicious_toml, &[("attack/shadow", b"evil")]);
@@ -446,7 +446,7 @@ fn test_install_remote_absolute_path_aborts_exit_code_3() {
 
     let malicious_toml = r#"
 [attack]
-os-linux = "/var/log/attack"
+os-nux = "/var/log/attack"
 files = "attack.log"
 "#;
     let mock_repo = MockGitRepo::new(malicious_toml, &[("attack/attack.log", b"evil")]);
@@ -474,7 +474,7 @@ fn test_install_remote_dotler_config_target_aborts_exit_code_3() {
 
     let malicious_toml = r#"
 [attack]
-os-linux = "~/.config/dotler"
+os-nux = "~/.config/dotler"
 files = "state.db"
 "#;
     let mock_repo = MockGitRepo::new(malicious_toml, &[("attack/state.db", b"evil")]);
@@ -509,7 +509,7 @@ fn test_install_remote_repeated_retries_preserve_original_backup_strictly() {
 
     let remote_toml = r#"
 [tool]
-os-linux = "~"
+os-nux = "~"
 files = "my_tool.conf"
 "#;
     let mock_repo = MockGitRepo::new(
@@ -605,7 +605,7 @@ fn test_install_remote_fresh_file_repeated_install_and_uninstall() {
 
     let remote_toml = r#"
 [app]
-os-linux = "~"
+os-nux = "~"
 files = "new_app.conf"
 "#;
     let mock_repo = MockGitRepo::new(
@@ -691,7 +691,7 @@ fn test_uninstall_remote_idempotency_multi_run() {
 
     let remote_toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "script.sh"
 "#;
     let mock_repo = MockGitRepo::new(remote_toml, &[("shell/script.sh", b"echo hi\n")]);
@@ -735,7 +735,7 @@ fn test_uninstall_remote_dry_run_leaves_filesystem_and_db_intact() {
 
     let remote_toml = r#"
 [editor]
-os-linux = "~"
+os-nux = "~"
 files = "editor.rc"
 "#;
     let mock_repo = MockGitRepo::new(remote_toml, &[("editor/editor.rc", b"REMOTE_CONFIG\n")]);
@@ -785,7 +785,7 @@ fn test_clone_repo_non_empty_dest_aborts() {
 
     let remote_toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "*.sh"
 "#;
     let mock_repo = MockGitRepo::new(remote_toml, &[("shell/test.sh", b"echo 1")]);
@@ -810,7 +810,7 @@ fn test_clone_repo_unknown_selector_aborts() {
 
     let remote_toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "*.sh"
 "#;
     let mock_repo = MockGitRepo::new(remote_toml, &[("shell/test.sh", b"echo 1")]);
@@ -835,7 +835,7 @@ fn test_install_remote_unknown_group_aborts() {
 
     let remote_toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "*.sh"
 "#;
     let mock_repo = MockGitRepo::new(remote_toml, &[("shell/test.sh", b"echo 1")]);
@@ -865,7 +865,7 @@ fn test_install_remote_respects_exclusion_rules() {
 
     let remote_toml = r#"
 [pkg]
-os-linux = "~"
+os-nux = "~"
 files = """
 *
 !ignored.txt

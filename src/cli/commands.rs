@@ -438,11 +438,30 @@ fn handle_init<W: Write>(
 
     let dotler_toml_path = repo_dir.join("dotler.toml");
     if !dotler_toml_path.exists() {
-        let initial_toml = r#"[shell]
-path = "~"
-files = """
-*
-"""
+        let initial_toml = r#"# [bash]
+# # Priority 1: Custom device names (configured in ~/.config/dotler/config.toml `default_devices`)
+# default = "~"
+#
+# # Priority 2: Specific OS / Linux distribution
+# os-arch = "~"
+# os-debian = "~"
+# os-ubuntu = "~"
+# os-fedora = "~"
+# os-nixos = "~"
+# os-alpine = "~"
+# os-freebsd = "~"
+# os-openbsd = "~"
+#
+# # Priority 3: OS family fallback
+# os-nux = "~"
+# os-mac = "~"
+# os-win = "~"
+# os-bsd = "~"
+#
+# files = """
+# !*
+# .bashrc
+# """
 "#;
         write_file_safe(&dotler_toml_path, initial_toml.as_bytes())?;
     }
@@ -1637,7 +1656,7 @@ mod tests {
 
         let write_vault_manifest = |dir: &Path, vcfg: &crate::config::repo::VaultConfig| {
             let content = format!(
-                "[shell]\nos-linux = \"~\"\nos-macos = \"~\"\nos-windows = \"~\"\nfiles = \"* encrypt\"\n\n[vault]\nvault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n",
+                "[shell]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nfiles = \"* encrypt\"\n\n[vault]\nvault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n",
                 vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
             );
             write_file_safe(&dir.join("dotler.toml"), content.as_bytes()).unwrap();
@@ -1648,7 +1667,7 @@ mod tests {
         write_vault_manifest(&repo_other, &vcfg_other);
         write_file_safe(
             &repo_plain.join("dotler.toml"),
-            b"[shell]\nos-linux = \"~\"\nos-macos = \"~\"\nos-windows = \"~\"\nfiles = \"*\"\n",
+            b"[shell]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nfiles = \"*\"\n",
         )
         .unwrap();
 

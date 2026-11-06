@@ -40,7 +40,10 @@ impl E2eSandbox {
             .unwrap();
 
         let seed_toml = r#"[shell]
-path = "~"
+os-nux = "~"
+os-mac = "~"
+os-win = "~"
+os-bsd = "~"
 files = """
 *
 """
@@ -222,8 +225,8 @@ files = "*"
 
     // Restore clean dotler.toml
     let clean_toml = r#"[shell]
-os-linux = "~"
-os-macos = "~"
+os-nux = "~"
+os-mac = "~"
 files = """
 *
 """
@@ -295,7 +298,10 @@ fn test_e2e_dry_run_zero_mutation_guarantee() {
     assert_eq!(init_out.status.code(), Some(0));
 
     let toml_content = r#"[shell]
-path = "~"
+os-nux = "~"
+os-mac = "~"
+os-win = "~"
+os-bsd = "~"
 files = "*"
 "#;
     fs::write(sandbox.repo_dir.join("dotler.toml"), toml_content).unwrap();
@@ -485,8 +491,8 @@ fn test_e2e_encryption_mismatch_export_and_check_exit_code_1() {
 
     // 2. Configure a group with encrypted rule
     let toml_content = r#"[sec]
-os-linux = "~"
-os-macos = "~"
+os-nux = "~"
+os-mac = "~"
 files = "sec.txt encrypt"
 "#;
     let mut manifest = fs::read_to_string(sandbox.repo_dir.join("dotler.toml")).unwrap();
@@ -584,21 +590,21 @@ fn test_e2e_tidy_default_keep_and_multi_group_filter() {
     fs::write(dir_c.join("c.conf"), "c\n").unwrap();
 
     let toml_v1 = r#"[grp_a]
-os-linux = "~/.config/app_a"
-os-macos = "~/.config/app_a"
-os-windows = "~/.config/app_a"
+os-nux = "~/.config/app_a"
+os-mac = "~/.config/app_a"
+os-win = "~/.config/app_a"
 files = "*"
 
 [grp_b]
-os-linux = "~/.config/app_b"
-os-macos = "~/.config/app_b"
-os-windows = "~/.config/app_b"
+os-nux = "~/.config/app_b"
+os-mac = "~/.config/app_b"
+os-win = "~/.config/app_b"
 files = "*"
 
 [grp_c]
-os-linux = "~/.config/app_c"
-os-macos = "~/.config/app_c"
-os-windows = "~/.config/app_c"
+os-nux = "~/.config/app_c"
+os-mac = "~/.config/app_c"
+os-win = "~/.config/app_c"
 files = "*"
 "#;
     fs::write(sandbox.repo_dir.join("dotler.toml"), toml_v1).unwrap();
@@ -608,21 +614,21 @@ files = "*"
 
     // Exclude all three files so each becomes an orphan in its respective group
     let toml_v2 = r#"[grp_a]
-os-linux = "~/.config/app_a"
-os-macos = "~/.config/app_a"
-os-windows = "~/.config/app_a"
+os-nux = "~/.config/app_a"
+os-mac = "~/.config/app_a"
+os-win = "~/.config/app_a"
 files = "!*"
 
 [grp_b]
-os-linux = "~/.config/app_b"
-os-macos = "~/.config/app_b"
-os-windows = "~/.config/app_b"
+os-nux = "~/.config/app_b"
+os-mac = "~/.config/app_b"
+os-win = "~/.config/app_b"
 files = "!*"
 
 [grp_c]
-os-linux = "~/.config/app_c"
-os-macos = "~/.config/app_c"
-os-windows = "~/.config/app_c"
+os-nux = "~/.config/app_c"
+os-mac = "~/.config/app_c"
+os-win = "~/.config/app_c"
 files = "!*"
 "#;
     fs::write(sandbox.repo_dir.join("dotler.toml"), toml_v2).unwrap();
@@ -788,9 +794,9 @@ fn test_e2e_ancestor_dotler_toml_detection_and_vault_init_with_encrypt_rule() {
 
     // 2. Write dotler.toml with `encrypt` BEFORE `dotler vault init`
     let toml_with_enc = r#"[shell]
-os-linux = "~"
-os-macos = "~"
-os-windows = "~"
+os-nux = "~"
+os-mac = "~"
+os-win = "~"
 files = """
 secret.txt encrypt
 """

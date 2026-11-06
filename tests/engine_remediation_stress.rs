@@ -188,7 +188,7 @@ fn test_adversarial_path_override_security_checks() {
 
     let remote_toml = r#"
 [app]
-os-linux = "~"
+os-nux = "~"
 files = "tool.conf"
 "#;
     let repo = TestGitRepo::new(remote_toml, &[("app/tool.conf", b"content\n")]);
@@ -255,7 +255,7 @@ fn test_adversarial_fresh_file_repeated_install_uninstall_stress() {
 
     let remote_toml = r#"
 [tool]
-os-linux = "~"
+os-nux = "~"
 files = "fresh_tool.conf"
 "#;
     let repo = TestGitRepo::new(
@@ -324,7 +324,7 @@ fn test_adversarial_preexisting_file_repeated_install_uninstall_stress() {
     let remote_content = b"REMOTE_OVERWRITTEN_CONFIG\n";
     let remote_toml = r#"
 [tool]
-os-linux = "~"
+os-nux = "~"
 files = "user_tool.conf"
 "#;
     let repo = TestGitRepo::new(remote_toml, &[("tool/user_tool.conf", remote_content)]);
@@ -407,7 +407,7 @@ fn test_adversarial_mixed_fresh_and_preexisting_stress() {
 
     let remote_toml = r#"
 [mixed]
-os-linux = "~"
+os-nux = "~"
 files = """
 existing.conf
 fresh.conf
@@ -485,7 +485,7 @@ fn test_import_files_hash_match_skip_commits_sqlite_upsert_plain() {
 
     let dotler_toml = r#"
 [tool]
-os-linux = "~"
+os-nux = "~"
 files = "test.conf"
 "#;
     let repo_config = RepoConfig::parse(dotler_toml).unwrap();
@@ -555,7 +555,7 @@ password_slot = "{}"
 recovery_slot = "{}"
 
 [secure]
-os-linux = "~"
+os-nux = "~"
 files = "@secret.env"
 "#,
         vault_cfg.vault_id, vault_cfg.password_slot, vault_cfg.recovery_slot

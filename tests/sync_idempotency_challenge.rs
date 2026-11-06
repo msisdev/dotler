@@ -135,7 +135,7 @@ fn test_export_idempotency_avoids_io_and_preserves_file_inode_and_mtime() {
 
     let toml_str = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "shell/.bashrc"
 "#;
     let config = RepoConfig::parse(toml_str).unwrap();
@@ -225,7 +225,7 @@ password_slot = "{}"
 recovery_slot = "{}"
 
 [secrets]
-os-linux = "~"
+os-nux = "~"
 files = "@credentials.env"
 "#,
         vault_cfg.vault_id, vault_cfg.password_slot, vault_cfg.recovery_slot
@@ -319,7 +319,7 @@ password_slot = "{}"
 recovery_slot = "{}"
 
 [secrets]
-os-linux = "~"
+os-nux = "~"
 files = "@token.txt"
 "#,
         vault_cfg.vault_id, vault_cfg.password_slot, vault_cfg.recovery_slot
@@ -369,7 +369,7 @@ fn test_export_conflict_guard_aborts_with_exit_code_1_and_preserves_local_edits(
 
     let toml_str = r#"
 [configs]
-os-linux = "~"
+os-nux = "~"
 files = "app/config.json"
 "#;
     let config = RepoConfig::parse(toml_str).unwrap();
@@ -466,7 +466,7 @@ fn test_export_conflict_in_multi_file_halts_prior_to_unrelated_writes() {
 
     let toml_str = r#"
 [group_a]
-os-linux = "~"
+os-nux = "~"
 files = """
 file_a.txt
 file_b.txt
@@ -606,7 +606,7 @@ fn test_stale_dotler_tmp_files_completely_ignored_by_plan_and_tidy() {
 
     let toml_str = r#"
 [tools]
-os-linux = "~"
+os-nux = "~"
 files = "valid.sh"
 "#;
     let config = RepoConfig::parse(toml_str).unwrap();
@@ -650,7 +650,7 @@ fn test_tidy_orphan_cleanup_modifies_synced_files_and_never_touches_installed_fi
 
     let toml_str = r#"
 [group1]
-os-linux = "~"
+os-nux = "~"
 files = "active.txt"
 "#;
     let config = RepoConfig::parse(toml_str).unwrap();
@@ -785,7 +785,7 @@ fn test_tidy_installed_file_never_classified_as_synced_orphan() {
 
     let toml_str = r#"
 [empty_group]
-os-linux = "~"
+os-nux = "~"
 files = "missing_file.txt"
 "#;
     let config = RepoConfig::parse(toml_str).unwrap();
@@ -849,7 +849,7 @@ password_slot = "{}"
 recovery_slot = "{}"
 
 [empty_group]
-os-linux = "~"
+os-nux = "~"
 files = """
 empty_plain.txt
 @empty_enc.sec
@@ -903,7 +903,7 @@ fn test_dry_run_guarantees_zero_filesystem_and_database_mutations() {
 
     let toml_str = r#"
 [group]
-os-linux = "~"
+os-nux = "~"
 files = "test.txt"
 "#;
     let config = RepoConfig::parse(toml_str).unwrap();

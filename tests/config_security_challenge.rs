@@ -104,7 +104,7 @@ os-archlinux = "~/.zshrc"
         ConfigError::UnknownOsKey { key, hint } => {
             assert_eq!(key, "os-archlinux");
             assert!(hint.contains("os-arch"));
-            assert!(hint.contains("os-linux"));
+            assert!(hint.contains("os-nux"));
         }
         other => panic!("expected UnknownOsKey, got: {other:?}"),
     }
@@ -115,7 +115,7 @@ fn test_repo_config_rejects_vault_used_as_group_name() {
     let content = r#"
 [vault]
 files = "secret"
-os-linux = "~/.secret"
+os-nux = "~/.secret"
 "#;
     let err = RepoConfig::parse(content).expect_err("vault cannot be used as a group name");
     assert!(
@@ -259,7 +259,7 @@ fn test_challenge_files_rules_path_security_bypass() {
             r#"
 [exploit]
 files = '{malicious_pattern}'
-os-linux = "~/.config/app"
+os-nux = "~/.config/app"
 "#
         );
         let parse_result = RepoConfig::parse(&manifest);
@@ -289,11 +289,11 @@ fn test_cross_group_collision_same_file_detected() {
     let content = r#"
 [group_a]
 files = "shared.conf"
-os-linux = "~/.config/common"
+os-nux = "~/.config/common"
 
 [group_b]
 files = "shared.conf"
-os-linux = "~/.config/common"
+os-nux = "~/.config/common"
 "#;
     let repo = RepoConfig::parse(content).expect("syntax valid");
     let os_info = OsInfo::new("arch", "linux");
@@ -308,11 +308,11 @@ fn test_cross_group_collision_inactive_group_does_not_collide() {
     let content = r#"
 [linux_app]
 files = "config.toml"
-os-linux = "~/.config/app"
+os-nux = "~/.config/app"
 
 [mac_app]
 files = "config.toml"
-os-macos = "~/.config/app"
+os-mac = "~/.config/app"
 "#;
     let repo = RepoConfig::parse(content).expect("syntax valid");
     let linux_info = OsInfo::new("arch", "linux");
@@ -330,11 +330,11 @@ fn test_challenge_distinct_files_in_home_directory_collision_bug() {
     let content = r#"
 [shell_zsh]
 files = ".zshrc"
-os-linux = "~"
+os-nux = "~"
 
 [shell_bash]
 files = ".bashrc"
-os-linux = "~"
+os-nux = "~"
 "#;
     let repo = RepoConfig::parse(content).expect("syntax valid");
     let os_info = OsInfo::new("arch", "linux");
@@ -360,7 +360,7 @@ fn test_cascading_resolution_device_beats_distro_and_family() {
         .insert("os-arch".to_string(), "~/arch".to_string());
     group
         .paths
-        .insert("os-linux".to_string(), "~/linux".to_string());
+        .insert("os-nux".to_string(), "~/linux".to_string());
 
     let devices = vec!["dev-laptop".to_string()];
     let os_info = OsInfo::new("arch", "linux");
@@ -377,7 +377,7 @@ fn test_cascading_resolution_distro_beats_family_when_no_device() {
         .insert("os-arch".to_string(), "~/arch".to_string());
     group
         .paths
-        .insert("os-linux".to_string(), "~/linux".to_string());
+        .insert("os-nux".to_string(), "~/linux".to_string());
 
     let os_info = OsInfo::new("arch", "linux");
 
@@ -393,7 +393,7 @@ fn test_cascading_resolution_family_fallback_when_distro_unmatched() {
         .insert("os-debian".to_string(), "~/debian".to_string());
     group
         .paths
-        .insert("os-linux".to_string(), "~/linux".to_string());
+        .insert("os-nux".to_string(), "~/linux".to_string());
 
     let os_info = OsInfo::new("arch", "linux");
 
@@ -406,10 +406,10 @@ fn test_cascading_resolution_macos_simulation() {
     let mut group = GroupConfig::default();
     group
         .paths
-        .insert("os-linux".to_string(), "~/linux".to_string());
+        .insert("os-nux".to_string(), "~/linux".to_string());
     group
         .paths
-        .insert("os-macos".to_string(), "~/macos".to_string());
+        .insert("os-mac".to_string(), "~/macos".to_string());
 
     let os_info = OsInfo::new("macos", "macos");
 
@@ -473,7 +473,7 @@ fn test_cascading_resolution_unmatched_environment_returns_none() {
         .insert("workstation".to_string(), "~/work".to_string());
     group
         .paths
-        .insert("os-windows".to_string(), "~/win".to_string());
+        .insert("os-win".to_string(), "~/win".to_string());
 
     let os_info = OsInfo::new("arch", "linux");
     let resolved = resolve_group_target_path(&group, &["laptop".to_string()], &os_info);
@@ -489,27 +489,27 @@ fn test_empirical_shared_base_directories_nested_and_distinct() {
     let manifest = r#"
 [group_home_zsh]
 files = ".zshrc"
-os-linux = "~"
+os-nux = "~"
 
 [group_home_bash]
 files = ".bashrc"
-os-linux = "~"
+os-nux = "~"
 
 [group_config_nvim]
 files = "init.lua"
-os-linux = "~/.config/nvim"
+os-nux = "~/.config/nvim"
 
 [group_config_alacritty]
 files = "alacritty.toml"
-os-linux = "~/.config/alacritty"
+os-nux = "~/.config/alacritty"
 
 [group_config_base]
 files = "tmux/tmux.conf"
-os-linux = "~/.config"
+os-nux = "~/.config"
 
 [group_home_nested_direct]
 files = ".config/helix/config.toml"
-os-linux = "~"
+os-nux = "~"
 "#;
     let repo = RepoConfig::parse(manifest).expect("valid configuration syntax");
     let os_info = OsInfo::new("arch", "linux");
@@ -524,11 +524,11 @@ fn test_empirical_collision_different_bases_resolving_to_same_target() {
     let manifest = r#"
 [group_base_home]
 files = ".config/app/settings.toml"
-os-linux = "~"
+os-nux = "~"
 
 [group_base_config]
 files = "app/settings.toml"
-os-linux = "~/.config"
+os-nux = "~/.config"
 "#;
     let repo = RepoConfig::parse(manifest).expect("valid configuration syntax");
     let os_info = OsInfo::new("arch", "linux");
@@ -556,11 +556,11 @@ fn test_empirical_collision_cross_base_wildcard_overlap() {
     let manifest = r#"
 [group_wildcard_parent]
 files = "nvim/*.lua"
-os-linux = "~/.config"
+os-nux = "~/.config"
 
 [group_concrete_child]
 files = "init.lua"
-os-linux = "~/.config/nvim"
+os-nux = "~/.config/nvim"
 "#;
     let repo = RepoConfig::parse(manifest).expect("valid configuration syntax");
     let os_info = OsInfo::new("arch", "linux");
@@ -580,11 +580,11 @@ fn test_empirical_collision_empty_files_directory_takeover() {
     let manifest = r#"
 [group_directory_owner]
 files = ""
-os-linux = "~/.config/app"
+os-nux = "~/.config/app"
 
 [group_file_owner]
 files = "config.toml"
-os-linux = "~/.config/app"
+os-nux = "~/.config/app"
 "#;
     let repo = RepoConfig::parse(manifest).expect("valid configuration syntax");
     let os_info = OsInfo::new("arch", "linux");
@@ -619,7 +619,7 @@ recovery_slot = "cmVjb3Zlcnk="
 
 [exploit]
 files = '{malicious_rule}'
-os-linux = "~/.config/app"
+os-nux = "~/.config/app"
 "#
         );
         let err =

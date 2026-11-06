@@ -223,7 +223,7 @@ fn test_plan_all_synced_happy_path() {
 
     let toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "test.sh"
 "#;
     sandbox.write_dotler_toml(toml);
@@ -265,7 +265,7 @@ fn test_plan_detects_modified_locally() {
 
     let toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "test.sh"
 "#;
     sandbox.write_dotler_toml(toml);
@@ -307,7 +307,7 @@ fn test_plan_detects_modified_in_repo() {
 
     let toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "test.sh"
 "#;
     sandbox.write_dotler_toml(toml);
@@ -349,7 +349,7 @@ fn test_plan_detects_missing_locally() {
 
     let toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "test.sh"
 "#;
     sandbox.write_dotler_toml(toml);
@@ -389,7 +389,7 @@ fn test_plan_detects_missing_in_repo() {
 
     let toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "test.sh"
 "#;
     sandbox.write_dotler_toml(toml);
@@ -436,7 +436,7 @@ password_slot = "{}"
 recovery_slot = "{}"
 
 [secret]
-os-linux = "~"
+os-nux = "~"
 files = "secret.txt encrypt"
 "#,
         vault_cfg.vault_id, vault_cfg.password_slot, vault_cfg.recovery_slot
@@ -462,7 +462,7 @@ fn test_plan_detects_orphaned_synced_files() {
 
     let toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "new.sh"
 "#;
     sandbox.write_dotler_toml(toml);
@@ -504,7 +504,7 @@ fn test_export_fresh_deployment_atomic_staging() {
 
     let toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "app.conf"
 "#;
     sandbox.write_dotler_toml(toml);
@@ -539,7 +539,7 @@ fn test_export_hash_match_idempotency_skip() {
 
     let toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "app.conf"
 "#;
     sandbox.write_dotler_toml(toml);
@@ -571,7 +571,7 @@ fn test_export_local_conflict_blocks_write_without_force() {
 
     let toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "app.conf"
 "#;
     sandbox.write_dotler_toml(toml);
@@ -622,7 +622,7 @@ fn test_export_force_overwrites_conflict() {
 
     let toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "app.conf"
 "#;
     sandbox.write_dotler_toml(toml);
@@ -674,7 +674,7 @@ password_slot = "{}"
 recovery_slot = "{}"
 
 [secret]
-os-linux = "~"
+os-nux = "~"
 files = "secret.txt encrypt"
 "#,
         vault_cfg.vault_id, vault_cfg.password_slot, vault_cfg.recovery_slot
@@ -703,7 +703,7 @@ fn test_export_dry_run_leaves_filesystem_and_db_untouched() {
 
     let toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "dry.conf"
 "#;
     sandbox.write_dotler_toml(toml);
@@ -736,7 +736,7 @@ fn test_import_fresh_files_to_repo_atomic_staging() {
 
     let toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "script.sh"
 "#;
     sandbox.write_dotler_toml(toml);
@@ -776,7 +776,7 @@ password_slot = "{}"
 recovery_slot = "{}"
 
 [secret]
-os-linux = "~"
+os-nux = "~"
 files = "secret.txt encrypt"
 "#,
         vault_cfg.vault_id, vault_cfg.password_slot, vault_cfg.recovery_slot
@@ -819,7 +819,7 @@ password_slot = "{}"
 recovery_slot = "{}"
 
 [secret]
-os-linux = "~"
+os-nux = "~"
 files = "secret.txt encrypt"
 "#,
         vault_cfg.vault_id, vault_cfg.password_slot, vault_cfg.recovery_slot
@@ -851,7 +851,7 @@ fn test_import_per_file_wal_db_commit() {
 
     let toml = r#"
 [batch]
-os-linux = "~"
+os-nux = "~"
 files = """
 file1.txt
 file2.txt
@@ -899,7 +899,7 @@ password_slot = "{}"
 recovery_slot = "{}"
 
 [secret]
-os-linux = "~"
+os-nux = "~"
 files = "secret.txt encrypt"
 "#,
         vault_cfg.vault_id, vault_cfg.password_slot, vault_cfg.recovery_slot
@@ -936,7 +936,7 @@ password_slot = "{}"
 recovery_slot = "{}"
 
 [secret]
-os-linux = "~"
+os-nux = "~"
 files = "secret.txt"
 "#,
         vault_cfg.vault_id, vault_cfg.password_slot, vault_cfg.recovery_slot
@@ -965,7 +965,7 @@ fn test_tidy_orphan_keep_policy_preserves_os_file() {
 
     let toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "active.sh"
 "#;
     sandbox.write_dotler_toml(toml);
@@ -1007,7 +1007,7 @@ fn test_tidy_orphan_purge_policy_deletes_os_file() {
 
     let toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "active.sh"
 "#;
     sandbox.write_dotler_toml(toml);
@@ -1048,7 +1048,7 @@ fn test_tidy_strict_physical_isolation_from_installed_files() {
 
     let toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "active.sh"
 "#;
     sandbox.write_dotler_toml(toml);
@@ -1124,11 +1124,11 @@ fn test_git_ls_shallow_inspection_against_mock_bare_repo() {
 
     let remote_toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "*.sh"
 
 [nvim]
-os-linux = "~/.config/nvim"
+os-nux = "~/.config/nvim"
 files = "init.lua"
 "#;
     let mock_repo = MockBareRepo::new(remote_toml, &[("shell/test.sh", b"echo hi\n")]);
@@ -1150,7 +1150,7 @@ fn test_git_ls_payload_cap_exceeded() {
     let remote_toml = format!(
         r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "*.sh"
 {}
 "#,
@@ -1179,7 +1179,7 @@ fn test_git_clone_staging_isolation_and_atomic_promotion() {
 
     let remote_toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = "*.sh"
 "#;
     let mock_repo = MockBareRepo::new(remote_toml, &[("shell/hello.sh", b"echo hello\n")]);
@@ -1200,7 +1200,7 @@ fn test_git_clone_security_hard_block_cleans_staging() {
 
     let malicious_toml = r#"
 [malicious]
-os-linux = "~/../../etc"
+os-nux = "~/../../etc"
 files = "passwd"
 "#;
     let mock_repo = MockBareRepo::new(malicious_toml, &[("malicious/passwd", b"root:x:0:0\n")]);
@@ -1227,7 +1227,7 @@ fn test_git_install_wal_snapshot_and_deploy_cycle() {
 
     let remote_toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = ".bashrc"
 "#;
     let remote_content = b"REMOTE_DEPLOYED_BASHRC\n";
@@ -1276,7 +1276,7 @@ fn test_git_install_crash_retry_preserves_original_backup() {
 
     let remote_toml = r#"
 [app]
-os-linux = "~"
+os-nux = "~"
 files = "config.json"
 "#;
     let mock_repo = MockBareRepo::new(remote_toml, &[("app/config.json", b"REMOTE_V1\n")]);
@@ -1335,7 +1335,7 @@ fn test_git_install_and_uninstall_preserves_synced_files_table() {
 
     let remote_toml = r#"
 [tools]
-os-linux = "~"
+os-nux = "~"
 files = "tool.sh"
 "#;
     let mock_repo = MockBareRepo::new(remote_toml, &[("tools/tool.sh", b"tool\n")]);
@@ -1370,7 +1370,7 @@ fn test_install_remote_path_override_security_rejection() {
 
     let remote_toml = r#"
 [tools]
-os-linux = "~"
+os-nux = "~"
 files = "tool.sh"
 "#;
     let mock_repo = MockBareRepo::new(remote_toml, &[("tools/tool.sh", b"tool\n")]);
@@ -1418,7 +1418,7 @@ fn test_import_files_upserts_synced_files_on_hash_match() {
 
     let toml = r#"
 [shell]
-os-linux = "~"
+os-nux = "~"
 files = ".bashrc"
 "#;
     let repo_config = RepoConfig::parse(toml).unwrap();
@@ -1463,15 +1463,15 @@ fn test_sync_wildcard_home_filters_internal_state_and_git() {
     fs::create_dir_all(&internal_repo).unwrap();
     fs::write(
         internal_repo.join("dotler.toml"),
-        "[shell]\nos-linux = \"~\"\nfiles = \"*\"\n",
+        "[shell]\nos-nux = \"~\"\nfiles = \"*\"\n",
     )
     .unwrap();
     fs::write(internal_repo.join("SKILL.md"), "# Dotler\n").unwrap();
 
     let toml = r#"
 [shell]
-os-linux = "~"
-os-macos = "~"
+os-nux = "~"
+os-mac = "~"
 files = "*"
 "#;
     let repo_config = RepoConfig::parse(toml).unwrap();
@@ -1556,21 +1556,21 @@ fn test_tidy_single_and_multi_group_filters_isolate_orphans() {
     fs::write(dir_c.join("orphan_c.conf"), "c_orphan").unwrap();
 
     let initial_toml = r#"[grp_a]
-os-linux = "~/grp_a"
-os-macos = "~/grp_a"
-os-windows = "~/grp_a"
+os-nux = "~/grp_a"
+os-mac = "~/grp_a"
+os-win = "~/grp_a"
 files = "*"
 
 [grp_b]
-os-linux = "~/grp_b"
-os-macos = "~/grp_b"
-os-windows = "~/grp_b"
+os-nux = "~/grp_b"
+os-mac = "~/grp_b"
+os-win = "~/grp_b"
 files = "*"
 
 [grp_c]
-os-linux = "~/grp_c"
-os-macos = "~/grp_c"
-os-windows = "~/grp_c"
+os-nux = "~/grp_c"
+os-mac = "~/grp_c"
+os-win = "~/grp_c"
 files = "*"
 "#;
     let repo_cfg1 = RepoConfig::parse(initial_toml).unwrap();
@@ -1590,21 +1590,21 @@ files = "*"
 
     // Now exclude orphan_a.conf, orphan_b.conf, and orphan_c.conf in dotler.toml
     let updated_toml = r#"[grp_a]
-os-linux = "~/grp_a"
-os-macos = "~/grp_a"
-os-windows = "~/grp_a"
+os-nux = "~/grp_a"
+os-mac = "~/grp_a"
+os-win = "~/grp_a"
 files = "keep_a.conf"
 
 [grp_b]
-os-linux = "~/grp_b"
-os-macos = "~/grp_b"
-os-windows = "~/grp_b"
+os-nux = "~/grp_b"
+os-mac = "~/grp_b"
+os-win = "~/grp_b"
 files = "!*"
 
 [grp_c]
-os-linux = "~/grp_c"
-os-macos = "~/grp_c"
-os-windows = "~/grp_c"
+os-nux = "~/grp_c"
+os-mac = "~/grp_c"
+os-win = "~/grp_c"
 files = "!*"
 "#;
     let repo_cfg2 = RepoConfig::parse(updated_toml).unwrap();
@@ -1681,8 +1681,8 @@ fn test_symlink_inside_repo_is_hard_blocked_exit_code_3() {
     assert!(is_symlink(&repo_link));
 
     let toml = r#"[shell]
-os-linux = "~"
-os-macos = "~"
+os-nux = "~"
+os-mac = "~"
 files = ".zshrc"
 "#;
     fs::write(sb.repo_dir.join("dotler.toml"), toml).unwrap();
@@ -1728,8 +1728,8 @@ fn test_os_parent_dir_and_file_symlink_escaping_home_are_hard_blocked() {
     symlink(&outside_file, sb.home_dir.join(".zshrc")).unwrap();
 
     let toml1 = r#"[shell]
-os-linux = "~"
-os-macos = "~"
+os-nux = "~"
+os-mac = "~"
 files = ".zshrc"
 "#;
     let repo_cfg1 = RepoConfig::parse(toml1).unwrap();
@@ -1748,8 +1748,8 @@ files = ".zshrc"
     symlink(&outside_dir, config_dir.join("evil_app")).unwrap();
 
     let toml2 = r#"[evil]
-os-linux = "~/.config/evil_app"
-os-macos = "~/.config/evil_app"
+os-nux = "~/.config/evil_app"
+os-mac = "~/.config/evil_app"
 files = "passwd_mock"
 "#;
     let repo_cfg2 = RepoConfig::parse(toml2).unwrap();
@@ -1781,8 +1781,8 @@ fn test_os_broken_in_home_symlink_blocks_import_and_heals_on_export() {
     assert!(!home_zshrc.exists());
 
     let toml = r#"[shell]
-os-linux = "~"
-os-macos = "~"
+os-nux = "~"
+os-mac = "~"
 files = ".zshrc"
 "#;
     let repo_cfg = RepoConfig::parse(toml).unwrap();
@@ -1836,8 +1836,8 @@ fn test_os_in_home_symlink_migration_import_dereferences_and_export_materializes
     assert!(is_symlink(&home_zshrc));
 
     let toml = r#"[shell]
-os-linux = "~"
-os-macos = "~"
+os-nux = "~"
+os-mac = "~"
 files = ".*rc"
 "#;
     let repo_cfg = RepoConfig::parse(toml).unwrap();
@@ -1903,7 +1903,7 @@ fn test_remote_git_multi_manifest_bfs_unicode_order_and_explicit_subpath() {
 
     fs::write(
         worktree.join("z_cfg").join("dotler.toml"),
-        "[zsh]\nos-linux = \"~\"\nos-macos = \"~\"\nfiles = \".zshrc\"\n",
+        "[zsh]\nos-nux = \"~\"\nos-mac = \"~\"\nfiles = \".zshrc\"\n",
     )
     .unwrap();
     fs::write(
@@ -1914,7 +1914,7 @@ fn test_remote_git_multi_manifest_bfs_unicode_order_and_explicit_subpath() {
 
     fs::write(
         worktree.join("a_cfg").join("dotler.toml"),
-        "[nvim]\nos-linux = \"~\"\nos-macos = \"~\"\nfiles = \"init.lua\"\n",
+        "[nvim]\nos-nux = \"~\"\nos-mac = \"~\"\nfiles = \"init.lua\"\n",
     )
     .unwrap();
     fs::write(
@@ -1925,7 +1925,7 @@ fn test_remote_git_multi_manifest_bfs_unicode_order_and_explicit_subpath() {
 
     fs::write(
         worktree.join("a_cfg").join("deep").join("dotler.toml"),
-        "[tmux]\nos-linux = \"~\"\nos-macos = \"~\"\nfiles = \".tmux.conf\"\n",
+        "[tmux]\nos-nux = \"~\"\nos-mac = \"~\"\nfiles = \".tmux.conf\"\n",
     )
     .unwrap();
     fs::write(

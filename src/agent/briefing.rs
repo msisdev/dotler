@@ -61,8 +61,8 @@ files = """
 *.key encrypt
 !*.log
 """
-os-linux = "~"
-os-macos = "~"
+os-nux = "~"
+os-mac = "~"
 ```
 
 ## 3. Standard Operational Guidelines & Command Cheatsheet
@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn test_render_briefing_sections() {
         let cfg = LocalConfig::default();
-        let os_info = OsInfo::new("ubuntu", "linux");
+        let os_info = OsInfo::new("ubuntu", "nux");
         let briefing = render_briefing(&cfg, &os_info, true);
 
         assert!(briefing.contains("## 1. System Overview & Active Device Profile"));
@@ -206,7 +206,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let cfg = LocalConfig::default();
-        let os_info = OsInfo::new("debian", "linux");
+        let os_info = OsInfo::new("debian", "nux");
         let secret = "my_super_secret_password_never_leak_me";
 
         crate::crypto::keyring::OsKeyring::enable_mock();
@@ -232,10 +232,10 @@ mod tests {
         cfg.repos
             .insert("dotfiles".to_string(), "/home/user/dotfiles".to_string());
 
-        let os_info = OsInfo::new("darwin", "macos");
+        let os_info = OsInfo::new("darwin", "mac");
         let snap = EnvironmentSnapshot::capture(&cfg, &os_info, false);
 
-        assert_eq!(snap.os_family, "macos");
+        assert_eq!(snap.os_family, "mac");
         assert_eq!(snap.default_devices, vec!["workstation"]);
         assert_eq!(snap.registered_repos.len(), 1);
         assert!(!snap.keyring_ready);

@@ -17,8 +17,8 @@ Select the dotfiles to track in `dotler.toml`:
 
 ```toml
 [shell]
-os-linux = "~"
-os-macos = "~"
+os-nux = "~"
+os-mac = "~"
 files = """
 .zshrc
 .gitconfig

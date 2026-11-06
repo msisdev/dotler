@@ -14,8 +14,8 @@ pub use remote::{
 };
 pub use sync::{
     ATOMIC_REPLACE_RETRIES, FileActionPlan, FileSyncStatus, SyncEngine, SyncReport,
-    TMP_FILE_PREFIX, TidyOrphanPolicy, TidyReport, atomic_write_file, export_files, import_files,
-    plan, tidy,
+    TMP_FILE_PREFIX, TidyOrphanPolicy, TidyReport, export_files, import_files, plan, tidy,
+    write_file_safe,
 };
 
 use std::path::PathBuf;

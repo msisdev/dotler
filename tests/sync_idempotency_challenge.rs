@@ -12,9 +12,7 @@ use dotler::config::state::{
 use dotler::crypto::keyring::OsKeyring;
 use dotler::crypto::vault::{EncryptedFile, VaultKey, init_vault};
 use dotler::crypto::{ExposeSecret, SecretString};
-use dotler::engine::{
-    EngineError, FileSyncStatus, SyncEngine, TidyOrphanPolicy, atomic_write_file,
-};
+use dotler::engine::{EngineError, FileSyncStatus, SyncEngine, TidyOrphanPolicy, write_file_safe};
 use tempfile::TempDir;
 
 static TEST_KEYRING_LOCK: Mutex<()> = Mutex::new(());
@@ -534,12 +532,12 @@ file_c.txt
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_atomic_write_file_same_directory_staging_and_clean_replacement() {
+fn test_write_file_safe_same_directory_staging_and_clean_replacement() {
     let sandbox = ChallengeSandbox::new();
     let dest_file = sandbox.home_dir.join("subdir/nested/dest.txt");
 
     let initial = b"INITIAL_DATA";
-    atomic_write_file(&dest_file, initial).expect("initial atomic write");
+    write_file_safe(&dest_file, initial).expect("initial atomic write");
     assert_eq!(fs::read(&dest_file).unwrap(), initial);
 
     // Parent directory should not contain any remaining temporary files
@@ -559,13 +557,13 @@ fn test_atomic_write_file_same_directory_staging_and_clean_replacement() {
 
     // Overwrite atomically
     let updated = b"UPDATED_DATA_AFTER_ATOMIC_REPLACE";
-    atomic_write_file(&dest_file, updated).expect("update atomic write");
+    write_file_safe(&dest_file, updated).expect("update atomic write");
     assert_eq!(fs::read(&dest_file).unwrap(), updated);
 }
 
 #[test]
 #[cfg(unix)]
-fn test_atomic_write_file_preserves_unix_permissions() {
+fn test_write_file_safe_preserves_unix_permissions() {
     let sandbox = ChallengeSandbox::new();
     let exec_file = sandbox.home_dir.join("bin/script.sh");
 
@@ -578,7 +576,7 @@ fn test_atomic_write_file_preserves_unix_permissions() {
     assert_eq!(meta1.permissions().mode() & 0o777, 0o755);
 
     // Atomic replace
-    atomic_write_file(&exec_file, b"#!/bin/sh\necho 2\n").unwrap();
+    write_file_safe(&exec_file, b"#!/bin/sh\necho 2\n").unwrap();
     let meta2 = fs::metadata(&exec_file).unwrap();
     assert_eq!(
         meta2.permissions().mode() & 0o777,
@@ -592,7 +590,7 @@ fn test_atomic_write_file_preserves_unix_permissions() {
     fs::write(&secret_file, b"PRIVATE_KEY_DATA").unwrap();
     fs::set_permissions(&secret_file, fs::Permissions::from_mode(0o600)).unwrap();
 
-    atomic_write_file(&secret_file, b"NEW_KEY_DATA").unwrap();
+    write_file_safe(&secret_file, b"NEW_KEY_DATA").unwrap();
     let meta3 = fs::metadata(&secret_file).unwrap();
     assert_eq!(
         meta3.permissions().mode() & 0o777,

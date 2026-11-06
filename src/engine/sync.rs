@@ -5,22 +5,19 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::StateError;
 use crate::config::local::{WalkDir, expand_tilde};
 use crate::config::repo::{
     OsInfo, RepoConfig, SelectionMode, evaluate_selection, is_symlink, parse_selection_rules,
     resolve_group_target_path, validate_dir_no_symlinks, validate_os_dir_path,
     validate_os_target_path,
 };
-pub use crate::config::state::{ATOMIC_REPLACE_RETRIES, TMP_FILE_PREFIX};
-use crate::config::state::{
-    DotlerLockGuard, StateDb, SyncedFileRecord, atomic_write_file as shared_atomic_write_file,
-};
+pub use crate::config::state::{ATOMIC_REPLACE_RETRIES, TMP_FILE_PREFIX, write_file_safe};
+use crate::config::state::{DotlerLockGuard, StateDb, SyncedFileRecord};
 use crate::crypto::ExposeSecret;
 use crate::crypto::vault::{EncryptedFile, VaultKey};
 use crate::engine::EngineError;
@@ -476,7 +473,7 @@ impl<'a> SyncEngine<'a> {
                 }
 
                 let enc = vault_key.encrypt_file(&os_bytes)?;
-                atomic_write_file(&plan.repo_file_path, &enc.to_bytes())?;
+                write_file_safe(&plan.repo_file_path, &enc.to_bytes())?;
 
                 // Clean up conflicting plain file if any
                 let plain_counterpart = plan.repo_file_path.with_extension("");
@@ -511,7 +508,7 @@ impl<'a> SyncEngine<'a> {
                     continue;
                 }
 
-                atomic_write_file(&plan.repo_file_path, &os_bytes)?;
+                write_file_safe(&plan.repo_file_path, &os_bytes)?;
 
                 // Clean up conflicting .enc file if any
                 let enc_counterpart =
@@ -638,7 +635,7 @@ impl<'a> SyncEngine<'a> {
                 continue;
             }
 
-            atomic_write_file(&plan.target_os_path, &plaintext_bytes)?;
+            write_file_safe(&plan.target_os_path, &plaintext_bytes)?;
 
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -744,7 +741,7 @@ impl<'a> SyncEngine<'a> {
                                 let plaintext = fs::read(path)?;
                                 let enc = vault_key.encrypt_file(&plaintext)?;
                                 let target_enc = group_repo_dir.join(format!("{clean_rel}.enc"));
-                                atomic_write_file(&target_enc, &enc.to_bytes())?;
+                                write_file_safe(&target_enc, &enc.to_bytes())?;
                                 let _ = fs::remove_file(path);
                             }
                             report.encrypted_in_repo += 1;
@@ -761,7 +758,7 @@ impl<'a> SyncEngine<'a> {
                                 let enc = EncryptedFile::from_bytes(&raw_enc)?;
                                 let decrypted = vault_key.decrypt_file(&enc)?;
                                 let target_plain = group_repo_dir.join(clean_rel);
-                                atomic_write_file(&target_plain, decrypted.expose_secret())?;
+                                write_file_safe(&target_plain, decrypted.expose_secret())?;
                                 let _ = fs::remove_file(path);
                             }
                             report.decrypted_in_repo += 1;
@@ -875,12 +872,4 @@ pub fn tidy_groups(
     dry_run: bool,
 ) -> Result<TidyReport, EngineError> {
     engine.tidy_groups(group_filters, lock, policy, dry_run)
-}
-
-/// Atomic file replacement delegating to the shared configuration state handler.
-pub fn atomic_write_file(dest: &Path, content: &[u8]) -> Result<(), EngineError> {
-    shared_atomic_write_file(dest, content).map_err(|e| match e {
-        StateError::Io(io) => EngineError::Io(io),
-        other => EngineError::AtomicReplaceFailed(other.to_string()),
-    })
 }

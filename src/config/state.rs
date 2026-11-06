@@ -476,7 +476,7 @@ pub fn get_lock(lock_path: PathBuf) -> crate::config::Resource<DotlerLockGuard, 
 /// Writes `content` to `dest` atomically by creating a `.dotler-tmp-*` file
 /// in the same parent directory, syncing to disk (`fsync`), preserving permissions
 /// when replacing an existing file, and renaming into place with bounded retries.
-pub fn atomic_write_file(dest: &Path, content: &[u8]) -> Result<(), StateError> {
+pub fn write_file_safe(dest: &Path, content: &[u8]) -> Result<(), StateError> {
     let parent = match dest.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
@@ -803,11 +803,11 @@ mod tests {
     }
 
     #[test]
-    fn test_shared_atomic_write_file_creates_overwrites_and_preserves_permissions() {
+    fn test_shared_write_file_safe_creates_overwrites_and_preserves_permissions() {
         let dir = tempdir().expect("tempdir");
         let target = dir.path().join("nested").join("config.toml");
 
-        atomic_write_file(&target, b"first = 1\n").expect("initial atomic write");
+        write_file_safe(&target, b"first = 1\n").expect("initial atomic write");
         assert_eq!(fs::read_to_string(&target).unwrap(), "first = 1\n");
 
         #[cfg(unix)]
@@ -816,7 +816,7 @@ mod tests {
             fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
         }
 
-        atomic_write_file(&target, b"second = 2\n").expect("overwrite atomic write");
+        write_file_safe(&target, b"second = 2\n").expect("overwrite atomic write");
         assert_eq!(fs::read_to_string(&target).unwrap(), "second = 2\n");
 
         #[cfg(unix)]
@@ -834,7 +834,7 @@ mod tests {
             .collect();
         assert!(
             leftovers.is_empty(),
-            "atomic_write_file must leave zero temporary staging files"
+            "write_file_safe must leave zero temporary staging files"
         );
     }
 }

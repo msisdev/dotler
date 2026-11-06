@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::state::atomic_write_file;
+use crate::config::state::write_file_safe;
 use crate::config::{ConfigError, StateError};
 
 pub const LOCAL_CONFIG_DIR: &str = "~/.config/dotler";
@@ -336,7 +336,7 @@ impl LocalConfig {
         let serialized = toml::to_string_pretty(self)
             .map_err(|e| ConfigError::TomlSyntaxError(e.to_string()))?;
 
-        atomic_write_file(path, serialized.as_bytes()).map_err(|e| match e {
+        write_file_safe(path, serialized.as_bytes()).map_err(|e| match e {
             StateError::Io(io) => ConfigError::IoError(io),
             other => ConfigError::AtomicRenameFailed(other.to_string()),
         })

@@ -893,7 +893,7 @@ impl RepoConfig {
             match (&existing_cfg.vault, &self.vault) {
                 (Some(old_v), Some(new_v)) => {
                     let updated = update_vault_manifest_section(&existing_str, old_v, new_v);
-                    return crate::config::state::atomic_write_file(path, updated.as_bytes())
+                    return crate::config::state::write_file_safe(path, updated.as_bytes())
                         .map_err(|e| match e {
                             crate::config::StateError::Io(io) => ConfigError::IoError(io),
                             other => ConfigError::AtomicRenameFailed(other.to_string()),
@@ -909,7 +909,7 @@ impl RepoConfig {
                         let escaped = toml::Value::String(h.clone()).to_string();
                         manifest_str.push_str(&format!("hint = {escaped}\n"));
                     }
-                    return crate::config::state::atomic_write_file(path, manifest_str.as_bytes())
+                    return crate::config::state::write_file_safe(path, manifest_str.as_bytes())
                         .map_err(|e| match e {
                             crate::config::StateError::Io(io) => ConfigError::IoError(io),
                             other => ConfigError::AtomicRenameFailed(other.to_string()),
@@ -921,7 +921,7 @@ impl RepoConfig {
 
         let serialized = toml::to_string_pretty(self)
             .map_err(|e| ConfigError::TomlSyntaxError(e.to_string()))?;
-        crate::config::state::atomic_write_file(path, serialized.as_bytes()).map_err(|e| match e {
+        crate::config::state::write_file_safe(path, serialized.as_bytes()).map_err(|e| match e {
             crate::config::StateError::Io(io) => ConfigError::IoError(io),
             other => ConfigError::AtomicRenameFailed(other.to_string()),
         })

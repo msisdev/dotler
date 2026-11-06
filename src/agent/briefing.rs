@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent::AgentError;
 use crate::config::local::LocalConfig;
 use crate::config::repo::OsInfo;
-use crate::config::state::atomic_write_file;
+use crate::config::state::write_file_safe;
 
 /// Snapshot of the local system configuration and OS environment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,7 +159,7 @@ pub fn scaffold_skill_md(repo_dir: &Path) -> Result<PathBuf, AgentError> {
     );
     content.push_str(SHARED_OPERATIONAL_GUIDE);
 
-    atomic_write_file(&skill_path, content.as_bytes())?;
+    write_file_safe(&skill_path, content.as_bytes())?;
 
     Ok(skill_path)
 }

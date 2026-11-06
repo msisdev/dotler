@@ -18,7 +18,7 @@ use crate::config::repo::{
     update_vault_manifest_section, validate_path_security,
 };
 use crate::config::state::{
-    DOTLER_LOCK_PATH, DotlerLockGuard, STATE_DB_PATH, get_lock, get_state_db,
+    DOTLER_LOCK_PATH, DotlerLockGuard, STATE_DB_PATH, get_lock, get_state_db, write_file_safe,
 };
 use crate::crypto::SecretString;
 use crate::crypto::keyring::{OsKeyring, get_password};
@@ -28,8 +28,7 @@ use crate::engine::remote::{
     GroupSelector, clone_repo, install_remote, list_remote, parse_url, uninstall_remote,
 };
 use crate::engine::sync::{
-    FileSyncStatus, SyncEngine, TidyOrphanPolicy, atomic_write_file, export_files, import_files,
-    plan, tidy_groups,
+    FileSyncStatus, SyncEngine, TidyOrphanPolicy, export_files, import_files, plan, tidy_groups,
 };
 
 #[derive(Parser, Debug, Clone)]
@@ -445,7 +444,7 @@ files = """
 *
 """
 "#;
-        atomic_write_file(&dotler_toml_path, initial_toml.as_bytes())?;
+        write_file_safe(&dotler_toml_path, initial_toml.as_bytes())?;
     }
 
     let skill_path = scaffold_skill_md(&repo_dir)
@@ -1274,7 +1273,7 @@ fn rotate_vault_passphrases(
     let mut primary_vault_id: Option<String> = None;
 
     for (label, manifest_path, updated_manifest, vault_id) in pending_writes {
-        atomic_write_file(&manifest_path, updated_manifest.as_bytes())?;
+        write_file_safe(&manifest_path, updated_manifest.as_bytes())?;
         if primary_vault_id.is_none() {
             primary_vault_id = Some(vault_id);
         }
@@ -1633,21 +1632,21 @@ mod tests {
 
         let enc_a = vkey_a.encrypt_file(b"secret-a-payload").unwrap().to_bytes();
         let enc_b = vkey_b.encrypt_file(b"secret-b-payload").unwrap().to_bytes();
-        atomic_write_file(&repo_a.join("shell/token.enc"), &enc_a).unwrap();
-        atomic_write_file(&repo_b.join("shell/token.enc"), &enc_b).unwrap();
+        write_file_safe(&repo_a.join("shell/token.enc"), &enc_a).unwrap();
+        write_file_safe(&repo_b.join("shell/token.enc"), &enc_b).unwrap();
 
         let write_vault_manifest = |dir: &Path, vcfg: &crate::config::repo::VaultConfig| {
             let content = format!(
                 "[shell]\nos-linux = \"~\"\nos-macos = \"~\"\nos-windows = \"~\"\nfiles = \"* encrypt\"\n\n[vault]\nvault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n",
                 vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
             );
-            atomic_write_file(&dir.join("dotler.toml"), content.as_bytes()).unwrap();
+            write_file_safe(&dir.join("dotler.toml"), content.as_bytes()).unwrap();
         };
 
         write_vault_manifest(&repo_a, &vcfg_a);
         write_vault_manifest(&repo_b, &vcfg_b);
         write_vault_manifest(&repo_other, &vcfg_other);
-        atomic_write_file(
+        write_file_safe(
             &repo_plain.join("dotler.toml"),
             b"[shell]\nos-linux = \"~\"\nos-macos = \"~\"\nos-windows = \"~\"\nfiles = \"*\"\n",
         )

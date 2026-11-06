@@ -17,11 +17,12 @@ use crate::config::repo::{
     resolve_group_target_path, validate_dir_no_symlinks, validate_os_dir_path,
     validate_os_target_path, validate_path_security,
 };
-use crate::config::state::{BACKUPS_DIR_PATH, DotlerLockGuard, InstalledFileRecord, StateDb};
+use crate::config::state::{
+    BACKUPS_DIR_PATH, DotlerLockGuard, InstalledFileRecord, StateDb, write_file_safe,
+};
 use crate::crypto::ExposeSecret;
 use crate::crypto::vault::{EncryptedFile, VaultKey};
 use crate::engine::EngineError;
-use crate::engine::sync::atomic_write_file;
 
 struct TempDirGuard(PathBuf);
 
@@ -686,7 +687,7 @@ pub fn clone_repo(
                 let enc_file = EncryptedFile::from_bytes(&enc_bytes)?;
                 let decrypted = r_key.decrypt_file(&enc_file)?;
                 let re_encrypted = l_key.encrypt_file(decrypted.expose_secret())?;
-                atomic_write_file(entry.path(), &re_encrypted.to_bytes())?;
+                write_file_safe(entry.path(), &re_encrypted.to_bytes())?;
             }
         }
     }
@@ -888,7 +889,7 @@ pub fn install_remote(
             state.upsert_installed_file(&record)?;
 
             // 4. Atomic file deployment
-            atomic_write_file(&target_file_path, &file_content)?;
+            write_file_safe(&target_file_path, &file_content)?;
             installed_files.push(target_file_path);
         }
     }
@@ -926,7 +927,7 @@ pub fn uninstall_remote(
             if bp.is_file() {
                 if !dry_run {
                     let backup_bytes = fs::read(&bp)?;
-                    atomic_write_file(&target, &backup_bytes)?;
+                    write_file_safe(&target, &backup_bytes)?;
                     state.remove_installed_file(&record.target_path)?;
                     let _ = fs::remove_file(&bp);
                     if let Some(p) = bp.parent() {
@@ -975,7 +976,7 @@ fn create_backup_file(
     };
     let dest = backup_root.join(rel);
     let source_bytes = fs::read(source)?;
-    atomic_write_file(&dest, &source_bytes)?;
+    write_file_safe(&dest, &source_bytes)?;
     Ok(dest.to_string_lossy().to_string())
 }
 

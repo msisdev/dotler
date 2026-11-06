@@ -167,6 +167,94 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout repository with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate structured release notes from commit history
+        run: |
+          CURRENT_TAG="${GITHUB_REF_NAME}"
+          PREV_TAG="$(git tag --list 'v*.*.*' --sort=-v:refname | grep -Fxv "${CURRENT_TAG}" | head -n 1 || true)"
+
+          if [ -n "${PREV_TAG}" ]; then
+            RANGE="${PREV_TAG}..${CURRENT_TAG}"
+          else
+            RANGE="${CURRENT_TAG}"
+          fi
+
+          FEAT=""
+          FIX=""
+          REFACTOR=""
+          OTHER=""
+
+          while IFS=$'\t' read -r HASH SUBJECT; do
+            [ -z "${HASH}" ] && continue
+            case "${SUBJECT}" in
+              Merge\ *) continue ;;
+              feat\(*\):*)
+                SCOPE="${SUBJECT#feat(}"; SCOPE="${SCOPE%%):*}"
+                DESC="${SUBJECT#feat(${SCOPE}): }"
+                FEAT="${FEAT}- **${SCOPE}**: ${DESC} (\`${HASH}\`)"$'\n'
+                ;;
+              feat:*)
+                DESC="${SUBJECT#feat: }"
+                FEAT="${FEAT}- ${DESC} (\`${HASH}\`)"$'\n'
+                ;;
+              fix\(*\):*)
+                SCOPE="${SUBJECT#fix(}"; SCOPE="${SCOPE%%):*}"
+                DESC="${SUBJECT#fix(${SCOPE}): }"
+                FIX="${FIX}- **${SCOPE}**: ${DESC} (\`${HASH}\`)"$'\n'
+                ;;
+              fix:*)
+                DESC="${SUBJECT#fix: }"
+                FIX="${FIX}- ${DESC} (\`${HASH}\`)"$'\n'
+                ;;
+              refactor\(*\):*|perf\(*\):*)
+                TYPE="${SUBJECT%%(*}"
+                SCOPE="${SUBJECT#${TYPE}(}"; SCOPE="${SCOPE%%):*}"
+                DESC="${SUBJECT#${TYPE}(${SCOPE}): }"
+                REFACTOR="${REFACTOR}- **${SCOPE}**: ${DESC} (\`${HASH}\`)"$'\n'
+                ;;
+              refactor:*|perf:*)
+                TYPE="${SUBJECT%%:*}"
+                DESC="${SUBJECT#${TYPE}: }"
+                REFACTOR="${REFACTOR}- ${DESC} (\`${HASH}\`)"$'\n'
+                ;;
+              docs*|test*|chore*|ci*)
+                ;;
+              *)
+                OTHER="${OTHER}- ${SUBJECT} (\`${HASH}\`)"$'\n'
+                ;;
+            esac
+          done < <(git log "${RANGE}" --no-merges --pretty=format:$'%h\t%s')
+
+          {
+            echo "## What's Changed in ${CURRENT_TAG}"
+            echo ""
+            if [ -n "${FEAT}" ]; then
+              echo "### Features (\`feat\`)"
+              printf "%s\n" "${FEAT}"
+            fi
+            if [ -n "${FIX}" ]; then
+              echo "### Bug Fixes (\`fix\`)"
+              printf "%s\n" "${FIX}"
+            fi
+            if [ -n "${REFACTOR}" ]; then
+              echo "### Refactoring & Performance (\`refactor\` / \`perf\`)"
+              printf "%s\n" "${REFACTOR}"
+            fi
+            if [ -n "${OTHER}" ]; then
+              echo "### Other Changes"
+              printf "%s\n" "${OTHER}"
+            fi
+            if [ -n "${PREV_TAG}" ]; then
+              echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${CURRENT_TAG}"
+            fi
+          } > RELEASE_NOTES.md
+
+          cat RELEASE_NOTES.md
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -187,5 +275,6 @@ jobs:
             artifacts/*.zip
             artifacts/*.sha256
             artifacts/SHA256SUMS.txt
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: false
           fail_on_unmatched_files: true

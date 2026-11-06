@@ -191,7 +191,9 @@ jobs:
           while IFS=$'\t' read -r HASH SUBJECT; do
             [ -z "${HASH}" ] && continue
             case "${SUBJECT}" in
-              Merge\ *) continue ;;
+              Merge\ *|*\(infra\):*|docs*|test*|chore*|ci*)
+                continue
+                ;;
               feat\(*\):*)
                 SCOPE="${SUBJECT#feat(}"; SCOPE="${SCOPE%%):*}"
                 DESC="${SUBJECT#feat(${SCOPE}): }"
@@ -220,8 +222,6 @@ jobs:
                 TYPE="${SUBJECT%%:*}"
                 DESC="${SUBJECT#${TYPE}: }"
                 REFACTOR="${REFACTOR}- ${DESC} (\`${HASH}\`)"$'\n'
-                ;;
-              docs*|test*|chore*|ci*)
                 ;;
               *)
                 OTHER="${OTHER}- ${SUBJECT} (\`${HASH}\`)"$'\n'

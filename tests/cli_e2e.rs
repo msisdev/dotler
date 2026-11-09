@@ -244,7 +244,7 @@ files = """
     .unwrap();
 
     // Import first to establish base state
-    let imp_out = sandbox.cmd().arg("import").output().unwrap();
+    let imp_out = sandbox.cmd().args(["import", "-y"]).output().unwrap();
     assert_eq!(imp_out.status.code(), Some(0));
 
     // Modify local file on OS
@@ -438,7 +438,7 @@ fn test_e2e_all_12_subcommands_clean_execution() {
     // 12. git clone
     let out_git_clone = sandbox
         .cmd()
-        .args(["git", "clone", &bare_url, "shell"])
+        .args(["git", "clone", &bare_url, "shell", "-y"])
         .current_dir(&sandbox.home_dir)
         .output()
         .unwrap();
@@ -609,7 +609,7 @@ files = "*"
 "#;
     fs::write(sandbox.repo_dir.join("dotler.toml"), toml_v1).unwrap();
 
-    let imp_out = sandbox.cmd().arg("import").output().unwrap();
+    let imp_out = sandbox.cmd().args(["import", "-y"]).output().unwrap();
     assert_eq!(imp_out.status.code(), Some(0));
 
     // Exclude all three files so each becomes an orphan in its respective group

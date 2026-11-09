@@ -380,3 +380,66 @@ files = """
     assert!(clone_plain.contains("1/1  Done"), "stdout:\n{clone_plain}");
     assert!(sandbox.home_dir.join("remote_repo").join("dotler.toml").is_file());
 }
+
+#[test]
+fn test_git_clone_interactive_cancel_cleans_staging_and_group_alias_renames() {
+    let sandbox = InteractiveSandbox::new();
+    let bare_url = format!("file://{}", sandbox.bare_git_dir.display());
+    let config_toml = sandbox.home_dir.join(".config").join("dotler").join("config.toml");
+    let before_cfg = fs::read_to_string(&config_toml).unwrap();
+
+    // 1. Cancel git clone ("no") -> staging directory must be cleaned up, destination absent, config.toml untouched
+    let cancel_out = sandbox
+        .cmd()
+        .current_dir(&sandbox.home_dir)
+        .env("DOTLER_TEST_CONFIRM_INPUT", "no")
+        .args(["git", "clone", &bare_url])
+        .output()
+        .unwrap();
+    assert_eq!(cancel_out.status.code(), Some(0));
+    assert!(!sandbox.home_dir.join("remote_repo").exists());
+    let after_cfg = fs::read_to_string(&config_toml).unwrap();
+    assert_eq!(before_cfg, after_cfg);
+    for entry in fs::read_dir(&sandbox.home_dir).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().to_string();
+        assert!(
+            !name.starts_with(".dotler-tmp-clone-"),
+            "leftover staging dir: {name}"
+        );
+    }
+
+    // 2. Clone with group alias ("nvim:custom-nvim") and -y -> renames group directory and dotler.toml section
+    let alias_out = sandbox
+        .cmd()
+        .current_dir(&sandbox.home_dir)
+        .args(["git", "clone", &bare_url, "nvim:custom-nvim", "-y"])
+        .output()
+        .unwrap();
+    assert_eq!(alias_out.status.code(), Some(0));
+    let cloned_dir = sandbox.home_dir.join("remote_repo");
+    assert!(cloned_dir.join("custom-nvim").join("init.lua").is_file());
+    assert!(!cloned_dir.join("nvim").exists());
+    let cloned_toml = fs::read_to_string(cloned_dir.join("dotler.toml")).unwrap();
+    assert!(cloned_toml.contains("[custom-nvim]"), "toml:\n{cloned_toml}");
+}
+
+#[test]
+fn test_unknown_group_returns_exit_code_2_for_status_import_and_export() {
+    let sandbox = InteractiveSandbox::new();
+
+    for args in [
+        vec!["status", "--group", "nonexistent"],
+        vec!["import", "nonexistent", "-y"],
+        vec!["export", "nonexistent", "-y"],
+    ] {
+        let out = sandbox.cmd().args(&args).output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "expected exit code 2 for {args:?}, got {:?} (stderr: {})",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+

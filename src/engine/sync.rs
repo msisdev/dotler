@@ -13,7 +13,9 @@ use crate::config::repo::{
 pub use crate::config::state::{ATOMIC_REPLACE_RETRIES, TMP_FILE_PREFIX, write_file_safe};
 use crate::config::state::{DotlerLockGuard, StateDb, SyncedFileRecord};
 use crate::core::context::CoreContext;
-use crate::core::vault_loader::{has_encrypted_rules, unlock_vault_if_needed};
+use crate::core::vault_loader::{
+    has_encrypted_repo_files, has_encrypted_rules, unlock_vault_if_needed,
+};
 use crate::crypto::ExposeSecret;
 use crate::crypto::vault::{EncryptedFile, VaultKey};
 use crate::engine::EngineError;
@@ -593,7 +595,8 @@ pub fn run_export(
     let resolved = ctx.resolve_repo()?;
     let state_db = ctx.state_db.get()?;
 
-    let needs_vault = has_encrypted_rules(&resolved.repo_config);
+    let needs_vault = has_encrypted_rules(&resolved.repo_config)
+        || has_encrypted_repo_files(&resolved.repo_path, &resolved.repo_config);
     let vault_key = unlock_vault_if_needed(
         &resolved.repo_config,
         local_cfg.use_keyring,

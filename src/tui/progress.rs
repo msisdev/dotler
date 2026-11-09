@@ -68,6 +68,12 @@ impl ProgressReporter {
         }
     }
 
+    /// Computes the terminal display column width of a plain string, counting East Asian
+    /// Wide/Fullwidth characters and emojis as 2 columns.
+    pub fn display_width(s: &str) -> usize {
+        s.chars().map(char_display_width).sum()
+    }
+
     /// Formats the two-line progress output for the current file, truncating the relative path
     /// to `.../<filename>` if it would exceed `term_cols`.
     pub fn format_two_lines(
@@ -95,19 +101,43 @@ impl ProgressReporter {
         );
         let line1 = format!("{bar}  {count_str}  {group_str}");
 
-        let size_suffix = bytes
+        let mut size_suffix = bytes
             .map(|b| format!(" ({})", Self::format_bytes(b)))
             .unwrap_or_default();
         let candidate_plain = format!("  {rel_path}{size_suffix}");
-        let display_rel = if term_cols > 0 && candidate_plain.chars().count() > term_cols {
-            let file_name = Path::new(rel_path)
-                .file_name()
-                .map(|f| f.to_string_lossy().to_string())
-                .unwrap_or_else(|| rel_path.to_string());
-            format!(".../{file_name}")
+        let mut display_rel = if term_cols > 0 && Self::display_width(&candidate_plain) > term_cols
+        {
+            if rel_path.contains('/') || rel_path.contains('\\') {
+                let file_name = Path::new(rel_path)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| rel_path.to_string());
+                format!(".../{file_name}")
+            } else {
+                rel_path.to_string()
+            }
         } else {
             rel_path.to_string()
         };
+
+        if term_cols > 0
+            && Self::display_width(&format!("  {display_rel}{size_suffix}")) > term_cols
+        {
+            // Omit size suffix if narrow terminal still overflows after filename fallback
+            if !size_suffix.is_empty()
+                && Self::display_width(&format!("  {display_rel}")) <= term_cols
+            {
+                size_suffix.clear();
+            } else {
+                let avail = term_cols.saturating_sub(2 + Self::display_width(&size_suffix));
+                if avail >= 4 {
+                    display_rel = truncate_to_columns(&display_rel, avail);
+                } else {
+                    size_suffix.clear();
+                    display_rel = truncate_to_columns(&display_rel, term_cols.saturating_sub(2));
+                }
+            }
+        }
 
         let line2 = format!(
             "  {}{}{}{}",
@@ -212,6 +242,60 @@ impl ProgressReporter {
     }
 }
 
+fn char_display_width(c: char) -> usize {
+    let u = c as u32;
+    if c.is_control() || (0x0300..=0x036F).contains(&u) || (0xFE00..=0xFE0F).contains(&u) {
+        0
+    } else if (0x1100..=0x115F).contains(&u)
+        || (0x2E80..=0x303E).contains(&u)
+        || (0x3040..=0xA4CF).contains(&u)
+        || (0xAC00..=0xD7A3).contains(&u)
+        || (0xF900..=0xFAFF).contains(&u)
+        || (0xFE10..=0xFE6F).contains(&u)
+        || (0xFF00..=0xFF60).contains(&u)
+        || (0xFFE0..=0xFFE6).contains(&u)
+        || (0x1F300..=0x1FAFF).contains(&u)
+        || (0x20000..=0x3FFFD).contains(&u)
+    {
+        2
+    } else {
+        1
+    }
+}
+
+fn truncate_to_columns(s: &str, max_cols: usize) -> String {
+    if ProgressReporter::display_width(s) <= max_cols {
+        return s.to_string();
+    }
+    if max_cols <= 3 {
+        let mut out = String::new();
+        let mut used = 0;
+        for c in s.chars() {
+            let w = char_display_width(c);
+            if used + w > max_cols {
+                break;
+            }
+            out.push(c);
+            used += w;
+        }
+        return out;
+    }
+    let budget = max_cols - 3;
+    let mut rev_chars = Vec::new();
+    let mut used = 0;
+    for c in s.chars().rev() {
+        let w = char_display_width(c);
+        if used + w > budget {
+            break;
+        }
+        rev_chars.push(c);
+        used += w;
+    }
+    rev_chars.reverse();
+    let tail: String = rev_chars.into_iter().collect();
+    format!("...{tail}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,6 +349,36 @@ mod tests {
         );
         let p2_narrow = strip_ansi(&narrow_line2);
         assert_eq!(p2_narrow, "  .../telescope.lua (4.2 KB)");
+    }
+
+    #[test]
+    fn cjk_wide_path_and_narrow_terminal_under_25_columns_never_overflow() {
+        let mut rep = ProgressReporter::new(2, true);
+        rep.current = 1;
+
+        // CJK relative path is 20 chars (with 2-space prefix) but 31 terminal columns (> 25)
+        let (_, cjk_line2) = rep.format_two_lines(
+            "nvim",
+            Path::new("~/.config/nvim"),
+            "폴더/하위폴더/설정/초기화.lua",
+            None,
+            25,
+        );
+        let plain_cjk = strip_ansi(&cjk_line2);
+        assert_eq!(plain_cjk, "  .../초기화.lua");
+        assert!(ProgressReporter::display_width(&plain_cjk) <= 25);
+
+        // Ultra-narrow terminal (< 25 cols, e.g. 20 cols) drops size suffix or clips so it never wraps
+        let (_, tiny_line2) = rep.format_two_lines(
+            "nvim",
+            Path::new("~/.config/nvim"),
+            "lua/plugins/telescope.lua",
+            Some(4300),
+            20,
+        );
+        let plain_tiny = strip_ansi(&tiny_line2);
+        assert_eq!(plain_tiny, "  .../telescope.lua");
+        assert!(ProgressReporter::display_width(&plain_tiny) <= 20);
     }
 
     #[test]

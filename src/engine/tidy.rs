@@ -421,7 +421,14 @@ pub fn tidy_groups_with_observer(
         }
     }
 
-    observer.finish_progress();
+    if report.encrypted_in_repo > 0
+        || report.decrypted_in_repo > 0
+        || report.removed_from_repo > 0
+        || !report.removed_os_orphans.is_empty()
+        || !report.untracked_kept_orphans.is_empty()
+    {
+        observer.finish_progress();
+    }
     Ok(report)
 }
 

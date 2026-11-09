@@ -324,6 +324,15 @@ pub fn plan(
     group_filter: Option<&str>,
     _lock: &DotlerLockGuard,
 ) -> Result<Vec<FileActionPlan>, EngineError> {
+    if let Some(filter) = group_filter
+        && !engine.repo_config.groups.contains_key(filter)
+    {
+        return Err(EngineError::GroupNotFound {
+            group: filter.to_string(),
+            available: engine.repo_config.groups.keys().cloned().collect(),
+        });
+    }
+
     let mut plans = Vec::new();
     let home_dir = engine.effective_home_dir();
 

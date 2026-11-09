@@ -14,7 +14,7 @@ use crate::config::local::{
 use crate::config::repo::{OsInfo, RepoConfig, get_repo_config};
 use crate::config::state::{DOTLER_LOCK_PATH, DotlerLockGuard, get_lock};
 use crate::core::context::CoreContext;
-use crate::core::vault_loader::rotate_vault_passphrases;
+use crate::core::vault_loader::{read_new_passphrase, rotate_vault_passphrases};
 use crate::crypto::SecretString;
 use crate::crypto::keyring::{OsKeyring, get_password};
 use crate::crypto::vault::{init_vault, recover_vault};
@@ -1019,45 +1019,6 @@ fn handle_update<W: Write>(
         "version": env!("CARGO_PKG_VERSION"),
     });
     Ok(render_success_to(stdout, "update", &data, cli.json))
-}
-
-fn read_new_passphrase(
-    password_stdin: bool,
-    allow_env_var: bool,
-    is_interactive: bool,
-    prompt_msg: &str,
-) -> Result<SecretString, EngineError> {
-    if password_stdin {
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed.is_empty() {
-            return Err(EngineError::Crypto(crate::crypto::CryptoError::Vault(
-                crate::crypto::vault::VaultError::WeakPassphrase(
-                    "Passphrase cannot be empty".to_string(),
-                ),
-            )));
-        }
-        return Ok(SecretString::new(trimmed.to_string()));
-    }
-
-    if allow_env_var && let Ok(env_pass) = std::env::var(crate::crypto::keyring::PASSPHRASE_ENV_VAR)
-    {
-        let trimmed = env_pass.trim_end_matches(['\r', '\n']);
-        if !trimmed.is_empty() {
-            return Ok(SecretString::new(trimmed.to_string()));
-        }
-    }
-
-    if !is_interactive {
-        return Err(EngineError::Crypto(crate::crypto::CryptoError::Keyring(
-            crate::crypto::keyring::KeyringError::PassphraseRequiredInNonInteractiveMode,
-        )));
-    }
-
-    let resolved = OsKeyring::prompt_passphrase_with_message(prompt_msg)
-        .map_err(|e| EngineError::Crypto(crate::crypto::CryptoError::Keyring(e)))?;
-    Ok(resolved.secret)
 }
 
 #[cfg(test)]

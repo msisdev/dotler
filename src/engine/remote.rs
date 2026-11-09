@@ -683,8 +683,12 @@ pub fn clone_repo_with_observer(
     let repo_config = &primary.config;
     let manifest_dir = &primary.manifest_dir;
 
-    let selected_groups: Vec<String> = if selectors.is_empty() {
-        repo_config.groups.keys().cloned().collect()
+    let selected_pairs: Vec<(String, String)> = if selectors.is_empty() {
+        repo_config
+            .groups
+            .keys()
+            .map(|k| (k.clone(), k.clone()))
+            .collect()
     } else {
         for sel in selectors {
             if !repo_config.groups.contains_key(&sel.remote_group) {
@@ -694,11 +698,21 @@ pub fn clone_repo_with_observer(
                 });
             }
         }
-        selectors.iter().map(|s| s.remote_group.clone()).collect()
+        selectors
+            .iter()
+            .map(|s| {
+                let effective = s
+                    .local_alias
+                    .clone()
+                    .unwrap_or_else(|| s.remote_group.clone());
+                (s.remote_group.clone(), effective)
+            })
+            .collect()
     };
+    let selected_groups: Vec<String> = selected_pairs.iter().map(|(_, eff)| eff.clone()).collect();
 
-    for g_name in &selected_groups {
-        let group = &repo_config.groups[g_name];
+    for (remote_name, _) in &selected_pairs {
+        let group = &repo_config.groups[remote_name];
         for path in group.paths.values() {
             validate_path_security(path)?;
         }
@@ -706,8 +720,8 @@ pub fn clone_repo_with_observer(
 
     let mut preview_entries: Vec<PlanPreviewEntry> = Vec::new();
     let mut clone_files: Vec<(String, PathBuf, String, u64)> = Vec::new();
-    for g_name in &selected_groups {
-        let g_dir = manifest_dir.join(g_name);
+    for (remote_name, effective_name) in &selected_pairs {
+        let g_dir = manifest_dir.join(remote_name);
         if g_dir.is_dir() {
             for entry in WalkDir::new(&g_dir).min_depth(1) {
                 let entry = entry?;
@@ -721,10 +735,10 @@ pub fn clone_repo_with_observer(
                     let is_enc = entry.path().extension().and_then(|s| s.to_str()) == Some("enc");
                     let size = fs::metadata(entry.path()).map(|m| m.len()).unwrap_or(0);
                     preview_entries.push(PlanPreviewEntry {
-                        group_name: g_name.clone(),
-                        os_path: PathBuf::from(format!("{}/{}/{}", url.raw, g_name, rel)),
+                        group_name: effective_name.clone(),
+                        os_path: PathBuf::from(format!("{}/{}/{}", url.raw, remote_name, rel)),
                         os_action: PlanActionKind::Okay,
-                        repo_path: target_dir.join(g_name).join(&rel),
+                        repo_path: target_dir.join(effective_name).join(&rel),
                         repo_action: PlanActionKind::Create,
                         direction: if is_enc {
                             PlanDirection::EncryptToRepo
@@ -733,8 +747,8 @@ pub fn clone_repo_with_observer(
                         },
                     });
                     clone_files.push((
-                        g_name.clone(),
-                        target_dir.join(g_name),
+                        effective_name.clone(),
+                        target_dir.join(effective_name),
                         rel,
                         size,
                     ));
@@ -778,6 +792,40 @@ pub fn clone_repo_with_observer(
             destination: target_dir.to_path_buf(),
             cloned_groups: Vec::new(),
         });
+    }
+
+    // Apply selective group pruning and local_alias renaming inside manifest_dir before moving
+    if !selectors.is_empty() {
+        for remote_group in repo_config.groups.keys() {
+            if !selected_pairs.iter().any(|(r, _)| r == remote_group) {
+                let unselected_dir = manifest_dir.join(remote_group);
+                if unselected_dir.is_dir() {
+                    let _ = fs::remove_dir_all(&unselected_dir);
+                }
+            }
+        }
+        for (remote_name, effective_name) in &selected_pairs {
+            if remote_name != effective_name {
+                let src_dir = manifest_dir.join(remote_name);
+                let dst_dir = manifest_dir.join(effective_name);
+                if src_dir.is_dir() {
+                    fs::rename(&src_dir, &dst_dir)?;
+                }
+            }
+        }
+        let mut new_groups = BTreeMap::new();
+        for (remote_name, effective_name) in &selected_pairs {
+            if let Some(cfg) = repo_config.groups.get(remote_name) {
+                new_groups.insert(effective_name.clone(), cfg.clone());
+            }
+        }
+        let updated_cfg = RepoConfig {
+            vault: repo_config.vault.clone(),
+            groups: new_groups,
+        };
+        if let Ok(serialized) = toml::to_string_pretty(&updated_cfg) {
+            write_file_safe(&manifest_dir.join("dotler.toml"), serialized.as_bytes())?;
+        }
     }
 
     // In-Memory Re-Keying if local vault exists and remote vault is different

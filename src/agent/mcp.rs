@@ -9,22 +9,16 @@ use serde_json::{Value, json};
 
 use crate::agent::AgentError;
 use crate::agent::briefing::render_briefing;
-use crate::config::Resource;
-use crate::config::local::{
-    LOCAL_CONFIG_FILE, expand_tilde, get_local_config, resolve_repo_path_with_cwd,
-};
-use crate::config::repo::{
-    OsInfo, RepoConfig, get_repo_config, parse_selection_rules, validate_path_security,
-};
-use crate::config::state::{
-    DOTLER_LOCK_PATH, DotlerLockGuard, STATE_DB_PATH, get_lock, get_state_db,
-};
-use crate::crypto::keyring::{OsKeyring, get_password};
-use crate::crypto::vault::{VaultKey, VaultSlot};
-use crate::engine::remote::{list_remote, parse_url};
-use crate::engine::sync::{
-    SyncEngine, TidyOrphanPolicy, export_files, import_files, plan, tidy_groups,
-};
+use crate::config::local::{LOCAL_CONFIG_FILE, expand_tilde, get_local_config};
+use crate::config::repo::OsInfo;
+use crate::config::state::{DOTLER_LOCK_PATH, DotlerLockGuard, get_lock};
+use crate::core::context::CoreContext;
+use crate::crypto::keyring::OsKeyring;
+use crate::engine::check::{run_check, run_status};
+use crate::engine::observer::NoopObserver;
+use crate::engine::remote::run_git_ls;
+use crate::engine::sync::{run_export, run_import};
+use crate::engine::tidy::{TidyOrphanPolicy, run_tidy};
 
 /// JSON-RPC 2.0 incoming request frame.
 #[derive(Debug, Clone, Deserialize)]
@@ -324,11 +318,9 @@ fn dispatch_tool(
     args: Value,
     lock: &DotlerLockGuard,
 ) -> Result<ToolCallResult, String> {
-    let local_cfg_res = get_local_config(expand_tilde(LOCAL_CONFIG_FILE));
-    let state_db_res = get_state_db(expand_tilde(STATE_DB_PATH));
-
     match name {
         "dotler_briefing" => {
+            let local_cfg_res = get_local_config(expand_tilde(LOCAL_CONFIG_FILE));
             let default_cfg = crate::config::local::LocalConfig::default();
             let local_cfg = local_cfg_res.get().unwrap_or(&default_cfg);
             let os_info = OsInfo::detect();
@@ -345,83 +337,35 @@ fn dispatch_tool(
         }
 
         "dotler_check" => {
-            let repo_arg = args.get("repo").and_then(Value::as_str);
+            let repo_arg = args.get("repo").and_then(Value::as_str).map(str::to_string);
             let group_arg = args.get("group").and_then(Value::as_str);
 
-            let default_cfg = crate::config::local::LocalConfig::default();
-            let local_cfg = local_cfg_res.get().unwrap_or(&default_cfg);
-            let (_label, repo_path) = resolve_repo_path_with_cwd(local_cfg, repo_arg)
-                .map_err(|e| format!("Configuration error: {e}"))?;
-
-            let repo_cfg_res = get_repo_config(repo_path.join("dotler.toml"));
-            let repo_cfg = repo_cfg_res
-                .get()
-                .map_err(|e| format!("Failed to load dotler.toml: {e}"))?;
-
-            // Validate path safety and syntax
-            for (g_name, g_cfg) in &repo_cfg.groups {
-                if let Some(filter) = group_arg
-                    && filter != g_name
-                {
-                    continue;
-                }
-                for target_path in g_cfg.paths.values() {
-                    validate_path_security(target_path)
-                        .map_err(|e| format!("Security check failed in group '{g_name}': {e}"))?;
-                }
-                parse_selection_rules(&g_cfg.files)
-                    .map_err(|e| format!("Selection rule syntax error in group '{g_name}': {e}"))?;
-                let group_repo_dir = repo_path.join(g_name);
-                crate::config::repo::validate_dir_no_symlinks(&group_repo_dir)
-                    .map_err(|e| format!("Security check failed in group '{g_name}': {e}"))?;
-            }
+            let ctx = CoreContext::new(repo_arg, None, false);
+            let report = run_check(&ctx, group_arg, lock)
+                .map_err(|e| format!("Check failed: {e}\nHint: {}", e.hint()))?;
 
             Ok(ToolCallResult {
                 content: vec![ToolContent {
                     r#type: "text".to_string(),
                     text: json!({
                         "ok": true,
+                        "status": report.status,
+                        "groups_checked": report.groups_checked,
                         "message": "All manifest syntax, selection rules, and path security constraints validated successfully."
-                    }).to_string(),
+                    })
+                    .to_string(),
                 }],
                 is_error: false,
             })
         }
 
         "dotler_status" => {
-            let repo_arg = args.get("repo").and_then(Value::as_str);
+            let repo_arg = args.get("repo").and_then(Value::as_str).map(str::to_string);
             let group_arg = args.get("group").and_then(Value::as_str);
 
-            let default_cfg = crate::config::local::LocalConfig::default();
-            let local_cfg = local_cfg_res.get().unwrap_or(&default_cfg);
-            let (label, repo_path) = resolve_repo_path_with_cwd(local_cfg, repo_arg)
-                .map_err(|e| format!("Configuration error: {e}"))?;
-
-            let repo_cfg_res = get_repo_config(repo_path.join("dotler.toml"));
-            let repo_cfg = repo_cfg_res
-                .get()
-                .map_err(|e| format!("Failed to load dotler.toml: {e}"))?;
-
-            let state_db = state_db_res
-                .get()
-                .map_err(|e| format!("Failed to open state.db: {e}"))?;
-
-            let password_res = get_password(local_cfg.use_keyring, None, false, None);
-            let vault_key = try_unlock_vault(repo_cfg, local_cfg.use_keyring, &password_res);
-            let os_info = OsInfo::detect();
-
-            let sync_engine = SyncEngine::new(
-                &label,
-                &repo_path,
-                repo_cfg,
-                state_db,
-                local_cfg.default_devices.clone(),
-                os_info,
-                vault_key.as_ref(),
-            );
-
-            let plans = plan(&sync_engine, group_arg, lock)
-                .map_err(|e| format!("Status planning failed: {e}"))?;
+            let ctx = CoreContext::new(repo_arg, None, false);
+            let plans = run_status(&ctx, group_arg, lock)
+                .map_err(|e| format!("Status planning failed: {e}\nHint: {}", e.hint()))?;
 
             Ok(ToolCallResult {
                 content: vec![ToolContent {
@@ -433,56 +377,19 @@ fn dispatch_tool(
         }
 
         "dotler_import" => {
-            let repo_arg = args.get("repo").and_then(Value::as_str);
-            let groups_arg: Option<Vec<String>> = args
+            let repo_arg = args.get("repo").and_then(Value::as_str).map(str::to_string);
+            let groups: Vec<String> = args
                 .get("groups")
-                .and_then(|v| serde_json::from_value(v.clone()).ok());
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
             let dry_run = args
                 .get("dry_run")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
 
-            let default_cfg = crate::config::local::LocalConfig::default();
-            let local_cfg = local_cfg_res.get().unwrap_or(&default_cfg);
-            let (label, repo_path) = resolve_repo_path_with_cwd(local_cfg, repo_arg)
-                .map_err(|e| format!("Configuration error: {e}"))?;
-
-            let repo_cfg_res = get_repo_config(repo_path.join("dotler.toml"));
-            let repo_cfg = repo_cfg_res
-                .get()
-                .map_err(|e| format!("Failed to load dotler.toml: {e}"))?;
-
-            let state_db = state_db_res
-                .get()
-                .map_err(|e| format!("Failed to open state.db: {e}"))?;
-
-            let password_res = get_password(local_cfg.use_keyring, None, false, None);
-            let vault_key = try_unlock_vault(repo_cfg, local_cfg.use_keyring, &password_res);
-            let os_info = OsInfo::detect();
-
-            let sync_engine = SyncEngine::new(
-                &label,
-                &repo_path,
-                repo_cfg,
-                state_db,
-                local_cfg.default_devices.clone(),
-                os_info,
-                vault_key.as_ref(),
-            );
-
-            let mut all_plans = Vec::new();
-            if let Some(groups) = groups_arg {
-                for g in groups {
-                    let mut p = plan(&sync_engine, Some(&g), lock)
-                        .map_err(|e| format!("Planning failed for group '{g}': {e}"))?;
-                    all_plans.append(&mut p);
-                }
-            } else {
-                all_plans =
-                    plan(&sync_engine, None, lock).map_err(|e| format!("Planning failed: {e}"))?;
-            }
-
-            let report = import_files(&sync_engine, &all_plans, lock, dry_run)
+            let ctx = CoreContext::new(repo_arg, None, false);
+            let mut obs = NoopObserver;
+            let report = run_import(&ctx, &groups, false, dry_run, lock, &mut obs)
                 .map_err(|e| format!("Import failed: {e}\nHint: {}", e.hint()))?;
 
             Ok(ToolCallResult {
@@ -495,57 +402,20 @@ fn dispatch_tool(
         }
 
         "dotler_export" => {
-            let repo_arg = args.get("repo").and_then(Value::as_str);
-            let groups_arg: Option<Vec<String>> = args
+            let repo_arg = args.get("repo").and_then(Value::as_str).map(str::to_string);
+            let groups: Vec<String> = args
                 .get("groups")
-                .and_then(|v| serde_json::from_value(v.clone()).ok());
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
             let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
             let dry_run = args
                 .get("dry_run")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
 
-            let default_cfg = crate::config::local::LocalConfig::default();
-            let local_cfg = local_cfg_res.get().unwrap_or(&default_cfg);
-            let (label, repo_path) = resolve_repo_path_with_cwd(local_cfg, repo_arg)
-                .map_err(|e| format!("Configuration error: {e}"))?;
-
-            let repo_cfg_res = get_repo_config(repo_path.join("dotler.toml"));
-            let repo_cfg = repo_cfg_res
-                .get()
-                .map_err(|e| format!("Failed to load dotler.toml: {e}"))?;
-
-            let state_db = state_db_res
-                .get()
-                .map_err(|e| format!("Failed to open state.db: {e}"))?;
-
-            let password_res = get_password(local_cfg.use_keyring, None, false, None);
-            let vault_key = try_unlock_vault(repo_cfg, local_cfg.use_keyring, &password_res);
-            let os_info = OsInfo::detect();
-
-            let sync_engine = SyncEngine::new(
-                &label,
-                &repo_path,
-                repo_cfg,
-                state_db,
-                local_cfg.default_devices.clone(),
-                os_info,
-                vault_key.as_ref(),
-            );
-
-            let mut all_plans = Vec::new();
-            if let Some(groups) = groups_arg {
-                for g in groups {
-                    let mut p = plan(&sync_engine, Some(&g), lock)
-                        .map_err(|e| format!("Planning failed for group '{g}': {e}"))?;
-                    all_plans.append(&mut p);
-                }
-            } else {
-                all_plans =
-                    plan(&sync_engine, None, lock).map_err(|e| format!("Planning failed: {e}"))?;
-            }
-
-            let report = export_files(&sync_engine, &all_plans, lock, force, dry_run)
+            let ctx = CoreContext::new(repo_arg, None, false);
+            let mut obs = NoopObserver;
+            let report = run_export(&ctx, &groups, force, dry_run, lock, &mut obs)
                 .map_err(|e| format!("Export failed: {e}\nHint: {}", e.hint()))?;
 
             Ok(ToolCallResult {
@@ -558,7 +428,7 @@ fn dispatch_tool(
         }
 
         "dotler_tidy" => {
-            let repo_arg = args.get("repo").and_then(Value::as_str);
+            let repo_arg = args.get("repo").and_then(Value::as_str).map(str::to_string);
             let group_filters: Vec<String> = args
                 .get("groups")
                 .and_then(Value::as_array)
@@ -592,35 +462,9 @@ fn dispatch_tool(
                 TidyOrphanPolicy::KeepOnOs
             };
 
-            let default_cfg = crate::config::local::LocalConfig::default();
-            let local_cfg = local_cfg_res.get().unwrap_or(&default_cfg);
-            let (label, repo_path) = resolve_repo_path_with_cwd(local_cfg, repo_arg)
-                .map_err(|e| format!("Configuration error: {e}"))?;
-
-            let repo_cfg_res = get_repo_config(repo_path.join("dotler.toml"));
-            let repo_cfg = repo_cfg_res
-                .get()
-                .map_err(|e| format!("Failed to load dotler.toml: {e}"))?;
-
-            let state_db = state_db_res
-                .get()
-                .map_err(|e| format!("Failed to open state.db: {e}"))?;
-
-            let password_res = get_password(local_cfg.use_keyring, None, false, None);
-            let vault_key = try_unlock_vault(repo_cfg, local_cfg.use_keyring, &password_res);
-            let os_info = OsInfo::detect();
-
-            let sync_engine = SyncEngine::new(
-                &label,
-                &repo_path,
-                repo_cfg,
-                state_db,
-                local_cfg.default_devices.clone(),
-                os_info,
-                vault_key.as_ref(),
-            );
-
-            let report = tidy_groups(&sync_engine, &group_filters, lock, policy, dry_run)
+            let ctx = CoreContext::new(repo_arg, None, false);
+            let mut obs = NoopObserver;
+            let report = run_tidy(&ctx, &group_filters, policy, dry_run, lock, &mut obs)
                 .map_err(|e| format!("Tidy failed: {e}\nHint: {}", e.hint()))?;
 
             Ok(ToolCallResult {
@@ -639,10 +483,7 @@ fn dispatch_tool(
                 .ok_or_else(|| "Missing required parameter 'url'".to_string())?;
             let branch = args.get("branch").and_then(Value::as_str);
 
-            let parsed_url =
-                parse_url(url_str).map_err(|e| format!("Invalid URL '{url_str}': {e}"))?;
-
-            let summary = list_remote(&parsed_url, branch, lock)
+            let summary = run_git_ls(url_str, branch, lock)
                 .map_err(|e| format!("Failed to inspect remote Git repository: {e}"))?;
 
             Ok(ToolCallResult {
@@ -656,20 +497,6 @@ fn dispatch_tool(
 
         unknown => Err(format!("Unknown tool: {unknown}")),
     }
-}
-
-fn try_unlock_vault(
-    repo_cfg: &RepoConfig,
-    use_keyring: bool,
-    password_res: &Resource<crate::crypto::SecretString, crate::crypto::KeyringError>,
-) -> Option<VaultKey> {
-    if !use_keyring {
-        return None;
-    }
-    let vault_cfg = repo_cfg.vault.as_ref()?;
-    let secret = password_res.get().ok()?;
-    let slot = VaultSlot::from_base64(&vault_cfg.password_slot).ok()?;
-    slot.unwrap(secret, Some(&vault_cfg.vault_id)).ok()
 }
 
 #[cfg(test)]

@@ -1,35 +1,38 @@
 //! Command-line argument parsing and command dispatch.
 
-use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 
-use crate::agent::briefing::{render_briefing, scaffold_skill_md};
+use crate::agent::briefing::render_briefing;
 use crate::cli::output::{EXIT_SUCCESS, render_success_to};
 use crate::config::local::{
-    LOCAL_CONFIG_FILE, LocalConfig, WalkDir, expand_tilde, get_local_config,
-    resolve_repo_path_with_cwd,
+    LOCAL_CONFIG_FILE, LocalConfig, expand_tilde, get_local_config, resolve_repo_path_with_cwd,
 };
-use crate::config::repo::{
-    OsInfo, RepoConfig, SelectionMode, get_repo_config, parse_selection_rules,
-    update_vault_manifest_section, validate_path_security,
-};
-use crate::config::state::{
-    DOTLER_LOCK_PATH, DotlerLockGuard, STATE_DB_PATH, get_lock, get_state_db, write_file_safe,
-};
+use crate::config::repo::{OsInfo, RepoConfig, get_repo_config};
+use crate::config::state::{DOTLER_LOCK_PATH, DotlerLockGuard, get_lock};
+use crate::core::context::CoreContext;
+use crate::core::vault_loader::rotate_vault_passphrases;
 use crate::crypto::SecretString;
 use crate::crypto::keyring::{OsKeyring, get_password};
-use crate::crypto::vault::{VaultKey, VaultSlot, change_password, init_vault, recover_vault};
+use crate::crypto::vault::{init_vault, recover_vault};
 use crate::engine::EngineError;
+use crate::engine::check::{run_check, run_init, run_status};
+use crate::engine::observer::{
+    CommandObserver, NoopObserver, PlanActionKind, PlanDirection, PlanPreviewEntry,
+};
 use crate::engine::remote::{
-    GroupSelector, clone_repo, install_remote, list_remote, parse_url, uninstall_remote,
+    GroupSelector, run_git_clone, run_git_install, run_git_ls, run_git_uninstall,
 };
-use crate::engine::sync::{
-    FileSyncStatus, SyncEngine, TidyOrphanPolicy, export_files, import_files, plan, tidy_groups,
+use crate::engine::sync::{run_export, run_import};
+use crate::engine::tidy::{TidyOrphanPolicy, run_tidy};
+use crate::tui::confirm::{
+    ConfirmError, ConfirmPrompt, DEFAULT_CONFIRM_TITLE, confirm_proceed_to,
 };
+use crate::tui::preview::{BadgeOp, PreviewArrow, PreviewItem, render_preview_to};
+use crate::tui::progress::ProgressReporter;
 
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -169,7 +172,7 @@ pub struct GitLsArgs {
     pub branch: Option<String>,
 }
 
-#[derive(Args, Debug, Clone, PartialEq, Eq)]
+#[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
 pub struct GitCloneArgs {
     #[arg(help = "Remote repository URL or shorthand")]
     pub url: String,
@@ -182,9 +185,18 @@ pub struct GitCloneArgs {
 
     #[arg(short, long, help = "Target device profile for group resolution")]
     pub device: Option<String>,
+
+    #[arg(short = 'y', long = "yes", help = "Skip confirmation prompt")]
+    pub yes: bool,
+
+    #[arg(short = 'a', long = "all", help = "Show all files in preview")]
+    pub all: bool,
+
+    #[arg(long = "dry-run", help = "Simulate clone without writing changes")]
+    pub dry_run: bool,
 }
 
-#[derive(Args, Debug, Clone, PartialEq, Eq)]
+#[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
 pub struct GitInstallArgs {
     #[arg(help = "Remote repository URL or shorthand")]
     pub url: String,
@@ -204,12 +216,27 @@ pub struct GitInstallArgs {
 
     #[arg(short, long, help = "Target device profile for group resolution")]
     pub device: Option<String>,
+
+    #[arg(short = 'y', long = "yes", help = "Skip confirmation prompt")]
+    pub yes: bool,
+
+    #[arg(short = 'a', long = "all", help = "Show all files in preview")]
+    pub all: bool,
+
+    #[arg(long = "dry-run", help = "Simulate installation without writing changes")]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
 pub struct GitUninstallArgs {
     #[arg(help = "Groups to uninstall (all if empty)")]
     pub groups: Vec<String>,
+
+    #[arg(short = 'y', long = "yes", help = "Skip confirmation prompt")]
+    pub yes: bool,
+
+    #[arg(short = 'a', long = "all", help = "Show all files in preview")]
+    pub all: bool,
 
     #[arg(long, help = "Simulate rollback without restoring files")]
     pub dry_run: bool,
@@ -238,6 +265,12 @@ pub struct ImportArgs {
     #[arg(short, long, help = "Force overwrite repository files")]
     pub force: bool,
 
+    #[arg(short = 'y', long = "yes", help = "Skip confirmation prompt")]
+    pub yes: bool,
+
+    #[arg(short = 'a', long = "all", help = "Show all files in preview")]
+    pub all: bool,
+
     #[arg(long, help = "Simulate import without modifying repository")]
     pub dry_run: bool,
 }
@@ -265,6 +298,12 @@ pub struct ExportArgs {
     #[arg(short, long, help = "Force overwrite conflicting OS files")]
     pub force: bool,
 
+    #[arg(short = 'y', long = "yes", help = "Skip confirmation prompt")]
+    pub yes: bool,
+
+    #[arg(short = 'a', long = "all", help = "Show all files in preview")]
+    pub all: bool,
+
     #[arg(long, help = "Simulate export without modifying OS files")]
     pub dry_run: bool,
 }
@@ -291,6 +330,12 @@ pub struct TidyArgs {
 
     #[arg(long, help = "Permanently delete orphaned files from OS filesystem")]
     pub purge: bool,
+
+    #[arg(short = 'y', long = "yes", help = "Skip confirmation prompt")]
+    pub yes: bool,
+
+    #[arg(short = 'a', long = "all", help = "Show all files in preview")]
+    pub all: bool,
 
     #[arg(long, help = "Simulate tidy operations without modifying files")]
     pub dry_run: bool,
@@ -386,6 +431,133 @@ pub struct UpdateArgs {
     pub check: bool,
 }
 
+/// Interactive terminal observer bridging `engine::observer::CommandObserver` with `tui::*`.
+struct TuiObserver<'a, W: Write> {
+    writer: &'a mut W,
+    command_name: &'static str,
+    view_all: bool,
+    yes: bool,
+    is_interactive: bool,
+    progress: Option<ProgressReporter>,
+}
+
+impl<'a, W: Write> TuiObserver<'a, W> {
+    fn new(
+        writer: &'a mut W,
+        command_name: &'static str,
+        view_all: bool,
+        yes: bool,
+        is_interactive: bool,
+    ) -> Self {
+        Self {
+            writer,
+            command_name,
+            view_all,
+            yes,
+            is_interactive,
+            progress: None,
+        }
+    }
+}
+
+fn map_badge(kind: PlanActionKind) -> BadgeOp {
+    match kind {
+        PlanActionKind::Okay => BadgeOp::Okay,
+        PlanActionKind::Skip => BadgeOp::Skip,
+        PlanActionKind::Create => BadgeOp::Create,
+        PlanActionKind::Overwrite => BadgeOp::Overwrite,
+        PlanActionKind::Delete => BadgeOp::Delete,
+        PlanActionKind::Untrack => BadgeOp::Untrack,
+    }
+}
+
+fn map_arrow(dir: PlanDirection) -> PreviewArrow {
+    match dir {
+        PlanDirection::PlainToRepo => PreviewArrow::PlainToRepo,
+        PlanDirection::EncryptToRepo => PreviewArrow::EncryptToRepo,
+        PlanDirection::PlainToOs => PreviewArrow::PlainToOs,
+        PlanDirection::DecryptToOs => PreviewArrow::DecryptToOs,
+        PlanDirection::DecryptInRepo => PreviewArrow::DecryptInRepo,
+    }
+}
+
+impl<W: Write> CommandObserver for TuiObserver<'_, W> {
+    fn confirm_plan(
+        &mut self,
+        entries: &[PlanPreviewEntry],
+        dry_run: bool,
+    ) -> Result<bool, EngineError> {
+        let items: Vec<PreviewItem> = entries
+            .iter()
+            .map(|e| PreviewItem {
+                group_name: e.group_name.clone(),
+                os_path: e.os_path.clone(),
+                os_op: map_badge(e.os_action),
+                repo_path: e.repo_path.clone(),
+                repo_op: map_badge(e.repo_action),
+                arrow: map_arrow(e.direction),
+            })
+            .collect();
+
+        let counts = render_preview_to(self.writer, &items, self.view_all)?;
+        let total_updates = counts.total_updates();
+        if total_updates == 0 || dry_run {
+            return Ok(false);
+        }
+
+        if self.yes {
+            self.progress = Some(ProgressReporter::new(total_updates, true));
+            return Ok(true);
+        }
+
+        if !self.is_interactive && !ConfirmPrompt::has_mock_or_env_input() {
+            return Err(EngineError::NonInteractiveConfirmationRequired {
+                command: self.command_name.to_string(),
+            });
+        }
+
+        let approved = match confirm_proceed_to(self.writer, DEFAULT_CONFIRM_TITLE) {
+            Ok(val) => val,
+            Err(ConfirmError::NonTtyError) => {
+                return Err(EngineError::NonInteractiveConfirmationRequired {
+                    command: self.command_name.to_string(),
+                });
+            }
+            Err(ConfirmError::TerminalIoError(e)) => return Err(EngineError::Io(e)),
+        };
+
+        if approved {
+            self.progress = Some(ProgressReporter::new(total_updates, true));
+        }
+
+        Ok(approved)
+    }
+
+    fn on_file_progress(
+        &mut self,
+        group_name: &str,
+        group_base_path: &Path,
+        relative_path: &str,
+        file_size: Option<u64>,
+    ) {
+        if let Some(ref mut prog) = self.progress {
+            let _ = prog.inc_to(
+                self.writer,
+                group_name,
+                group_base_path,
+                relative_path,
+                file_size,
+            );
+        }
+    }
+
+    fn finish_progress(&mut self) {
+        if let Some(ref mut prog) = self.progress {
+            let _ = prog.finish_to(self.writer);
+        }
+    }
+}
+
 /// Dispatches parsed CLI commands to domain workflows under lock protection.
 pub fn dispatch<W1: Write, W2: Write>(
     cli: &Cli,
@@ -406,9 +578,9 @@ pub fn dispatch<W1: Write, W2: Write>(
     let lock_guard = lock_res.get()?;
 
     match &cli.command {
-        Command::Init(args) => handle_init(args, cli, stdout, lock_guard),
-        Command::Git { command } => handle_git(command, cli, stdout, lock_guard),
-        Command::Check(args) => handle_check(args, cli, stdout, lock_guard),
+        Command::Init(args) => handle_init(args, cli, is_interactive, stdout, lock_guard),
+        Command::Git { command } => handle_git(command, cli, is_interactive, stdout, lock_guard),
+        Command::Check(args) => handle_check(args, cli, is_interactive, stdout, lock_guard),
         Command::Status(args) => handle_status(args, cli, is_interactive, stdout, lock_guard),
         Command::Import(args) => handle_import(args, cli, is_interactive, stdout, lock_guard),
         Command::Export(args) => handle_export(args, cli, is_interactive, stdout, lock_guard),
@@ -426,123 +598,37 @@ pub fn dispatch<W1: Write, W2: Write>(
 fn handle_init<W: Write>(
     args: &InitArgs,
     cli: &Cli,
+    is_interactive: bool,
     stdout: &mut W,
-    _lock: &DotlerLockGuard,
+    lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
-    let repo_dir = match &args.repo_path {
-        Some(p) => p.clone(),
-        None => std::env::current_dir()?,
-    };
-
-    fs::create_dir_all(&repo_dir)?;
-
-    let dotler_toml_path = repo_dir.join("dotler.toml");
-    if !dotler_toml_path.exists() {
-        let initial_toml = r#"# [bash]
-# # Priority 1: Custom device names (configured in ~/.config/dotler/config.toml `default_devices`)
-# default = "~"
-#
-# # Priority 2: Specific OS / Linux distribution
-# os-arch = "~"
-# os-debian = "~"
-# os-ubuntu = "~"
-# os-fedora = "~"
-# os-nixos = "~"
-# os-alpine = "~"
-# os-freebsd = "~"
-# os-openbsd = "~"
-#
-# # Priority 3: OS family fallback
-# os-nux = "~"
-# os-mac = "~"
-# os-win = "~"
-# os-bsd = "~"
-#
-# files = """
-# !*
-# .bashrc encrypt
-# .bashrc
-# """
-"#;
-        write_file_safe(&dotler_toml_path, initial_toml.as_bytes())?;
-    }
-
-    let skill_path = scaffold_skill_md(&repo_dir)
-        .map_err(|e| EngineError::Io(std::io::Error::other(e.to_string())))?;
-
-    // Register in ~/.config/dotler/config.toml via LocalConfig resource provider
-    let mut local_cfg_res = get_local_config(expand_tilde(LOCAL_CONFIG_FILE));
-    let mut local_cfg = local_cfg_res.get().cloned().unwrap_or_default();
-
-    let label = args
-        .label
-        .clone()
-        .or_else(|| cli.repo.clone())
-        .unwrap_or_else(|| {
-            repo_dir
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "default".to_string())
-        });
-
-    let device = args
-        .device
-        .clone()
-        .or_else(|| cli.device.clone())
-        .unwrap_or_else(|| "default".to_string());
-
-    let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("~"));
-    let repo_path_entry = if let Ok(rel) = repo_dir.strip_prefix(&home) {
-        if rel.as_os_str().is_empty() {
-            "~".to_string()
-        } else {
-            format!("~/{}", rel.display())
-        }
-    } else {
-        format!(
-            "~/{}",
-            repo_dir
-                .file_name()
-                .map(|f| f.to_string_lossy())
-                .unwrap_or_default()
-        )
-    };
-
-    if local_cfg.default_repo.is_none() {
-        local_cfg.default_repo = Some(label.clone());
-    }
-    local_cfg.repos.insert(label.clone(), repo_path_entry);
-
-    if !local_cfg.default_devices.contains(&device) {
-        local_cfg.default_devices.push(device.clone());
-    }
-
-    local_cfg_res.set(local_cfg)?;
-
-    let data = json!({
-        "label": label,
-        "device": device,
-        "repo_path": repo_dir.display().to_string(),
-        "skill_path": skill_path.display().to_string(),
-    });
-
-    Ok(render_success_to(stdout, "init", &data, cli.json))
+    let mut ctx = CoreContext::new(cli.repo.clone(), cli.device.clone(), is_interactive);
+    let report = run_init(
+        &mut ctx,
+        crate::engine::check::InitParams {
+            label: args.label.clone(),
+            device: args.device.clone(),
+            repo_path: args.repo_path.clone(),
+        },
+        lock,
+    )?;
+    Ok(render_success_to(stdout, "init", &report, cli.json))
 }
 
 fn handle_git<W: Write>(
     cmd: &GitCommand,
     cli: &Cli,
+    is_interactive: bool,
     stdout: &mut W,
     lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
     match cmd {
         GitCommand::Ls(args) => {
-            let parsed_url = parse_url(&args.url)?;
-            let summary = list_remote(&parsed_url, args.branch.as_deref(), lock)?;
+            let summary = run_git_ls(&args.url, args.branch.as_deref(), lock)?;
             Ok(render_success_to(stdout, "git ls", &summary, cli.json))
         }
         GitCommand::Clone(args) => {
-            let parsed_url = parse_url(&args.url)?;
+            let parsed_url = crate::engine::remote::parse_url(&args.url)?;
             let selectors: Vec<GroupSelector> = args
                 .groups
                 .iter()
@@ -558,53 +644,90 @@ fn handle_git<W: Write>(
                 .unwrap_or("dotfiles");
             let dest = std::env::current_dir()?.join(repo_name);
             let cfg_path = expand_tilde(LOCAL_CONFIG_FILE);
+            let dry_run = args.dry_run || cli.dry_run;
 
-            let report = clone_repo(
-                &parsed_url,
-                &selectors,
-                args.branch.as_deref(),
-                &dest,
-                Some(&cfg_path),
-                None,
-                None,
-                lock,
-            )?;
-            Ok(render_success_to(stdout, "git clone", &report, cli.json))
+            if cli.json {
+                let mut obs = NoopObserver;
+                let report = run_git_clone(
+                    &args.url,
+                    &selectors,
+                    args.branch.as_deref(),
+                    &dest,
+                    Some(&cfg_path),
+                    None,
+                    None,
+                    lock,
+                    dry_run,
+                    &mut obs,
+                )?;
+                Ok(render_success_to(stdout, "git clone", &report, true))
+            } else {
+                let mut obs =
+                    TuiObserver::new(stdout, "git clone", args.all, args.yes, is_interactive);
+                let _report = run_git_clone(
+                    &args.url,
+                    &selectors,
+                    args.branch.as_deref(),
+                    &dest,
+                    Some(&cfg_path),
+                    None,
+                    None,
+                    lock,
+                    dry_run,
+                    &mut obs,
+                )?;
+                Ok(EXIT_SUCCESS)
+            }
         }
         GitCommand::Install(args) => {
-            let parsed_url = parse_url(&args.url)?;
-            let state_res = get_state_db(expand_tilde(STATE_DB_PATH));
-            let state = state_res.get()?;
+            let dev_override = args.device.clone().or_else(|| cli.device.clone());
+            let ctx = CoreContext::new(cli.repo.clone(), dev_override, is_interactive);
             let override_path = args.path.first().map(Path::new);
+            let dry_run = args.dry_run || cli.dry_run;
 
-            let local_cfg_res = get_local_config(expand_tilde(LOCAL_CONFIG_FILE));
-            let local_cfg = local_cfg_res.get()?;
-            let mut devices = local_cfg.default_devices.clone();
-            if let Some(ref d) = args.device.as_deref().or(cli.device.as_deref()) {
-                devices.insert(0, d.to_string());
+            if cli.json {
+                let mut obs = NoopObserver;
+                let report = run_git_install(
+                    &ctx,
+                    &args.url,
+                    &args.groups,
+                    override_path,
+                    args.branch.as_deref(),
+                    lock,
+                    dry_run,
+                    &mut obs,
+                )?;
+                Ok(render_success_to(stdout, "git install", &report, true))
+            } else {
+                let mut obs =
+                    TuiObserver::new(stdout, "git install", args.all, args.yes, is_interactive);
+                let _report = run_git_install(
+                    &ctx,
+                    &args.url,
+                    &args.groups,
+                    override_path,
+                    args.branch.as_deref(),
+                    lock,
+                    dry_run,
+                    &mut obs,
+                )?;
+                Ok(EXIT_SUCCESS)
             }
-
-            let report = install_remote(
-                &parsed_url,
-                &args.groups,
-                override_path,
-                args.branch.as_deref(),
-                &devices,
-                state,
-                lock,
-            )?;
-            Ok(render_success_to(stdout, "git install", &report, cli.json))
         }
         GitCommand::Uninstall(args) => {
-            let state_res = get_state_db(expand_tilde(STATE_DB_PATH));
-            let state = state_res.get()?;
-            let report = uninstall_remote(&args.groups, state, lock, args.dry_run || cli.dry_run)?;
-            Ok(render_success_to(
-                stdout,
-                "git uninstall",
-                &report,
-                cli.json,
-            ))
+            let ctx = CoreContext::new(cli.repo.clone(), cli.device.clone(), is_interactive);
+            let dry_run = args.dry_run || cli.dry_run;
+
+            if cli.json {
+                let mut obs = NoopObserver;
+                let report = run_git_uninstall(&ctx, &args.groups, lock, dry_run, &mut obs)?;
+                Ok(render_success_to(stdout, "git uninstall", &report, true))
+            } else {
+                let mut obs =
+                    TuiObserver::new(stdout, "git uninstall", args.all, args.yes, is_interactive);
+                let _report = run_git_uninstall(&ctx, &args.groups, lock, dry_run, &mut obs)?;
+                Ok(EXIT_SUCCESS)
+            }
         }
     }
 }
@@ -612,124 +735,13 @@ fn handle_git<W: Write>(
 fn handle_check<W: Write>(
     args: &CheckArgs,
     cli: &Cli,
+    is_interactive: bool,
     stdout: &mut W,
-    _lock: &DotlerLockGuard,
+    lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
-    let local_cfg_res = get_local_config(expand_tilde(LOCAL_CONFIG_FILE));
-    let local_cfg = local_cfg_res.get()?;
-
-    let (_label, repo_path) = resolve_repo_path_with_cwd(local_cfg, cli.repo.as_deref())?;
-    let repo_cfg_res = get_repo_config(repo_path.join("dotler.toml"));
-    let repo_cfg = repo_cfg_res.get()?;
-
-    if let Some(ref filter_grp) = args.group
-        && !repo_cfg.groups.contains_key(filter_grp)
-    {
-        let available = repo_cfg.groups.keys().cloned().collect();
-        return Err(EngineError::GroupNotFound {
-            group: filter_grp.clone(),
-            available,
-        });
-    }
-
-    // Path security check
-    for (g_name, g_cfg) in &repo_cfg.groups {
-        if let Some(ref filter) = args.group
-            && filter != g_name
-        {
-            continue;
-        }
-        for p in g_cfg.paths.values() {
-            validate_path_security(p)?;
-        }
-        parse_selection_rules(&g_cfg.files)?;
-    }
-
-    // Cross-group collision detection
-    let os_info = OsInfo::detect();
-    let devices = if let Some(ref d) = cli.device {
-        vec![d.clone()]
-    } else {
-        local_cfg.default_devices.clone()
-    };
-    repo_cfg.detect_cross_group_collisions(&devices, &os_info)?;
-
-    // Check repository files for symlinks and encryption mismatch
-    let home_dir = expand_tilde("~");
-    for (g_name, g_cfg) in &repo_cfg.groups {
-        if let Some(ref filter) = args.group
-            && filter != g_name
-        {
-            continue;
-        }
-        let group_repo_dir = repo_path.join(g_name);
-        crate::config::repo::validate_dir_no_symlinks(&group_repo_dir)?;
-        if let Some(target_base_str) =
-            crate::config::repo::resolve_group_target_path(g_cfg, &devices, &os_info)
-        {
-            let target_base_path = expand_tilde(&target_base_str);
-            crate::config::repo::validate_os_dir_path(&target_base_path, &home_dir)?;
-        }
-        if !group_repo_dir.is_dir() {
-            continue;
-        }
-        let rules = parse_selection_rules(&g_cfg.files)?;
-        for entry in WalkDir::new(&group_repo_dir)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            if entry.file_type().is_file() {
-                let file_name = entry.file_name().to_string_lossy();
-                if file_name.starts_with(crate::engine::sync::TMP_FILE_PREFIX)
-                    || file_name == ".git"
-                {
-                    continue;
-                }
-                if let Ok(rel) = entry.path().strip_prefix(&group_repo_dir) {
-                    let rel_str = rel.to_string_lossy();
-                    if rel_str.split('/').any(|s| s == ".git") {
-                        continue;
-                    }
-                    let (clean_rel, is_enc_file) =
-                        if let Some(stripped) = rel_str.strip_suffix(".enc") {
-                            (stripped.to_string(), true)
-                        } else {
-                            (rel_str.to_string(), false)
-                        };
-                    if let Some(mode) = crate::config::repo::evaluate_selection(&rules, &clean_rel)
-                    {
-                        match mode {
-                            SelectionMode::EncryptedInclude if !is_enc_file => {
-                                return Err(EngineError::EncryptionMismatch {
-                                    path: entry.path().to_path_buf(),
-                                    reason: format!(
-                                        "Repository file '{}' format conflicts with encryption rule in dotler.toml. Run 'dotler tidy' to reconcile format.",
-                                        clean_rel
-                                    ),
-                                });
-                            }
-                            SelectionMode::PlaintextInclude if is_enc_file => {
-                                return Err(EngineError::EncryptionMismatch {
-                                    path: entry.path().to_path_buf(),
-                                    reason: format!(
-                                        "Repository file '{}' format conflicts with encryption rule in dotler.toml. Run 'dotler tidy' to reconcile format.",
-                                        clean_rel
-                                    ),
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let data = json!({
-        "status": "valid",
-        "groups_checked": repo_cfg.groups.len(),
-    });
-    Ok(render_success_to(stdout, "check", &data, cli.json))
+    let ctx = CoreContext::new(cli.repo.clone(), cli.device.clone(), is_interactive);
+    let report = run_check(&ctx, args.group.as_deref(), lock)?;
+    Ok(render_success_to(stdout, "check", &report, cli.json))
 }
 
 fn handle_status<W: Write>(
@@ -739,42 +751,8 @@ fn handle_status<W: Write>(
     stdout: &mut W,
     lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
-    let local_cfg_res = get_local_config(expand_tilde(LOCAL_CONFIG_FILE));
-    let local_cfg = local_cfg_res.get()?;
-
-    let (label, repo_path) = resolve_repo_path_with_cwd(local_cfg, cli.repo.as_deref())?;
-    let repo_cfg_res = get_repo_config(repo_path.join("dotler.toml"));
-    let repo_cfg = repo_cfg_res.get()?;
-
-    let state_db_res = get_state_db(expand_tilde(STATE_DB_PATH));
-    let state_db = state_db_res.get()?;
-
-    let has_enc = has_encrypted_rules(repo_cfg) || has_encrypted_repo_files(&repo_path, repo_cfg);
-    let vault_key = unlock_vault_if_needed(
-        repo_cfg,
-        local_cfg.use_keyring,
-        is_interactive,
-        has_enc && is_interactive,
-    )?;
-    let os_info = OsInfo::detect();
-
-    let mut devices = local_cfg.default_devices.clone();
-    if let Some(ref d) = cli.device {
-        devices.insert(0, d.clone());
-    }
-
-    let sync_engine = SyncEngine::new(
-        &label,
-        &repo_path,
-        repo_cfg,
-        state_db,
-        devices,
-        os_info,
-        vault_key.as_ref(),
-    );
-
-    let plans = plan(&sync_engine, args.group.as_deref(), lock)?;
-
+    let ctx = CoreContext::new(cli.repo.clone(), cli.device.clone(), is_interactive);
+    let plans = run_status(&ctx, args.group.as_deref(), lock)?;
     Ok(render_success_to(stdout, "status", &plans, cli.json))
 }
 
@@ -785,51 +763,19 @@ fn handle_import<W: Write>(
     stdout: &mut W,
     lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
-    let local_cfg_res = get_local_config(expand_tilde(LOCAL_CONFIG_FILE));
-    let local_cfg = local_cfg_res.get()?;
-
-    let (label, repo_path) = resolve_repo_path_with_cwd(local_cfg, cli.repo.as_deref())?;
-    let repo_cfg_res = get_repo_config(repo_path.join("dotler.toml"));
-    let repo_cfg = repo_cfg_res.get()?;
-
-    let state_db_res = get_state_db(expand_tilde(STATE_DB_PATH));
-    let state_db = state_db_res.get()?;
-
-    let needs_vault = has_encrypted_rules(repo_cfg);
-    let vault_key =
-        unlock_vault_if_needed(repo_cfg, local_cfg.use_keyring, is_interactive, needs_vault)?;
-    let os_info = OsInfo::detect();
-
-    let mut devices = local_cfg.default_devices.clone();
-    if let Some(ref d) = cli.device {
-        devices.insert(0, d.clone());
-    }
-
-    let sync_engine = SyncEngine::new(
-        &label,
-        &repo_path,
-        repo_cfg,
-        state_db,
-        devices,
-        os_info,
-        vault_key.as_ref(),
-    );
-
+    let ctx = CoreContext::new(cli.repo.clone(), cli.device.clone(), is_interactive);
     let groups = args.resolved_groups();
-
-    let mut plans = Vec::new();
-    if groups.is_empty() {
-        plans = plan(&sync_engine, None, lock)?;
-    } else {
-        for g in &groups {
-            let mut p = plan(&sync_engine, Some(g), lock)?;
-            plans.append(&mut p);
-        }
-    }
-
     let dry_run = args.dry_run || cli.dry_run;
-    let report = import_files(&sync_engine, &plans, lock, dry_run)?;
-    Ok(render_success_to(stdout, "import", &report, cli.json))
+
+    if cli.json {
+        let mut obs = NoopObserver;
+        let report = run_import(&ctx, &groups, args.force, dry_run, lock, &mut obs)?;
+        Ok(render_success_to(stdout, "import", &report, true))
+    } else {
+        let mut obs = TuiObserver::new(stdout, "import", args.all, args.yes, is_interactive);
+        let _report = run_import(&ctx, &groups, args.force, dry_run, lock, &mut obs)?;
+        Ok(EXIT_SUCCESS)
+    }
 }
 
 fn handle_export<W: Write>(
@@ -839,63 +785,19 @@ fn handle_export<W: Write>(
     stdout: &mut W,
     lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
-    let local_cfg_res = get_local_config(expand_tilde(LOCAL_CONFIG_FILE));
-    let local_cfg = local_cfg_res.get()?;
-
-    let (label, repo_path) = resolve_repo_path_with_cwd(local_cfg, cli.repo.as_deref())?;
-    let repo_cfg_res = get_repo_config(repo_path.join("dotler.toml"));
-    let repo_cfg = repo_cfg_res.get()?;
-
-    let state_db_res = get_state_db(expand_tilde(STATE_DB_PATH));
-    let state_db = state_db_res.get()?;
-
-    let needs_vault = has_encrypted_rules(repo_cfg);
-    let vault_key =
-        unlock_vault_if_needed(repo_cfg, local_cfg.use_keyring, is_interactive, needs_vault)?;
-    let os_info = OsInfo::detect();
-
-    let mut devices = local_cfg.default_devices.clone();
-    if let Some(ref d) = cli.device {
-        devices.insert(0, d.clone());
-    }
-
-    let sync_engine = SyncEngine::new(
-        &label,
-        &repo_path,
-        repo_cfg,
-        state_db,
-        devices,
-        os_info,
-        vault_key.as_ref(),
-    );
-
+    let ctx = CoreContext::new(cli.repo.clone(), cli.device.clone(), is_interactive);
     let groups = args.resolved_groups();
-
-    let mut plans = Vec::new();
-    if groups.is_empty() {
-        plans = plan(&sync_engine, None, lock)?;
-    } else {
-        for g in &groups {
-            let mut p = plan(&sync_engine, Some(g), lock)?;
-            plans.append(&mut p);
-        }
-    }
-
-    for p in &plans {
-        if p.status == FileSyncStatus::EncryptionMismatch {
-            return Err(EngineError::EncryptionMismatch {
-                path: p.repo_file_path.clone(),
-                reason: format!(
-                    "Repository file '{}' format conflicts with encryption rule in dotler.toml. Run 'dotler tidy' to reconcile format.",
-                    p.relative_path
-                ),
-            });
-        }
-    }
-
     let dry_run = args.dry_run || cli.dry_run;
-    let report = export_files(&sync_engine, &plans, lock, args.force, dry_run)?;
-    Ok(render_success_to(stdout, "export", &report, cli.json))
+
+    if cli.json {
+        let mut obs = NoopObserver;
+        let report = run_export(&ctx, &groups, args.force, dry_run, lock, &mut obs)?;
+        Ok(render_success_to(stdout, "export", &report, true))
+    } else {
+        let mut obs = TuiObserver::new(stdout, "export", args.all, args.yes, is_interactive);
+        let _report = run_export(&ctx, &groups, args.force, dry_run, lock, &mut obs)?;
+        Ok(EXIT_SUCCESS)
+    }
 }
 
 fn handle_tidy<W: Write>(
@@ -905,48 +807,24 @@ fn handle_tidy<W: Write>(
     stdout: &mut W,
     lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
-    let local_cfg_res = get_local_config(expand_tilde(LOCAL_CONFIG_FILE));
-    let local_cfg = local_cfg_res.get()?;
-
-    let (label, repo_path) = resolve_repo_path_with_cwd(local_cfg, cli.repo.as_deref())?;
-    let repo_cfg_res = get_repo_config(repo_path.join("dotler.toml"));
-    let repo_cfg = repo_cfg_res.get()?;
-
-    let state_db_res = get_state_db(expand_tilde(STATE_DB_PATH));
-    let state_db = state_db_res.get()?;
-
-    let needs_vault =
-        has_encrypted_rules(repo_cfg) || has_encrypted_repo_files(&repo_path, repo_cfg);
-    let vault_key =
-        unlock_vault_if_needed(repo_cfg, local_cfg.use_keyring, is_interactive, needs_vault)?;
-    let os_info = OsInfo::detect();
-
-    let mut devices = local_cfg.default_devices.clone();
-    if let Some(ref d) = cli.device {
-        devices.insert(0, d.clone());
-    }
-
-    let sync_engine = SyncEngine::new(
-        &label,
-        &repo_path,
-        repo_cfg,
-        state_db,
-        devices,
-        os_info,
-        vault_key.as_ref(),
-    );
-
+    let ctx = CoreContext::new(cli.repo.clone(), cli.device.clone(), is_interactive);
     let groups = args.resolved_groups();
-
     let policy = if args.purge {
         TidyOrphanPolicy::PurgeFromOs
     } else {
         TidyOrphanPolicy::KeepOnOs
     };
-
     let dry_run = args.dry_run || cli.dry_run;
-    let report = tidy_groups(&sync_engine, &groups, lock, policy, dry_run)?;
-    Ok(render_success_to(stdout, "tidy", &report, cli.json))
+
+    if cli.json {
+        let mut obs = NoopObserver;
+        let report = run_tidy(&ctx, &groups, policy, dry_run, lock, &mut obs)?;
+        Ok(render_success_to(stdout, "tidy", &report, true))
+    } else {
+        let mut obs = TuiObserver::new(stdout, "tidy", args.all, args.yes, is_interactive);
+        let _report = run_tidy(&ctx, &groups, policy, dry_run, lock, &mut obs)?;
+        Ok(EXIT_SUCCESS)
+    }
 }
 
 fn handle_vault<W: Write>(
@@ -1143,333 +1021,6 @@ fn handle_update<W: Write>(
     Ok(render_success_to(stdout, "update", &data, cli.json))
 }
 
-fn rotate_vault_passphrases(
-    local_cfg: &LocalConfig,
-    requested_label: Option<&str>,
-    password_stdin: bool,
-    new_hint: Option<&str>,
-    is_interactive: bool,
-) -> Result<serde_json::Value, EngineError> {
-    let mut candidates: Vec<(String, PathBuf)> = Vec::new();
-    let explicit_repo = requested_label.is_some();
-
-    if let Some(label) = requested_label {
-        let (resolved_label, path) = local_cfg
-            .resolve_repo(Some(label))
-            .map_err(EngineError::Config)?;
-        candidates.push((resolved_label, path));
-    } else {
-        for (label, raw_path) in &local_cfg.repos {
-            candidates.push((label.clone(), expand_tilde(raw_path)));
-        }
-
-        if let Ok(current_dir) = std::env::current_dir()
-            && let Some(repo_dir) = crate::config::local::find_ancestor_repo_dir(&current_dir)
-        {
-            let canon_cwd = fs::canonicalize(&repo_dir).unwrap_or_else(|_| repo_dir.clone());
-            let already_listed = candidates
-                .iter()
-                .any(|(_, p)| fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == canon_cwd);
-            if !already_listed {
-                let cwd_label = repo_dir
-                    .file_name()
-                    .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "current".to_string());
-                candidates.push((cwd_label, repo_dir));
-            }
-        }
-    }
-
-    if candidates.is_empty() {
-        return Err(EngineError::Config(
-            crate::config::ConfigError::NoReposConfigured,
-        ));
-    }
-
-    let mut vault_targets: Vec<(String, PathBuf, crate::config::repo::VaultConfig)> = Vec::new();
-    let mut skipped_repos: Vec<String> = Vec::new();
-
-    for (label, repo_path) in candidates {
-        let manifest_path = repo_path.join("dotler.toml");
-        if !manifest_path.is_file() {
-            if explicit_repo {
-                return Err(EngineError::Config(
-                    crate::config::ConfigError::RepoPathNotFound(repo_path.display().to_string()),
-                ));
-            }
-            skipped_repos.push(label);
-            continue;
-        }
-
-        let repo_cfg = match RepoConfig::load(&manifest_path) {
-            Ok(cfg) => cfg,
-            Err(e) if explicit_repo => return Err(EngineError::Config(e)),
-            Err(_) => {
-                skipped_repos.push(label);
-                continue;
-            }
-        };
-
-        match repo_cfg.vault {
-            Some(vault_cfg) => vault_targets.push((label, manifest_path, vault_cfg)),
-            None if explicit_repo => {
-                return Err(EngineError::VaultLocked {
-                    reason: "Vault is not configured".to_string(),
-                });
-            }
-            None => skipped_repos.push(label),
-        }
-    }
-
-    if vault_targets.is_empty() {
-        return Err(EngineError::VaultLocked {
-            reason: "Vault is not configured in any registered repository".to_string(),
-        });
-    }
-
-    let old_pass =
-        resolve_old_passphrase_for_vaults(&vault_targets, local_cfg.use_keyring, is_interactive)?;
-    let new_pass = read_new_passphrase(
-        password_stdin,
-        false,
-        is_interactive,
-        "Enter new vault passphrase: ",
-    )?;
-
-    let mut pending_writes: Vec<(String, PathBuf, String, String)> = Vec::new();
-    let mut already_synced_repos: Vec<String> = Vec::new();
-
-    for (label, manifest_path, vault_cfg) in vault_targets {
-        match change_password(&vault_cfg, &old_pass, &new_pass) {
-            Ok(mut new_cfg) => {
-                if let Some(h) = new_hint {
-                    let trimmed = h.trim();
-                    new_cfg.hint = if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed.to_string())
-                    };
-                }
-                let manifest_str = fs::read_to_string(&manifest_path)?;
-                let updated_manifest =
-                    update_vault_manifest_section(&manifest_str, &vault_cfg, &new_cfg);
-                pending_writes.push((label, manifest_path, updated_manifest, new_cfg.vault_id));
-            }
-            Err(crate::crypto::vault::VaultError::WeakPassphrase(msg)) => {
-                return Err(EngineError::Vault(
-                    crate::crypto::vault::VaultError::WeakPassphrase(msg),
-                ));
-            }
-            Err(crate::crypto::vault::VaultError::InvalidSecret) => {
-                if let Ok(slot) = VaultSlot::from_base64(&vault_cfg.password_slot)
-                    && slot.unwrap(&new_pass, Some(&vault_cfg.vault_id)).is_ok()
-                {
-                    already_synced_repos.push(label);
-                    continue;
-                }
-                if explicit_repo {
-                    return Err(EngineError::Vault(
-                        crate::crypto::vault::VaultError::InvalidSecret,
-                    ));
-                }
-                skipped_repos.push(label);
-            }
-            Err(other) => {
-                if explicit_repo {
-                    return Err(EngineError::Vault(other));
-                }
-                skipped_repos.push(label);
-            }
-        }
-    }
-
-    if pending_writes.is_empty() && already_synced_repos.is_empty() {
-        return Err(EngineError::Vault(
-            crate::crypto::vault::VaultError::InvalidSecret,
-        ));
-    }
-
-    let mut rotated_repos = Vec::new();
-    let mut primary_vault_id: Option<String> = None;
-
-    for (label, manifest_path, updated_manifest, vault_id) in pending_writes {
-        write_file_safe(&manifest_path, updated_manifest.as_bytes())?;
-        if primary_vault_id.is_none() {
-            primary_vault_id = Some(vault_id);
-        }
-        rotated_repos.push(label);
-    }
-
-    let keyring_updated = local_cfg.use_keyring && OsKeyring::set(&new_pass).is_ok();
-    skipped_repos.sort();
-
-    let mut data = json!({
-        "status": "password_rotated",
-        "rotated_repos": rotated_repos,
-        "skipped_repos": skipped_repos,
-        "keyring_updated": keyring_updated,
-    });
-    if !already_synced_repos.is_empty() {
-        data["already_synced_repos"] = json!(already_synced_repos);
-    }
-    if let Some(vid) = primary_vault_id {
-        data["vault_id"] = json!(vid);
-    }
-    Ok(data)
-}
-
-fn resolve_old_passphrase_for_vaults(
-    vault_targets: &[(String, PathBuf, crate::config::repo::VaultConfig)],
-    use_keyring: bool,
-    is_interactive: bool,
-) -> Result<SecretString, EngineError> {
-    let matches_any = |candidate: &SecretString| -> bool {
-        vault_targets.iter().any(|(_, _, vcfg)| {
-            VaultSlot::from_base64(&vcfg.password_slot)
-                .ok()
-                .and_then(|slot| slot.unwrap(candidate, Some(&vcfg.vault_id)).ok())
-                .is_some()
-        })
-    };
-
-    if let Ok(env_pass) = std::env::var(crate::crypto::keyring::PASSPHRASE_ENV_VAR) {
-        let trimmed = env_pass.trim_end_matches(['\r', '\n']);
-        if !trimmed.is_empty() {
-            let secret = SecretString::new(trimmed.to_string());
-            if matches_any(&secret) || !is_interactive {
-                return Ok(secret);
-            }
-        }
-    }
-
-    if use_keyring
-        && let Ok(Some(sec)) = OsKeyring::get()
-        && matches_any(&sec)
-    {
-        return Ok(sec);
-    }
-
-    if !is_interactive {
-        return Err(EngineError::Crypto(crate::crypto::CryptoError::Keyring(
-            crate::crypto::keyring::KeyringError::PassphraseRequiredInNonInteractiveMode,
-        )));
-    }
-
-    let first_hint = vault_targets
-        .iter()
-        .filter_map(|(_, _, vcfg)| vcfg.hint.as_deref())
-        .map(str::trim)
-        .find(|s| !s.is_empty());
-    let prompt_msg = match first_hint {
-        Some(h) => format!("Enter current vault passphrase (hint: {h}): "),
-        None => "Enter current vault passphrase: ".to_string(),
-    };
-
-    let resolved = OsKeyring::prompt_passphrase_with_message(&prompt_msg)
-        .map_err(|e| EngineError::Crypto(crate::crypto::CryptoError::Keyring(e)))?;
-    Ok(resolved.secret)
-}
-
-fn unlock_vault_if_needed(
-    repo_cfg: &RepoConfig,
-    use_keyring: bool,
-    is_interactive: bool,
-    required: bool,
-) -> Result<Option<VaultKey>, EngineError> {
-    let Some(vault_cfg) = repo_cfg.vault.as_ref() else {
-        if required {
-            return Err(EngineError::VaultLocked {
-                reason:
-                    "Encrypted group cannot be synced without an initialized [vault] in dotler.toml"
-                        .to_string(),
-            });
-        }
-        return Ok(None);
-    };
-
-    let slot = VaultSlot::from_base64(&vault_cfg.password_slot)?;
-
-    if let Ok(env_pass) = std::env::var(crate::crypto::keyring::PASSPHRASE_ENV_VAR) {
-        let trimmed = env_pass.trim_end_matches(['\r', '\n']);
-        if !trimmed.is_empty() {
-            let secret = SecretString::new(trimmed.to_string());
-            match slot.unwrap(&secret, Some(&vault_cfg.vault_id)) {
-                Ok(key) => return Ok(Some(key)),
-                Err(e) if !is_interactive && required => return Err(EngineError::Vault(e)),
-                Err(_) => {}
-            }
-        }
-    }
-
-    let keyring_secret = if use_keyring {
-        OsKeyring::get().ok().flatten()
-    } else {
-        None
-    };
-    if let Some(ref sec) = keyring_secret
-        && let Ok(key) = slot.unwrap(sec, Some(&vault_cfg.vault_id))
-    {
-        return Ok(Some(key));
-    }
-
-    if !required {
-        return Ok(None);
-    }
-
-    if !is_interactive {
-        return Err(EngineError::Crypto(crate::crypto::CryptoError::Keyring(
-            crate::crypto::keyring::KeyringError::PassphraseRequiredInNonInteractiveMode,
-        )));
-    }
-
-    let prompt_msg = match vault_cfg
-        .hint
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(h) => format!("Enter dotler vault passphrase (hint: {h}): "),
-        None => "Enter dotler vault passphrase: ".to_string(),
-    };
-    let resolved = OsKeyring::prompt_passphrase_with_message(&prompt_msg)
-        .map_err(|e| EngineError::Crypto(crate::crypto::CryptoError::Keyring(e)))?;
-    let key = slot.unwrap(&resolved.secret, Some(&vault_cfg.vault_id))?;
-
-    if use_keyring && keyring_secret.is_none() {
-        let _ = OsKeyring::set(&resolved.secret);
-    }
-
-    Ok(Some(key))
-}
-
-fn has_encrypted_rules(repo_cfg: &RepoConfig) -> bool {
-    for g in repo_cfg.groups.values() {
-        if let Ok(rules) = parse_selection_rules(&g.files)
-            && crate::config::repo::rules_have_effective_encryption(&rules)
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn has_encrypted_repo_files(repo_path: &Path, repo_cfg: &RepoConfig) -> bool {
-    for g_name in repo_cfg.groups.keys() {
-        let group_dir = repo_path.join(g_name);
-        if !group_dir.is_dir() {
-            continue;
-        }
-        for entry in WalkDir::new(&group_dir).into_iter().filter_map(|e| e.ok()) {
-            if entry.file_type().is_file()
-                && entry.path().extension().and_then(|s| s.to_str()) == Some("enc")
-            {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 fn read_new_passphrase(
     password_stdin: bool,
     allow_env_var: bool,
@@ -1512,6 +1063,12 @@ fn read_new_passphrase(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use crate::config::state::write_file_safe;
+    use crate::core::vault_loader::{
+        resolve_old_passphrase_for_vaults, unlock_vault_if_needed,
+    };
+    use crate::crypto::vault::{VaultSlot, change_password};
 
     #[test]
     fn test_parse_tidy_purge_and_reject_removed_flags() {
@@ -1536,6 +1093,45 @@ mod tests {
             Cli::try_parse_from(["dotler", "tidy", "--keep"]).is_err(),
             "Clap must reject removed --keep flag"
         );
+    }
+
+    #[test]
+    fn test_parse_6_mutating_commands_yes_all_dry_run_flags() {
+        let imp = Cli::try_parse_from(["dotler", "import", "-y", "-a", "--dry-run"]).unwrap();
+        match imp.command {
+            Command::Import(a) => assert!(a.yes && a.all && a.dry_run),
+            other => panic!("Unexpected: {other:?}"),
+        }
+
+        let exp = Cli::try_parse_from(["dotler", "export", "-y", "-a", "--dry-run", "-f"]).unwrap();
+        match exp.command {
+            Command::Export(a) => assert!(a.yes && a.all && a.dry_run && a.force),
+            other => panic!("Unexpected: {other:?}"),
+        }
+
+        let tidy = Cli::try_parse_from(["dotler", "tidy", "-y", "-a", "--dry-run", "--purge"]).unwrap();
+        match tidy.command {
+            Command::Tidy(a) => assert!(a.yes && a.all && a.dry_run && a.purge),
+            other => panic!("Unexpected: {other:?}"),
+        }
+
+        let clone = Cli::try_parse_from(["dotler", "git", "clone", "gh:u/r", "-y", "-a", "--dry-run"]).unwrap();
+        match clone.command {
+            Command::Git { command: GitCommand::Clone(a) } => assert!(a.yes && a.all && a.dry_run),
+            other => panic!("Unexpected: {other:?}"),
+        }
+
+        let install = Cli::try_parse_from(["dotler", "git", "install", "gh:u/r", "nvim", "-y", "-a", "--dry-run"]).unwrap();
+        match install.command {
+            Command::Git { command: GitCommand::Install(a) } => assert!(a.yes && a.all && a.dry_run),
+            other => panic!("Unexpected: {other:?}"),
+        }
+
+        let uninstall = Cli::try_parse_from(["dotler", "git", "uninstall", "-y", "-a", "--dry-run"]).unwrap();
+        match uninstall.command {
+            Command::Git { command: GitCommand::Uninstall(a) } => assert!(a.yes && a.all && a.dry_run),
+            other => panic!("Unexpected: {other:?}"),
+        }
     }
 
     #[test]
@@ -1575,7 +1171,6 @@ mod tests {
             ..Default::default()
         };
 
-        // Keyring starts empty; queue interactive prompt reply
         assert!(OsKeyring::get().unwrap().is_none());
         OsKeyring::push_mock_prompt_reply("interactive-day0-secret");
 
@@ -1584,13 +1179,11 @@ mod tests {
             .expect("vault key must be returned");
         assert_eq!(unlocked.vault_id(), expected_key.vault_id());
 
-        // Verified passphrase must be auto-saved to OsKeyring on Day 0
         let saved = OsKeyring::get()
             .unwrap()
             .expect("keyring must hold auto-saved secret");
         assert_eq!(saved.expose_secret(), "interactive-day0-secret");
 
-        // Rotating password interactively must prompt for the NEW passphrase rather than reusing keyring
         OsKeyring::push_mock_prompt_reply("rotated-new-secret-999");
         let targets = vec![(
             "primary".to_string(),
@@ -1690,14 +1283,12 @@ mod tests {
             repo_missing.to_string_lossy().to_string(),
         );
 
-        // Wrong old password matching zero vaults must fail without modifying keyring or manifests
         OsKeyring::push_mock_prompt_reply("wrong-old-pass-000");
         OsKeyring::push_mock_prompt_reply("shared-new-pass-999");
         let wrong_res = rotate_vault_passphrases(&local_cfg, None, false, None, true);
         assert!(wrong_res.is_err());
         assert!(OsKeyring::get().unwrap().is_none());
 
-        // Seed OsKeyring with old_pass, then rotate interactively to shared-new-pass-999
         OsKeyring::set(&old_pass).unwrap();
         OsKeyring::push_mock_prompt_reply("shared-new-pass-999");
 
@@ -1712,11 +1303,9 @@ mod tests {
         );
         assert_eq!(report["keyring_updated"], true);
 
-        // OsKeyring must now hold the new passphrase
         let keyring_secret = OsKeyring::get().unwrap().unwrap();
         assert_eq!(keyring_secret.expose_secret(), "shared-new-pass-999");
 
-        // Both repo_a and repo_b must unlock with the new passphrase while .enc bytes stay untouched
         for (repo_dir, orig_enc, expected_plain) in [
             (&repo_a, &enc_a, b"secret-a-payload".as_slice()),
             (&repo_b, &enc_b, b"secret-b-payload".as_slice()),
@@ -1736,7 +1325,6 @@ mod tests {
             assert_eq!(dec.expose_secret().as_slice(), expected_plain);
         }
 
-        // Third-party repo with different passphrase must remain untouched
         let reloaded_other = RepoConfig::load(&repo_other.join("dotler.toml")).unwrap();
         let other_vcfg = reloaded_other.vault.unwrap();
         assert_eq!(other_vcfg.password_slot, vcfg_other.password_slot);
@@ -1765,13 +1353,10 @@ mod tests {
             ..Default::default()
         };
 
-        // Even if keyring contains the valid passphrase, `use_keyring = false` must ignore it
-        // and fail in non-interactive mode.
         OsKeyring::set(&pass).unwrap();
         let non_interactive_res = unlock_vault_if_needed(&repo_cfg, false, false, true);
         assert!(non_interactive_res.is_err());
 
-        // Clear keyring, unlock interactively with `use_keyring = false`, and verify keyring remains empty.
         OsKeyring::clear_mock();
         OsKeyring::push_mock_prompt_reply("keyring-disabled-secret-123");
         let unlocked = unlock_vault_if_needed(&repo_cfg, false, true, true)

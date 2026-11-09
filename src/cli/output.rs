@@ -328,6 +328,23 @@ impl<T: InlineRender> InlineRender for Vec<T> {
     }
 }
 
+impl InlineRender for crate::engine::check::InitReport {
+    fn render_inline(&self) -> String {
+        format!(
+            "Initialized repository '{}' at '{}' (device: {})",
+            self.label,
+            self.repo_path.display(),
+            self.device
+        )
+    }
+}
+
+impl InlineRender for crate::engine::check::CheckReport {
+    fn render_inline(&self) -> String {
+        format!("Configuration valid ({} groups checked)", self.groups_checked)
+    }
+}
+
 impl InlineRender for crate::engine::sync::FileActionPlan {
     fn render_inline(&self) -> String {
         format!(

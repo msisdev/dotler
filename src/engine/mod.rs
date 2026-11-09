@@ -1,22 +1,34 @@
 //! Execution and dotfile synchronization engine.
 //!
 //! Provides 3-way synchronization, atomic staging, sequential write-ahead logging (WAL),
-//! in-place format tidying, and remote Git operations.
+//! in-place format tidying, observer callbacks, and remote Git operations.
 
+pub mod check;
+pub mod observer;
 pub mod remote;
 pub mod sync;
+pub mod tidy;
 
+pub use check::{
+    CheckReport, FileActionPlan, FileSyncStatus, InitParams, InitReport, plan, run_check, run_init,
+    run_status,
+};
+pub use observer::{
+    CommandObserver, NoopObserver, PlanActionKind, PlanDirection, PlanPreviewEntry,
+};
 pub use remote::{
     BACKUPS_DIR_NAME, CloneReport, GroupSelector, InstallReport, PathOverride,
     REMOTE_TOML_FETCH_MAX_BYTES, RemoteGroupInfo, RemoteManifestSummary, RemoteRepoSummary,
-    RemoteRepoUrl, STAGING_CLONE_PREFIX, UninstallReport, clone_repo, install_remote, list_remote,
-    parse_url, uninstall_remote,
+    RemoteRepoUrl, STAGING_CLONE_PREFIX, UninstallReport, clone_repo, clone_repo_with_observer,
+    install_remote, install_remote_with_observer, list_remote, parse_url, run_git_clone,
+    run_git_install, run_git_ls, run_git_uninstall, uninstall_remote,
+    uninstall_remote_with_observer,
 };
 pub use sync::{
-    ATOMIC_REPLACE_RETRIES, FileActionPlan, FileSyncStatus, SyncEngine, SyncReport,
-    TMP_FILE_PREFIX, TidyOrphanPolicy, TidyReport, export_files, import_files, plan, tidy,
-    write_file_safe,
+    ATOMIC_REPLACE_RETRIES, SyncEngine, SyncReport, TMP_FILE_PREFIX, export_files, import_files,
+    run_export, run_import, write_file_safe,
 };
+pub use tidy::{TidyOrphanPolicy, TidyReport, run_tidy, tidy, tidy_groups, tidy_groups_with_observer};
 
 use std::path::PathBuf;
 
@@ -62,6 +74,9 @@ pub enum EngineError {
     },
     FileNotFound {
         path: PathBuf,
+    },
+    NonInteractiveConfirmationRequired {
+        command: String,
     },
     AtomicReplaceFailed(String),
     Config(crate::config::ConfigError),
@@ -114,6 +129,10 @@ impl std::fmt::Display for EngineError {
                 write!(f, "Missing remote dotler.toml in repository '{url}'")
             }
             Self::FileNotFound { path } => write!(f, "File not found: '{}'", path.display()),
+            Self::NonInteractiveConfirmationRequired { command } => write!(
+                f,
+                "Non-interactive terminal detected for '{command}': confirmation prompt cannot run without a TTY"
+            ),
             Self::AtomicReplaceFailed(m) => write!(f, "Atomic replace failed for '{m}'"),
             Self::Config(e) => write!(f, "Configuration error: {e}"),
             Self::State(e) => write!(f, "State ledger error: {e}"),
@@ -193,6 +212,7 @@ impl EngineError {
             EngineError::GroupNotFound { .. } => "GROUP_NOT_FOUND",
             EngineError::MissingRemoteToml { .. } => "MISSING_MANIFEST",
             EngineError::FileNotFound { .. } => "FILE_NOT_FOUND",
+            EngineError::NonInteractiveConfirmationRequired { .. } => "CONFIRMATION_REQUIRED",
             EngineError::AtomicReplaceFailed(_) => "IO_ERROR",
             EngineError::Config(crate::config::ConfigError::HardBlockedPath { .. }) => {
                 "SECURITY_BLOCKED"
@@ -250,6 +270,11 @@ impl EngineError {
             EngineError::FileNotFound { path } => {
                 format!("File '{}' does not exist.", path.display())
             }
+            EngineError::NonInteractiveConfirmationRequired { command } => {
+                format!(
+                    "Pass '-y' ('--yes') to auto-confirm or '--json' for machine-readable execution of 'dotler {command}'."
+                )
+            }
             EngineError::AtomicReplaceFailed(msg) => {
                 format!("Atomic file replace failed: {msg}")
             }
@@ -265,3 +290,4 @@ impl EngineError {
         }
     }
 }
+

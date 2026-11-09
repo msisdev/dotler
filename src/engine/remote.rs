@@ -20,9 +20,13 @@ use crate::config::repo::{
 use crate::config::state::{
     BACKUPS_DIR_PATH, DotlerLockGuard, InstalledFileRecord, StateDb, write_file_safe,
 };
+use crate::core::context::CoreContext;
 use crate::crypto::ExposeSecret;
 use crate::crypto::vault::{EncryptedFile, VaultKey};
 use crate::engine::EngineError;
+use crate::engine::observer::{
+    CommandObserver, NoopObserver, PlanActionKind, PlanDirection, PlanPreviewEntry,
+};
 
 struct TempDirGuard(PathBuf);
 
@@ -617,7 +621,35 @@ pub fn clone_repo(
     local_config_path: Option<&Path>,
     remote_vault_key: Option<&VaultKey>,
     local_vault_key: Option<&VaultKey>,
+    lock: &DotlerLockGuard,
+) -> Result<CloneReport, EngineError> {
+    let mut noop = NoopObserver;
+    clone_repo_with_observer(
+        url,
+        selectors,
+        branch,
+        target_dir,
+        local_config_path,
+        remote_vault_key,
+        local_vault_key,
+        lock,
+        false,
+        &mut noop,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn clone_repo_with_observer(
+    url: &RemoteRepoUrl,
+    selectors: &[GroupSelector],
+    branch: Option<&str>,
+    target_dir: &Path,
+    local_config_path: Option<&Path>,
+    remote_vault_key: Option<&VaultKey>,
+    local_vault_key: Option<&VaultKey>,
     _lock: &DotlerLockGuard,
+    dry_run: bool,
+    observer: &mut dyn CommandObserver,
 ) -> Result<CloneReport, EngineError> {
     if target_dir.exists() && target_dir.read_dir()?.next().is_some() {
         return Err(EngineError::GitError {
@@ -672,6 +704,82 @@ pub fn clone_repo(
         }
     }
 
+    let mut preview_entries: Vec<PlanPreviewEntry> = Vec::new();
+    let mut clone_files: Vec<(String, PathBuf, String, u64)> = Vec::new();
+    for g_name in &selected_groups {
+        let g_dir = manifest_dir.join(g_name);
+        if g_dir.is_dir() {
+            for entry in WalkDir::new(&g_dir).min_depth(1) {
+                let entry = entry?;
+                if entry.file_type().is_file() {
+                    let rel = entry
+                        .path()
+                        .strip_prefix(&g_dir)
+                        .unwrap_or(entry.path())
+                        .to_string_lossy()
+                        .to_string();
+                    let is_enc = entry.path().extension().and_then(|s| s.to_str()) == Some("enc");
+                    let size = fs::metadata(entry.path()).map(|m| m.len()).unwrap_or(0);
+                    preview_entries.push(PlanPreviewEntry {
+                        group_name: g_name.clone(),
+                        os_path: PathBuf::from(format!("{}/{}/{}", url.raw, g_name, rel)),
+                        os_action: PlanActionKind::Okay,
+                        repo_path: target_dir.join(g_name).join(&rel),
+                        repo_action: PlanActionKind::Create,
+                        direction: if is_enc {
+                            PlanDirection::EncryptToRepo
+                        } else {
+                            PlanDirection::PlainToRepo
+                        },
+                    });
+                    clone_files.push((
+                        g_name.clone(),
+                        target_dir.join(g_name),
+                        rel,
+                        size,
+                    ));
+                }
+            }
+        }
+    }
+
+    if preview_entries.is_empty() {
+        let fallback_group = selected_groups
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "repo".to_string());
+        preview_entries.push(PlanPreviewEntry {
+            group_name: fallback_group.clone(),
+            os_path: PathBuf::from(format!("{}/dotler.toml", url.raw)),
+            os_action: PlanActionKind::Okay,
+            repo_path: target_dir.join("dotler.toml"),
+            repo_action: PlanActionKind::Create,
+            direction: PlanDirection::PlainToRepo,
+        });
+        clone_files.push((
+            fallback_group,
+            target_dir.to_path_buf(),
+            "dotler.toml".to_string(),
+            0,
+        ));
+    }
+
+    let approved = observer.confirm_plan(&preview_entries, dry_run)?;
+    if dry_run {
+        return Ok(CloneReport {
+            repo_url: url.raw.clone(),
+            destination: target_dir.to_path_buf(),
+            cloned_groups: selected_groups,
+        });
+    }
+    if !approved {
+        return Ok(CloneReport {
+            repo_url: url.raw.clone(),
+            destination: target_dir.to_path_buf(),
+            cloned_groups: Vec::new(),
+        });
+    }
+
     // In-Memory Re-Keying if local vault exists and remote vault is different
     if let (Some(r_key), Some(l_key)) = (remote_vault_key, local_vault_key)
         && r_key.vault_id() != l_key.vault_id()
@@ -699,6 +807,14 @@ pub fn clone_repo(
         }
         fs::rename(manifest_dir, target_dir)?;
         // Leave cleanup.1 = true so the outer staging_dir is removed on Drop
+    }
+
+    let total = clone_files.len();
+    for (g_name, g_base, rel, size) in &clone_files {
+        observer.on_file_progress(g_name, g_base, rel, Some(*size));
+    }
+    if total > 0 {
+        observer.finish_progress();
     }
 
     if let Some(cfg_path) = local_config_path {
@@ -747,7 +863,41 @@ pub fn install_remote(
     branch: Option<&str>,
     devices: &[String],
     state: &StateDb,
+    lock: &DotlerLockGuard,
+) -> Result<InstallReport, EngineError> {
+    let mut noop = NoopObserver;
+    install_remote_with_observer(
+        url,
+        groups,
+        path_override,
+        branch,
+        devices,
+        state,
+        lock,
+        false,
+        &mut noop,
+    )
+}
+
+struct PlannedInstallFile {
+    group_name: String,
+    target_base: PathBuf,
+    source_path: PathBuf,
+    clean_rel: String,
+    target_file_path: PathBuf,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn install_remote_with_observer(
+    url: &RemoteRepoUrl,
+    groups: &[String],
+    path_override: Option<&Path>,
+    branch: Option<&str>,
+    devices: &[String],
+    state: &StateDb,
     _lock: &DotlerLockGuard,
+    dry_run: bool,
+    observer: &mut dyn CommandObserver,
 ) -> Result<InstallReport, EngineError> {
     let temp_dir = TempDirGuard::new().map_err(EngineError::Io)?;
     GitRunner::clone_shallow(&url.clone_url, branch, temp_dir.path())?;
@@ -771,12 +921,8 @@ pub fn install_remote(
     };
 
     let os_info = OsInfo::detect();
-    let mut installed_files = Vec::new();
-    let mut backed_up_files = Vec::new();
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    let mut planned = Vec::new();
+    let mut preview_entries = Vec::new();
 
     for g_name in &target_groups {
         let group = &repo_config.groups[g_name];
@@ -848,6 +994,7 @@ pub fn install_remote(
                 continue;
             }
 
+            let is_enc = rel_path_str.ends_with(".enc");
             let clean_rel = if let Some(stripped) = rel_path_str.strip_suffix(".enc") {
                 stripped.to_string()
             } else {
@@ -856,40 +1003,103 @@ pub fn install_remote(
 
             let target_file_path = target_base.join(&clean_rel);
             validate_os_target_path(&target_file_path, &home)?;
-            let target_str = target_file_path.to_string_lossy().to_string();
 
-            // 1. Check existing installed_files record to preserve original backup
-            let existing = state.get_installed_file(&target_str)?;
-            let backup_path: Option<String> = if let Some(ref ext) = existing {
-                ext.backup_path.clone()
-            } else if target_file_path.is_file() {
-                let bp = create_backup_file(&target_file_path, &clean_rel, timestamp, state)?;
-                backed_up_files.push(PathBuf::from(&bp));
-                Some(bp)
+            let os_action = if target_file_path.is_file() {
+                PlanActionKind::Overwrite
             } else {
-                None
+                PlanActionKind::Create
             };
 
-            // 2. Read source payload
-            let file_content = fs::read(entry.path())?;
-            let hash = blake3::hash(&file_content).to_hex().to_string();
-
-            // 3. Sequential Write-Ahead commit to SQLite
-            let record = InstalledFileRecord {
-                target_path: target_str.clone(),
-                repo_url: url.clone_url.clone(),
+            preview_entries.push(PlanPreviewEntry {
                 group_name: g_name.clone(),
-                relative_path: clean_rel,
-                file_hash: hash,
-                updated_at: timestamp,
-                backup_path,
-            };
-            state.upsert_installed_file(&record)?;
+                os_path: target_file_path.clone(),
+                os_action,
+                repo_path: PathBuf::from(format!("{}/{}/{}", url.raw, g_name, rel_path_str)),
+                repo_action: PlanActionKind::Okay,
+                direction: if is_enc {
+                    PlanDirection::DecryptToOs
+                } else {
+                    PlanDirection::PlainToOs
+                },
+            });
 
-            // 4. Atomic file deployment
-            write_file_safe(&target_file_path, &file_content)?;
-            installed_files.push(target_file_path);
+            planned.push(PlannedInstallFile {
+                group_name: g_name.clone(),
+                target_base: target_base.clone(),
+                source_path: entry.path().to_path_buf(),
+                clean_rel,
+                target_file_path,
+            });
         }
+    }
+
+    let approved = observer.confirm_plan(&preview_entries, dry_run)?;
+    if dry_run {
+        return Ok(InstallReport {
+            installed_files: planned.into_iter().map(|p| p.target_file_path).collect(),
+            backed_up_files: Vec::new(),
+        });
+    }
+    if !approved {
+        return Ok(InstallReport {
+            installed_files: Vec::new(),
+            backed_up_files: Vec::new(),
+        });
+    }
+
+    let mut installed_files = Vec::new();
+    let mut backed_up_files = Vec::new();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let total = planned.len();
+
+    for item in planned {
+        let target_str = item.target_file_path.to_string_lossy().to_string();
+
+        // 1. Check existing installed_files record to preserve original backup
+        let existing = state.get_installed_file(&target_str)?;
+        let backup_path: Option<String> = if let Some(ref ext) = existing {
+            ext.backup_path.clone()
+        } else if item.target_file_path.is_file() {
+            let bp = create_backup_file(&item.target_file_path, &item.clean_rel, timestamp, state)?;
+            backed_up_files.push(PathBuf::from(&bp));
+            Some(bp)
+        } else {
+            None
+        };
+
+        // 2. Read source payload
+        let file_content = fs::read(&item.source_path)?;
+        let hash = blake3::hash(&file_content).to_hex().to_string();
+
+        // 3. Sequential Write-Ahead commit to SQLite
+        let record = InstalledFileRecord {
+            target_path: target_str.clone(),
+            repo_url: url.clone_url.clone(),
+            group_name: item.group_name.clone(),
+            relative_path: item.clean_rel.clone(),
+            file_hash: hash,
+            updated_at: timestamp,
+            backup_path,
+        };
+        state.upsert_installed_file(&record)?;
+
+        // 4. Atomic file deployment
+        write_file_safe(&item.target_file_path, &file_content)?;
+        installed_files.push(item.target_file_path);
+
+        observer.on_file_progress(
+            &item.group_name,
+            &item.target_base,
+            &item.clean_rel,
+            Some(file_content.len() as u64),
+        );
+    }
+
+    if total > 0 {
+        observer.finish_progress();
     }
 
     Ok(InstallReport {
@@ -901,8 +1111,19 @@ pub fn install_remote(
 pub fn uninstall_remote(
     groups: &[String],
     state: &StateDb,
+    lock: &DotlerLockGuard,
+    dry_run: bool,
+) -> Result<UninstallReport, EngineError> {
+    let mut noop = NoopObserver;
+    uninstall_remote_with_observer(groups, state, lock, dry_run, &mut noop)
+}
+
+pub fn uninstall_remote_with_observer(
+    groups: &[String],
+    state: &StateDb,
     _lock: &DotlerLockGuard,
     dry_run: bool,
+    observer: &mut dyn CommandObserver,
 ) -> Result<UninstallReport, EngineError> {
     let all_records = state.list_installed_files(None)?;
     let filtered_records: Vec<InstalledFileRecord> = if groups.is_empty() {
@@ -914,11 +1135,54 @@ pub fn uninstall_remote(
             .collect()
     };
 
+    let preview_entries: Vec<PlanPreviewEntry> = filtered_records
+        .iter()
+        .map(|record| {
+            let target = PathBuf::from(&record.target_path);
+            let has_backup = record
+                .backup_path
+                .as_ref()
+                .is_some_and(|bp| Path::new(bp).is_file());
+            let (os_action, repo_path) = if has_backup {
+                (
+                    PlanActionKind::Overwrite,
+                    PathBuf::from(record.backup_path.as_deref().unwrap_or("")),
+                )
+            } else {
+                (
+                    PlanActionKind::Delete,
+                    PathBuf::from(format!(
+                        "{}/{}/{}",
+                        record.repo_url, record.group_name, record.relative_path
+                    )),
+                )
+            };
+            PlanPreviewEntry {
+                group_name: record.group_name.clone(),
+                os_path: target,
+                os_action,
+                repo_path,
+                repo_action: PlanActionKind::Okay,
+                direction: PlanDirection::PlainToOs,
+            }
+        })
+        .collect();
+
+    let approved = observer.confirm_plan(&preview_entries, dry_run)?;
+    if !dry_run && !approved {
+        return Ok(UninstallReport {
+            removed_files: Vec::new(),
+            restored_backups: Vec::new(),
+        });
+    }
+
     let mut removed_files = Vec::new();
     let mut restored_backups = Vec::new();
+    let total = filtered_records.len();
 
     for record in filtered_records {
         let target = PathBuf::from(&record.target_path);
+        let group_base = target.parent().unwrap_or(Path::new(".")).to_path_buf();
 
         if let Some(ref bp_str) = record.backup_path {
             let bp = PathBuf::from(bp_str);
@@ -951,12 +1215,105 @@ pub fn uninstall_remote(
             }
             removed_files.push(target);
         }
+
+        if !dry_run {
+            observer.on_file_progress(
+                &record.group_name,
+                &group_base,
+                &record.relative_path,
+                None,
+            );
+        }
+    }
+
+    if !dry_run && total > 0 {
+        observer.finish_progress();
     }
 
     Ok(UninstallReport {
         removed_files,
         restored_backups,
     })
+}
+
+/// High-level entry point for `dotler git ls` shared by CLI and MCP.
+pub fn run_git_ls(
+    url_raw: &str,
+    branch: Option<&str>,
+    lock: &DotlerLockGuard,
+) -> Result<RemoteRepoSummary, EngineError> {
+    let url = parse_url(url_raw)?;
+    list_remote(&url, branch, lock)
+}
+
+/// High-level entry point for `dotler git clone` shared by CLI and MCP.
+#[allow(clippy::too_many_arguments)]
+pub fn run_git_clone(
+    url_raw: &str,
+    selectors: &[GroupSelector],
+    branch: Option<&str>,
+    target_dir: &Path,
+    local_config_path: Option<&Path>,
+    remote_vault_key: Option<&VaultKey>,
+    local_vault_key: Option<&VaultKey>,
+    lock: &DotlerLockGuard,
+    dry_run: bool,
+    observer: &mut dyn CommandObserver,
+) -> Result<CloneReport, EngineError> {
+    let url = parse_url(url_raw)?;
+    clone_repo_with_observer(
+        &url,
+        selectors,
+        branch,
+        target_dir,
+        local_config_path,
+        remote_vault_key,
+        local_vault_key,
+        lock,
+        dry_run,
+        observer,
+    )
+}
+
+/// High-level entry point for `dotler git install` shared by CLI and MCP.
+#[allow(clippy::too_many_arguments)]
+pub fn run_git_install(
+    ctx: &CoreContext,
+    url_raw: &str,
+    groups: &[String],
+    path_override: Option<&Path>,
+    branch: Option<&str>,
+    lock: &DotlerLockGuard,
+    dry_run: bool,
+    observer: &mut dyn CommandObserver,
+) -> Result<InstallReport, EngineError> {
+    let url = parse_url(url_raw)?;
+    let local_cfg = ctx.local_config.get()?;
+    let devices = ctx.effective_devices(local_cfg);
+    let state = ctx.state_db.get()?;
+    install_remote_with_observer(
+        &url,
+        groups,
+        path_override,
+        branch,
+        &devices,
+        state,
+        lock,
+        dry_run,
+        observer,
+    )
+}
+
+/// High-level entry point for `dotler git uninstall` shared by CLI and MCP.
+pub fn run_git_uninstall(
+    ctx: &CoreContext,
+    groups: &[String],
+    lock: &DotlerLockGuard,
+    dry_run: bool,
+    observer: &mut dyn CommandObserver,
+) -> Result<UninstallReport, EngineError> {
+    let state = ctx.state_db.get()?;
+    uninstall_remote_with_observer(groups, state, lock, dry_run, observer)
 }
 
 fn create_backup_file(
@@ -992,3 +1349,31 @@ fn resolve_home_for_state(state: &StateDb) -> PathBuf {
         std::env::home_dir().unwrap_or_else(|| PathBuf::from("."))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shorthand_prefix_url_normalization() {
+        let gh = parse_url("gh:user/repo").unwrap();
+        assert_eq!(gh.clone_url, "https://github.com/user/repo.git");
+        assert_eq!(gh.subpath, None);
+
+        let gl = parse_url("gl:user/repo").unwrap();
+        assert_eq!(gl.clone_url, "https://gitlab.com/user/repo.git");
+
+        let cb = parse_url("cb:user/repo").unwrap();
+        assert_eq!(cb.clone_url, "https://codeberg.org/user/repo.git");
+
+        let srht = parse_url("srht:~user/repo").unwrap();
+        assert_eq!(srht.clone_url, "https://git.sr.ht/~user/repo");
+
+        let bb = parse_url("bb:user/repo").unwrap();
+        assert_eq!(bb.clone_url, "https://bitbucket.org/user/repo.git");
+
+        assert!(parse_url("").is_err());
+        assert!(parse_url("invalid:scheme").is_err());
+    }
+}
+

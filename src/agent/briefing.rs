@@ -54,23 +54,35 @@ pub const INIT_AI_HINT: &str = "Run 'dotler ai' for AI context.";
 /// Shared static operational guide embedded in `dotler ai` (`render_briefing`).
 pub const SHARED_OPERATIONAL_GUIDE: &str = r#"## 2. Group Layout & Selection Rules (dotler.toml)
 - Official Documentation: https://msisdev.github.io/dotler/
-- Single Home Path Rule: All dotfile target paths MUST start with `~` or `~/` (e.g. `~/.bashrc`, `~/.config/nvim`). Directory traversal (`..`), backslashes, and shell variables (`$HOME`, `%VAR%`) are strictly prohibited.
-- 3-State Selection Rules (Last-Match-Wins):
-  - `<pattern>`: Include matching files as plaintext.
-  - `<pattern> encrypt`: Include matching files and encrypt using XChaCha20-Poly1305 (`.enc`).
-  - `!<pattern>`: Exclude matching files.
+- Single Home Path Rule: All dotfile target paths MUST start with `~` or `~/` (e.g. `~`, `~/.config/nvim`). Directory traversal (`..`), backslashes, and shell variables (`$HOME`, `%VAR%`) are strictly prohibited.
+- 3-State Selection Rules (Allowlist by Default, Last-Match-Wins):
+  - Unmatched files are ignored by default. Do NOT prepend `!*` when picking specific files, and NEVER use `*` on `~`.
+  - `<pattern>`: Include matching file or directory as plaintext.
+  - `<pattern> encrypt`: Include matching file or directory encrypted with XChaCha20-Poly1305 (`.enc`).
+  - `!<pattern>`: Exclude matching file or directory (used to carve out exceptions after a broader rule like `*` or a directory name).
   - Sequential line-by-line evaluation: rules appearing later override earlier declarations.
-- Manifest Example:
+- Manifest Examples:
 
 ```text
+# Pattern A: Select specific files only (no `*` or `!*` needed)
 [shell]
-files = """
-*
-*.key encrypt
-!*.log
-"""
 os-nux = "~"
 os-mac = "~"
+files = """
+.zshrc
+.gitconfig
+.netrc encrypt
+"""
+
+# Pattern B: Track an entire app directory, then override specific files
+[gh]
+os-nux = "~/.config/gh"
+os-mac = "~/.config/gh"
+files = """
+*
+hosts.yml encrypt
+!*.log
+"""
 ```
 
 ## 3. Standard Operational Guidelines & Command Cheatsheet
@@ -169,6 +181,9 @@ mod tests {
 
         assert!(briefing.contains("## 1. System Overview & Active Device Profile"));
         assert!(briefing.contains("## 2. Group Layout & Selection Rules"));
+        assert!(briefing.contains("Unmatched files are ignored by default"));
+        assert!(briefing.contains("# Pattern A: Select specific files only"));
+        assert!(briefing.contains("# Pattern B: Track an entire app directory"));
         assert!(briefing.contains("## 3. Standard Operational Guidelines & Command Cheatsheet"));
         assert!(briefing.contains("## 4. Security Guardrails & Prohibitions"));
         assert!(briefing.contains("keyring_ready: true"));

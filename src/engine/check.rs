@@ -113,10 +113,15 @@ pub fn run_init(
 # os-win = "~"
 # os-bsd = "~"
 #
+# # Unmatched files are ignored by default.
+# # Syntax per line (Last-Match-Wins):
+# #   <pattern>          -> include as plaintext
+# #   <pattern> encrypt  -> include encrypted (.enc)
+# #   !<pattern>         -> exclude (override a broader include rule)
 # files = """
-# !*
-# .bashrc encrypt
 # .bashrc
+# .bash_profile
+# .netrc encrypt
 # """
 "#
         );

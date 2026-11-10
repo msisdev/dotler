@@ -187,14 +187,14 @@ pub fn confirm_proceed_to<W: Write>(writer: &mut W, title: &str) -> Result<bool,
 
     if let Some(mock_str) = ConfirmPrompt::take_mock_input() {
         let (line_str, _) = prompt.render_input_line();
-        write!(writer, "\n{}\n\n{}\n", prompt.title, line_str)?;
+        write!(writer, "\n{}\n{}\n", prompt.title, line_str)?;
         writer.flush()?;
         return Ok(prompt.evaluate_str(&mock_str));
     }
 
     if let Ok(env_input) = std::env::var("DOTLER_TEST_CONFIRM_INPUT") {
         let (line_str, _) = prompt.render_input_line();
-        write!(writer, "\n{}\n\n{}\n", prompt.title, line_str)?;
+        write!(writer, "\n{}\n{}\n", prompt.title, line_str)?;
         writer.flush()?;
         return Ok(prompt.evaluate_str(&env_input));
     }
@@ -203,7 +203,7 @@ pub fn confirm_proceed_to<W: Write>(writer: &mut W, title: &str) -> Result<bool,
         return Err(ConfirmError::NonTtyError);
     }
 
-    write!(writer, "\n{}\n\n", prompt.title)?;
+    write!(writer, "\n{}\n", prompt.title)?;
     writer.flush()?;
 
     let _guard = RawModeGuard::enter()?;

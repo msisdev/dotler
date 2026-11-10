@@ -222,7 +222,7 @@ files = "*"
     assert!(!cancel_plain.contains("first.lua"));
     assert!(cancel_plain.contains("<Summary>\n▐c▌create 2"));
     assert!(cancel_plain.contains("▐w▌overwrite 0"));
-    assert!(cancel_plain.contains("Do you want to proceed?"));
+    assert!(cancel_plain.contains("Do you want to proceed?\nyes\n"));
     assert!(!sandbox.repo_dir.join("nvim").join("first.lua").exists());
 
     // 2. Partial input ("ye") also cancels with 0 mutations

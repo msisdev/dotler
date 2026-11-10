@@ -168,8 +168,10 @@ fn test_dotler_init_ai_hint_and_no_skill_md() {
     assert!(dotler_toml.is_file(), "dotler.toml must be created");
     let toml_text = fs::read_to_string(&dotler_toml).expect("Failed to read dotler.toml");
     assert!(
-        toml_text.starts_with("# [AI Agent Hint]") && toml_text.contains("dotler ai"),
-        "dotler.toml must start with the AI Agent Hint comment pointing to 'dotler ai'"
+        toml_text.starts_with("# ")
+            && toml_text.contains("AI Hint: Run 'dotler ai'")
+            && toml_text.contains("https://msisdev.github.io/dotler/"),
+        "dotler.toml must start with the ASCII header and AI Hint comment pointing to 'dotler ai'"
     );
 
     // Verify no standalone SKILL.md was generated

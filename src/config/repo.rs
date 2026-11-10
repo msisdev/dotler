@@ -1174,7 +1174,7 @@ impl RepoConfig {
         let body = toml::to_string_pretty(self)
             .map_err(|e| ConfigError::TomlSyntaxError(e.to_string()))?;
         let serialized = format!(
-            "{}\n{}",
+            "{}\n\n{}",
             crate::agent::briefing::DOTLER_TOML_AI_HINT.trim_end(),
             body
         );

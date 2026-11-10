@@ -91,7 +91,7 @@ pub fn run_init(
     let dotler_toml_path = repo_dir.join("dotler.toml");
     if !dotler_toml_path.exists() {
         let initial_toml = format!(
-            "{}\n{}",
+            "{}\n\n{}",
             DOTLER_TOML_AI_HINT.trim_end(),
             r#"# [bash]
 # # Priority 1: Custom device names (configured in ~/.config/dotler/config.toml `default_devices`)

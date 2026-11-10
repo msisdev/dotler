@@ -40,7 +40,13 @@ impl EnvironmentSnapshot {
 pub const OFFICIAL_MANUAL_URL: &str = "https://msisdev.github.io/dotler/";
 
 /// Top-of-file comment banner placed in `dotler.toml` to direct AI coding agents to `dotler ai`.
-pub const DOTLER_TOML_AI_HINT: &str = "# [AI Agent Hint] Run 'dotler ai' for AI context.\n";
+pub const DOTLER_TOML_AI_HINT: &str = r#"#       _       _   _
+#    __| | ___ | |_| | ___ _ __
+#   / _` |/ _ \| __| |/ _ \ '__|   https://msisdev.github.io/dotler/
+#  | (_| | (_) | |_| |  __/ |      AI Hint: Run 'dotler ai'
+#   \__,_|\___/ \__|_|\___|_|
+# ──────────────────────────────────────────────────────────────────
+"#;
 
 /// Onboarding hint returned by `dotler init` (both inline terminal output and `--json` `hint` field).
 pub const INIT_AI_HINT: &str = "Run 'dotler ai' for AI context.";

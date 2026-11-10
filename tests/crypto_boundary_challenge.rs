@@ -2,12 +2,35 @@ use std::fs;
 use std::io::Write;
 use tempfile::tempdir;
 
-use base64::prelude::*;
 use dotler::crypto::{
     EncryptedFile, RecoveryMnemonic, VaultError, VaultKey, VaultSlot, XCHACHA_NONCE_LEN,
     change_password, init_vault, recover_vault,
 };
 use dotler::crypto::{ExposeSecret, SecretString};
+
+fn test_b64_encode(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[((triple >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((triple >> 12) & 0x3f) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[((triple >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(triple & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
 
 // ---------------------------------------------------------------------------
 // Suite 1: Tampering Attacks
@@ -268,7 +291,7 @@ fn test_binary_boundary_truncated_vault_slot() {
             len
         );
 
-        let b64 = BASE64_STANDARD.encode(&bytes);
+        let b64 = test_b64_encode(&bytes);
         let res_b64 = VaultSlot::from_base64(&b64);
         assert!(
             matches!(res_b64, Err(VaultError::InvalidSlotFormat(_))),
@@ -291,7 +314,7 @@ fn test_binary_boundary_oversized_vault_slot() {
             len
         );
 
-        let b64 = BASE64_STANDARD.encode(&bytes);
+        let b64 = test_b64_encode(&bytes);
         let res_b64 = VaultSlot::from_base64(&b64);
         assert!(
             matches!(res_b64, Err(VaultError::InvalidSlotFormat(_))),

@@ -585,14 +585,14 @@ fn matches_pattern(pattern: &str, path: &str) -> bool {
         }
     }
 
-    if let Ok(glob_pattern) = glob::Pattern::new(pattern)
+    if let Ok(glob_pattern) = GlobPattern::new(pattern)
         && glob_pattern.matches(path)
     {
         return true;
     }
 
     if !trimmed_pattern.is_empty()
-        && let Ok(glob_pattern) = glob::Pattern::new(trimmed_pattern)
+        && let Ok(glob_pattern) = GlobPattern::new(trimmed_pattern)
     {
         if glob_pattern.matches(trimmed_path) {
             return true;
@@ -605,6 +605,165 @@ fn matches_pattern(pattern: &str, path: &str) -> bool {
     }
 
     false
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum GlobToken {
+    Char(char),
+    AnyChar,
+    AnySequence,
+    AnyRecursiveSequence,
+    AnyWithin(Vec<CharSpec>),
+    AnyExcept(Vec<CharSpec>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CharSpec {
+    Single(char),
+    Range(char, char),
+}
+
+struct GlobPattern {
+    tokens: Vec<GlobToken>,
+}
+
+impl GlobPattern {
+    fn new(pattern: &str) -> Result<Self, ()> {
+        let chars: Vec<char> = pattern.chars().collect();
+        let mut tokens = Vec::new();
+        let mut i = 0;
+
+        while i < chars.len() {
+            match chars[i] {
+                '?' => {
+                    tokens.push(GlobToken::AnyChar);
+                    i += 1;
+                }
+                '*' => {
+                    let start = i;
+                    while i < chars.len() && chars[i] == '*' {
+                        i += 1;
+                    }
+                    let count = i - start;
+                    if count > 2 {
+                        return Err(());
+                    } else if count == 2 {
+                        if start == 0 || std::path::is_separator(chars[start - 1]) {
+                            if i < chars.len() && std::path::is_separator(chars[i]) {
+                                i += 1;
+                            } else if i != chars.len() {
+                                return Err(());
+                            }
+                        } else {
+                            return Err(());
+                        }
+                        if !matches!(tokens.last(), Some(GlobToken::AnyRecursiveSequence)) {
+                            tokens.push(GlobToken::AnyRecursiveSequence);
+                        }
+                    } else {
+                        tokens.push(GlobToken::AnySequence);
+                    }
+                }
+                '[' => {
+                    if i + 4 <= chars.len() && chars[i + 1] == '!' {
+                        if let Some(j) = chars[i + 3..].iter().position(|&c| c == ']') {
+                            let specs = Self::parse_specs(&chars[i + 2..i + 3 + j]);
+                            tokens.push(GlobToken::AnyExcept(specs));
+                            i += j + 4;
+                            continue;
+                        }
+                    } else if i + 3 <= chars.len()
+                        && chars[i + 1] != '!'
+                        && let Some(j) = chars[i + 2..].iter().position(|&c| c == ']')
+                    {
+                        let specs = Self::parse_specs(&chars[i + 1..i + 2 + j]);
+                        tokens.push(GlobToken::AnyWithin(specs));
+                        i += j + 3;
+                        continue;
+                    }
+                    return Err(());
+                }
+                c => {
+                    tokens.push(GlobToken::Char(c));
+                    i += 1;
+                }
+            }
+        }
+        Ok(Self { tokens })
+    }
+
+    fn parse_specs(s: &[char]) -> Vec<CharSpec> {
+        let mut specs = Vec::new();
+        let mut i = 0;
+        while i < s.len() {
+            if i + 3 <= s.len() && s[i + 1] == '-' {
+                specs.push(CharSpec::Range(s[i], s[i + 2]));
+                i += 3;
+            } else {
+                specs.push(CharSpec::Single(s[i]));
+                i += 1;
+            }
+        }
+        specs
+    }
+
+    fn in_specs(specs: &[CharSpec], c: char) -> bool {
+        specs.iter().any(|&spec| match spec {
+            CharSpec::Single(sc) => c == sc,
+            CharSpec::Range(start, end) => c >= start && c <= end,
+        })
+    }
+
+    fn matches(&self, text: &str) -> bool {
+        self.matches_from(true, text.chars(), 0) == 0
+    }
+
+    // Returns: 0 = Match, 1 = SubPatternDoesntMatch, 2 = EntirePatternDoesntMatch
+    fn matches_from(
+        &self,
+        mut follows_separator: bool,
+        mut file: std::str::Chars<'_>,
+        token_idx: usize,
+    ) -> u8 {
+        for (ti, token) in self.tokens[token_idx..].iter().enumerate() {
+            match token {
+                GlobToken::AnySequence | GlobToken::AnyRecursiveSequence => {
+                    let res = self.matches_from(follows_separator, file.clone(), token_idx + ti + 1);
+                    if res != 1 {
+                        return res;
+                    }
+                    while let Some(c) = file.next() {
+                        follows_separator = std::path::is_separator(c);
+                        if matches!(token, GlobToken::AnyRecursiveSequence) && !follows_separator {
+                            continue;
+                        }
+                        let sub =
+                            self.matches_from(follows_separator, file.clone(), token_idx + ti + 1);
+                        if sub != 1 {
+                            return sub;
+                        }
+                    }
+                }
+                _ => {
+                    let Some(c) = file.next() else {
+                        return 2;
+                    };
+                    let matched = match token {
+                        GlobToken::AnyChar => true,
+                        GlobToken::AnyWithin(specs) => Self::in_specs(specs, c),
+                        GlobToken::AnyExcept(specs) => !Self::in_specs(specs, c),
+                        GlobToken::Char(c2) => c == *c2,
+                        GlobToken::AnySequence | GlobToken::AnyRecursiveSequence => unreachable!(),
+                    };
+                    if !matched {
+                        return 1;
+                    }
+                    follows_separator = std::path::is_separator(c);
+                }
+            }
+        }
+        if file.next().is_none() { 0 } else { 1 }
+    }
 }
 
 pub fn resolve_group_target_path(
@@ -1655,5 +1814,21 @@ files = "lua/"
         // Overridden encrypted directory rule (`secrets encrypt` -> `!secrets/*`) must not require vault
         let overridden_dir_enc = parse_selection_rules("secrets encrypt\n!secrets/*").unwrap();
         assert!(!rules_have_effective_encryption(&overridden_dir_enc));
+    }
+
+    #[test]
+    fn test_glob_pattern_wildcards_ranges_and_invalid_syntax() {
+        assert!(GlobPattern::new("c?t").unwrap().matches("cat"));
+        assert!(!GlobPattern::new("c?t").unwrap().matches("caat"));
+        assert!(GlobPattern::new("k[!e]tteh").unwrap().matches("kitteh"));
+        assert!(!GlobPattern::new("k[!e]tteh").unwrap().matches("ketteh"));
+        assert!(GlobPattern::new("file[0-9].conf").unwrap().matches("file7.conf"));
+        assert!(!GlobPattern::new("file[0-9].conf").unwrap().matches("filea.conf"));
+        assert!(GlobPattern::new("**/init.lua").unwrap().matches("init.lua"));
+        assert!(GlobPattern::new("**/init.lua").unwrap().matches("a/b/init.lua"));
+
+        assert!(GlobPattern::new("***").is_err());
+        assert!(GlobPattern::new("a**b").is_err());
+        assert!(GlobPattern::new("[unclosed").is_err());
     }
 }

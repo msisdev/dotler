@@ -306,17 +306,93 @@ impl VaultSlot {
     }
 
     pub fn to_base64(&self) -> String {
-        use base64::prelude::*;
-        BASE64_STANDARD.encode(self.to_bytes())
+        base64_encode(&self.to_bytes())
     }
 
     pub fn from_base64(s: &str) -> Result<Self, VaultError> {
-        use base64::prelude::*;
-        let bytes = BASE64_STANDARD
-            .decode(s.trim())
-            .map_err(|e| VaultError::InvalidSlotFormat(format!("Base64 decode error: {}", e)))?;
+        let bytes = base64_decode(s.trim())
+            .map_err(|e| VaultError::InvalidSlotFormat(format!("Base64 decode error: {e}")))?;
         Self::from_bytes(&bytes)
     }
+}
+
+const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64_encode(input: &[u8]) -> String {
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+
+        out.push(B64_ALPHABET[((triple >> 18) & 0x3f) as usize] as char);
+        out.push(B64_ALPHABET[((triple >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(B64_ALPHABET[((triple >> 6) & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(B64_ALPHABET[(triple & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn decode_b64_byte(b: u8) -> Result<u8, &'static str> {
+    match b {
+        b'A'..=b'Z' => Ok(b - b'A'),
+        b'a'..=b'z' => Ok(b - b'a' + 26),
+        b'0'..=b'9' => Ok(b - b'0' + 52),
+        b'+' => Ok(62),
+        b'/' => Ok(63),
+        _ => Err("invalid Base64 character"),
+    }
+}
+
+fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
+    let bytes = input.as_bytes();
+    if !bytes.len().is_multiple_of(4) {
+        return Err("invalid Base64 length");
+    }
+    let mut out = Vec::with_capacity((bytes.len() / 4) * 3);
+    let num_chunks = bytes.len() / 4;
+    for (idx, chunk) in bytes.as_chunks::<4>().0.iter().enumerate() {
+        let is_last = idx + 1 == num_chunks;
+        let v0 = decode_b64_byte(chunk[0])? as u32;
+        let v1 = decode_b64_byte(chunk[1])? as u32;
+
+        match (chunk[2], chunk[3]) {
+            (b'=', b'=') if is_last => {
+                if (v1 & 0x0f) != 0 {
+                    return Err("non-canonical Base64 padding bits");
+                }
+                out.push(((v0 << 2) | (v1 >> 4)) as u8);
+            }
+            (c2, b'=') if is_last && c2 != b'=' => {
+                let v2 = decode_b64_byte(c2)? as u32;
+                if (v2 & 0x03) != 0 {
+                    return Err("non-canonical Base64 padding bits");
+                }
+                let triple = (v0 << 18) | (v1 << 12) | (v2 << 6);
+                out.push(((triple >> 16) & 0xff) as u8);
+                out.push(((triple >> 8) & 0xff) as u8);
+            }
+            (c2, c3) if c2 != b'=' && c3 != b'=' => {
+                let v2 = decode_b64_byte(c2)? as u32;
+                let v3 = decode_b64_byte(c3)? as u32;
+                let triple = (v0 << 18) | (v1 << 12) | (v2 << 6) | v3;
+                out.push(((triple >> 16) & 0xff) as u8);
+                out.push(((triple >> 8) & 0xff) as u8);
+                out.push((triple & 0xff) as u8);
+            }
+            _ => return Err("invalid Base64 padding"),
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -630,11 +706,9 @@ mod tests {
 
     #[test]
     fn test_vault_slot_from_base64_invalid_lengths_and_corruptions() {
-        use base64::prelude::*;
-
         // Too short (87 bytes)
         let short_bytes = vec![0u8; 87];
-        let short_b64 = BASE64_STANDARD.encode(&short_bytes);
+        let short_b64 = base64_encode(&short_bytes);
         assert!(matches!(
             VaultSlot::from_base64(&short_b64),
             Err(VaultError::InvalidSlotFormat(_))
@@ -642,7 +716,7 @@ mod tests {
 
         // Too long (89 bytes)
         let long_bytes = vec![0u8; 89];
-        let long_b64 = BASE64_STANDARD.encode(&long_bytes);
+        let long_b64 = base64_encode(&long_bytes);
         assert!(matches!(
             VaultSlot::from_base64(&long_b64),
             Err(VaultError::InvalidSlotFormat(_))
@@ -904,5 +978,27 @@ mod tests {
             vault_key2.decrypt_file(&enc),
             Err(VaultError::VaultIdMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn test_rfc4648_base64_vectors_and_non_canonical_rejection() {
+        let vectors: &[(&[u8], &str)] = &[
+            (b"", ""),
+            (b"f", "Zg=="),
+            (b"fo", "Zm8="),
+            (b"foo", "Zm9v"),
+            (b"foob", "Zm9vYg=="),
+            (b"fooba", "Zm9vYmE="),
+            (b"foobar", "Zm9vYmFy"),
+        ];
+        for &(raw, expected_b64) in vectors {
+            assert_eq!(base64_encode(raw), expected_b64);
+            assert_eq!(base64_decode(expected_b64).unwrap(), raw);
+        }
+
+        // Reject non-canonical padding bits and mid-string '='
+        assert!(base64_decode("Zg=A").is_err());
+        assert!(base64_decode("Zm9=").is_err());
+        assert!(base64_decode("Zg==Zg==").is_err());
     }
 }

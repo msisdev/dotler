@@ -221,19 +221,101 @@ impl OsKeyring {
             });
         }
 
-        match rpassword::prompt_password(prompt) {
-            Ok(line) => {
-                let trimmed = line.trim_end_matches(['\r', '\n']);
-                if trimmed.is_empty() {
-                    Err(KeyringError::PromptCancelled)
-                } else {
-                    Ok(ResolvedPassphrase {
-                        secret: SecretString::new(trimmed.to_string()),
-                        source: PassphraseSource::TerminalPrompt,
-                    })
+        let mut line = read_hidden_passphrase(prompt)?;
+        let trimmed_len = line.trim_end_matches(['\r', '\n']).len();
+        line.truncate(trimmed_len);
+        if line.is_empty() {
+            zeroize::Zeroize::zeroize(&mut line);
+            Err(KeyringError::PromptCancelled)
+        } else {
+            Ok(ResolvedPassphrase {
+                secret: SecretString::new(line),
+                source: PassphraseSource::TerminalPrompt,
+            })
+        }
+    }
+}
+
+fn handle_passphrase_key(
+    buf: &mut String,
+    key: crossterm::event::KeyEvent,
+) -> crate::tui::confirm::PromptAction {
+    use crate::tui::confirm::PromptAction;
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+
+    if key.kind == KeyEventKind::Release {
+        return PromptAction::Continue;
+    }
+
+    if key.code == KeyCode::Esc
+        || (matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d'))
+            && key.modifiers.contains(KeyModifiers::CONTROL))
+    {
+        return PromptAction::Cancel;
+    }
+
+    match key.code {
+        KeyCode::Enter => PromptAction::Submit(!buf.is_empty()),
+        KeyCode::Backspace => {
+            buf.pop();
+            PromptAction::Continue
+        }
+        KeyCode::Char(c) => {
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+            {
+                buf.push(c);
+            }
+            PromptAction::Continue
+        }
+        _ => PromptAction::Continue,
+    }
+}
+
+fn read_hidden_passphrase(prompt: &str) -> Result<String, KeyringError> {
+    use crate::tui::confirm::{PromptAction, RawModeGuard};
+    use crossterm::event::{self, Event};
+    use std::io::{IsTerminal, Write};
+
+    if !std::io::stdin().is_terminal() {
+        return Err(KeyringError::PromptCancelled);
+    }
+
+    let mut stderr = std::io::stderr();
+    stderr
+        .write_all(prompt.as_bytes())
+        .map_err(|_| KeyringError::PromptCancelled)?;
+    stderr.flush().map_err(|_| KeyringError::PromptCancelled)?;
+
+    let _guard = RawModeGuard::enter().map_err(|_| KeyringError::PromptCancelled)?;
+    let mut buf = String::new();
+
+    loop {
+        let ev = match event::read() {
+            Ok(ev) => ev,
+            Err(_) => {
+                zeroize::Zeroize::zeroize(&mut buf);
+                let _ = stderr.write_all(b"\r\n");
+                let _ = stderr.flush();
+                return Err(KeyringError::PromptCancelled);
+            }
+        };
+
+        if let Event::Key(key_event) = ev {
+            match handle_passphrase_key(&mut buf, key_event) {
+                PromptAction::Continue => continue,
+                PromptAction::Submit(_) => {
+                    let _ = stderr.write_all(b"\r\n");
+                    let _ = stderr.flush();
+                    return Ok(buf);
+                }
+                PromptAction::Cancel => {
+                    zeroize::Zeroize::zeroize(&mut buf);
+                    let _ = stderr.write_all(b"\r\n");
+                    let _ = stderr.flush();
+                    return Err(KeyringError::PromptCancelled);
                 }
             }
-            Err(_) => Err(KeyringError::PromptCancelled),
         }
     }
 }
@@ -674,5 +756,43 @@ mod tests {
         OsKeyring::disable_mock();
         let result = OsKeyring::get();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_passphrase_key_event_state_machine() {
+        use crate::tui::confirm::PromptAction;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut buf = String::new();
+        for ch in ['s', 'e', 'c', 'x'] {
+            assert_eq!(
+                handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+                PromptAction::Continue
+            );
+        }
+        assert_eq!(
+            handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            PromptAction::Continue
+        );
+        for ch in ['r', 'e', 't'] {
+            handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        assert_eq!(
+            handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            PromptAction::Submit(true)
+        );
+        assert_eq!(buf, "secret");
+
+        assert_eq!(
+            handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            PromptAction::Cancel
+        );
+        assert_eq!(
+            handle_passphrase_key(
+                &mut buf,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+            ),
+            PromptAction::Cancel
+        );
     }
 }

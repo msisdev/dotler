@@ -1,4 +1,4 @@
-//! Inline badge preview and rounded summary box renderer.
+//! Inline badge preview and single-line summary footer renderer.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -183,8 +183,8 @@ pub fn render_item(item: &PreviewItem) -> String {
     )
 }
 
-/// Formats the rounded summary footer box displaying counts per badge operation.
-pub fn render_footer_box(counts: &PreviewCounts) -> String {
+/// Formats the single-line inline summary footer displaying counts per badge operation.
+pub fn render_footer(counts: &PreviewCounts) -> String {
     let mut styled_parts = vec![
         format!("{}create {}", BadgeOp::Create.render_styled(), counts.create),
         format!(
@@ -194,11 +194,6 @@ pub fn render_footer_box(counts: &PreviewCounts) -> String {
         ),
         format!("{}delete {}", BadgeOp::Delete.render_styled(), counts.delete),
     ];
-    let mut plain_parts = vec![
-        format!("▐c▌create {}", counts.create),
-        format!("▐w▌overwrite {}", counts.overwrite),
-        format!("▐d▌delete {}", counts.delete),
-    ];
 
     if counts.untrack > 0 {
         styled_parts.push(format!(
@@ -206,7 +201,6 @@ pub fn render_footer_box(counts: &PreviewCounts) -> String {
             BadgeOp::Untrack.render_styled(),
             counts.untrack
         ));
-        plain_parts.push(format!("▐u▌untrack {}", counts.untrack));
     }
     if counts.skip > 0 {
         styled_parts.push(format!(
@@ -214,18 +208,11 @@ pub fn render_footer_box(counts: &PreviewCounts) -> String {
             BadgeOp::Skip.render_styled(),
             counts.skip
         ));
-        plain_parts.push(format!("▐s▌skip {}", counts.skip));
     }
 
     styled_parts.push(format!("{}okay {}", BadgeOp::Okay.render_styled(), counts.okay));
-    plain_parts.push(format!("▐o▌okay {}", counts.okay));
 
-    let inner_styled = format!("  {}  ", styled_parts.join("   "));
-    let inner_plain = format!("  {}  ", plain_parts.join("   "));
-    let width = inner_plain.chars().count();
-    let blank = " ".repeat(width);
-
-    format!("╭{blank}╮\n│{inner_styled}│\n╰{blank}╯")
+    styled_parts.join("   ")
 }
 
 /// Formats the entire inline preview and returns the formatted string along with [`PreviewCounts`].
@@ -258,13 +245,13 @@ pub fn format_preview(items: &[PreviewItem], view_all: bool) -> (String, Preview
         out.push('\n');
     }
 
-    out.push_str(&render_footer_box(&counts));
+    out.push_str(&render_footer(&counts));
     out.push('\n');
 
     (out, counts)
 }
 
-/// Writes the inline preview and summary box to the given writer.
+/// Writes the inline preview and summary footer to the given writer.
 pub fn render_preview_to<W: Write>(
     writer: &mut W,
     items: &[PreviewItem],
@@ -276,7 +263,7 @@ pub fn render_preview_to<W: Write>(
     Ok(counts)
 }
 
-/// Writes the inline preview and summary box to standard output.
+/// Writes the inline preview and summary footer to standard output.
 pub fn render_preview(items: &[PreviewItem], view_all: bool) -> io::Result<PreviewCounts> {
     let mut stdout = io::stdout();
     render_preview_to(&mut stdout, items, view_all)
@@ -388,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn create_only_renders_summary_box_without_item_lines() {
+    fn create_only_renders_summary_footer_without_item_lines() {
         let items = vec![PreviewItem {
             group_name: "git".to_string(),
             os_path: PathBuf::from("~/.gitconfig"),
@@ -406,9 +393,11 @@ mod tests {
         assert!(counts.total_updates() > 0);
         assert!(!plain.contains("[git]"));
         assert!(!plain.contains("~/.gitconfig"));
-        assert!(plain.contains("╭"));
-        assert!(plain.contains("▐c▌create 1   ▐w▌overwrite 0   ▐d▌delete 0   ▐o▌okay 0"));
-        assert!(plain.contains("╰"));
+        assert!(!plain.contains("╭"));
+        assert_eq!(
+            plain.trim(),
+            "▐c▌create 1   ▐w▌overwrite 0   ▐d▌delete 0   ▐o▌okay 0"
+        );
     }
 
     #[test]

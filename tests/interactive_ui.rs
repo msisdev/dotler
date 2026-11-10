@@ -171,11 +171,13 @@ files = "*"
     assert!(!plain.contains("new2.sh"), "stdout:\n{plain}");
     assert!(!plain.contains("unchanged.lua"), "stdout:\n{plain}");
 
-    // Rounded summary footer box must report exact counts
+    // Single-line summary footer must report exact counts without box borders
     assert!(plain.contains("▐c▌create 3"), "stdout:\n{plain}");
     assert!(plain.contains("▐w▌overwrite 1"), "stdout:\n{plain}");
     assert!(plain.contains("▐d▌delete 0"), "stdout:\n{plain}");
     assert!(plain.contains("▐o▌okay 1"), "stdout:\n{plain}");
+    assert!(!plain.contains("╭"), "stdout:\n{plain}");
+    assert!(!plain.contains("╰"), "stdout:\n{plain}");
 
     // With -a (--all), all groups and files must be displayed
     let out_all = sandbox
@@ -193,7 +195,7 @@ files = "*"
 }
 
 #[test]
-fn test_create_only_summary_box_and_yes_confirmation_or_cancel() {
+fn test_create_only_summary_footer_and_yes_confirmation_or_cancel() {
     let sandbox = InteractiveSandbox::new();
 
     let nvim_os = sandbox.home_dir.join(".config").join("nvim");

@@ -14,7 +14,7 @@ pub use confirm::{
 };
 pub use preview::{
     ALL_OK_MESSAGE, BadgeOp, ICON_LEFT_BAR, ICON_RIGHT_BAR, PreviewArrow, PreviewCounts,
-    PreviewItem, format_preview, render_footer_box, render_item, render_preview, render_preview_to,
+    PreviewItem, format_preview, render_footer, render_item, render_preview, render_preview_to,
 };
 pub use progress::{
     BAR_EMPTY_CHAR, BAR_FILLED_CHAR, DONE_LABEL, PROGRESS_BAR_WIDTH, ProgressReporter,

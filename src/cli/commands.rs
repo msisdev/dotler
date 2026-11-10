@@ -859,6 +859,48 @@ fn handle_tidy<W: Write>(
     }
 }
 
+fn resolve_vault_init_passphrase<W: Write>(
+    writer: &mut W,
+    use_keyring: bool,
+    password_stdin: bool,
+    is_interactive: bool,
+    json_mode: bool,
+) -> Result<(SecretString, bool), EngineError> {
+    let has_env_pass = std::env::var(crate::crypto::keyring::PASSPHRASE_ENV_VAR)
+        .is_ok_and(|v| !v.trim_end_matches(['\r', '\n']).is_empty());
+
+    if !password_stdin
+        && !has_env_pass
+        && use_keyring
+        && let Ok(Some(existing_secret)) = OsKeyring::get()
+    {
+        if json_mode || (!is_interactive && !ConfirmPrompt::has_mock_or_env_input()) {
+            return Ok((existing_secret, false));
+        }
+
+        let reuse = match confirm_proceed_to(
+            writer,
+            "A passphrase is already stored in the OS keyring. Use existing keyring passphrase?",
+        ) {
+            Ok(val) => val,
+            Err(ConfirmError::NonTtyError) => true,
+            Err(ConfirmError::TerminalIoError(e)) => return Err(EngineError::Io(e)),
+        };
+
+        if reuse {
+            return Ok((existing_secret, false));
+        }
+    }
+
+    let pass = read_new_passphrase(
+        password_stdin,
+        true,
+        is_interactive,
+        "Enter new vault passphrase: ",
+    )?;
+    Ok((pass, true))
+}
+
 fn handle_vault<W: Write>(
     cmd: &VaultCommand,
     cli: &Cli,
@@ -881,11 +923,12 @@ fn handle_vault<W: Write>(
                     hint: "Vault is already initialized in dotler.toml. Use 'dotler vault passwd' to change password.".to_string(),
                 }));
             }
-            let pass = read_new_passphrase(
+            let (pass, should_update_keyring) = resolve_vault_init_passphrase(
+                stdout,
+                local_cfg.use_keyring,
                 args.password_stdin,
-                true,
                 is_interactive,
-                "Enter new vault passphrase: ",
+                cli.json,
             )?;
             let (mut vault_cfg, _vault_key, mnemonic) = init_vault(&pass)?;
             vault_cfg.vault_hint = args
@@ -902,8 +945,11 @@ fn handle_vault<W: Write>(
             let mut repo_cfg_res = get_repo_config(manifest_path);
             repo_cfg_res.set(repo_cfg)?;
 
-            let mut password_res = get_password(local_cfg.use_keyring, None, is_interactive, None);
-            let _ = password_res.set(pass);
+            if should_update_keyring {
+                let mut password_res =
+                    get_password(local_cfg.use_keyring, None, is_interactive, None);
+                let _ = password_res.set(pass);
+            }
 
             let data = VaultInitReport {
                 vault_id,
@@ -1385,6 +1431,43 @@ mod tests {
             OsKeyring::get().unwrap().is_none(),
             "OsKeyring must remain empty when use_keyring = false"
         );
+
+        OsKeyring::clear_mock();
+        OsKeyring::disable_mock();
+    }
+
+    #[test]
+    fn test_resolve_vault_init_passphrase_prompts_to_reuse_existing_keyring() {
+        use crate::crypto::ExposeSecret;
+        let _guard = crate::crypto::keyring::MOCK_KEYRING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        OsKeyring::enable_mock();
+        OsKeyring::clear_mock();
+        unsafe {
+            std::env::remove_var(crate::crypto::keyring::PASSPHRASE_ENV_VAR);
+        }
+
+        let existing = SecretString::new("existing-keyring-pass-111".to_string());
+        OsKeyring::set(&existing).unwrap();
+
+        // Case 1: User approves ('yes') reusing existing keyring passphrase
+        ConfirmPrompt::push_mock_input("yes");
+        let mut out = Vec::new();
+        let (resolved_yes, should_update_yes) =
+            resolve_vault_init_passphrase(&mut out, true, false, true, false).unwrap();
+        assert_eq!(resolved_yes.expose_secret(), "existing-keyring-pass-111");
+        assert!(!should_update_yes);
+
+        // Case 2: User declines ('no') and enters a new passphrase
+        ConfirmPrompt::push_mock_input("no");
+        OsKeyring::push_mock_prompt_reply("brand-new-pass-222");
+        let mut out2 = Vec::new();
+        let (resolved_no, should_update_no) =
+            resolve_vault_init_passphrase(&mut out2, true, false, true, false).unwrap();
+        assert_eq!(resolved_no.expose_secret(), "brand-new-pass-222");
+        assert!(should_update_no);
 
         OsKeyring::clear_mock();
         OsKeyring::disable_mock();

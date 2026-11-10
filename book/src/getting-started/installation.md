@@ -1,5 +1,27 @@
 # Installation
 
+## Quick Install (One-Liner)
+
+Automatically detects your OS and CPU architecture, downloads the latest prebuilt release binary from GitHub Releases, verifies its SHA-256 checksum, and installs `dotler` to `~/.local/bin`:
+
+**Linux / macOS**:
+
+```sh
+curl -fsSL https://msisdev.github.io/dotler/install.sh | sh
+```
+
+**Windows (PowerShell)**:
+
+```powershell
+irm https://msisdev.github.io/dotler/install.ps1 | iex
+```
+
+Optional environment variables for `install.sh` / `install.ps1`:
+
+- `DOTLER_INSTALL_DIR`: Custom installation directory (default: `~/.local/bin`)
+- `DOTLER_VERSION`: Specific release tag to install, e.g., `v0.1.0` (default: `latest`)
+- `DOTLER_LIBC`: Linux C library variant, `musl` (default, static) or `gnu`
+
 ## Install with Cargo
 
 Requires Rust `1.89+` and `git`:

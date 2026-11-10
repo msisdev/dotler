@@ -11,6 +11,26 @@
 
 Read **[The Dotler Book (https://msisdev.github.io/dotler/)](https://msisdev.github.io/dotler/)** for the user guide, configuration reference, and command manual.
 
+## Installation
+
+**Linux / macOS**:
+
+```sh
+curl -fsSL https://msisdev.github.io/dotler/install.sh | sh
+```
+
+**Windows (PowerShell)**:
+
+```powershell
+irm https://msisdev.github.io/dotler/install.ps1 | iex
+```
+
+**Cargo (from source)**:
+
+```sh
+cargo install dotler
+```
+
 ## Quick Overview
 
 ```sh

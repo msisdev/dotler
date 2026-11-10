@@ -253,6 +253,20 @@ jobs:
               echo ""
             fi
             cat << 'EOF'
+          ### Quick Install (One-Liner)
+
+          **Linux / macOS**:
+
+          ```sh
+          curl -fsSL https://msisdev.github.io/dotler/install.sh | sh
+          ```
+
+          **Windows (PowerShell)**:
+
+          ```powershell
+          irm https://msisdev.github.io/dotler/install.ps1 | iex
+          ```
+
           ### Prebuilt Binary Download Guide
 
           | OS | Architecture | C Library / Linkage | Archive File |
@@ -294,6 +308,8 @@ jobs:
             artifacts/*.zip
             artifacts/*.sha256
             artifacts/SHA256SUMS.txt
+            book/src/install.sh
+            book/src/install.ps1
           body_path: RELEASE_NOTES.md
           generate_release_notes: false
           fail_on_unmatched_files: true

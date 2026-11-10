@@ -1,38 +1,34 @@
-# dotler
+<h1 align="center">dotler</h1>
 
 > **Warning: Experimental / Pre-Release**
 > `dotler` is currently under active experimentation and has **not** been officially released yet. Commands, configuration formats, and behavior may change without notice.
 
-**Official Documentation & Manual**: **[https://msisdev.github.io/dotler/](https://msisdev.github.io/dotler/)**
+`dotler` is a dotfile manager with...
+- selective encryption
+- git sharing
+- built-in AI/MCP tooling
 
-`dotler` is a dotfile manager with selective encryption, Git sharing, and built-in AI/MCP tooling.
-
-## Documentation
-
-Read **[The Dotler Book (https://msisdev.github.io/dotler/)](https://msisdev.github.io/dotler/)** for the user guide, configuration reference, and command manual.
+Official documentation & manual: [https://msisdev.github.io/dotler/](https://msisdev.github.io/dotler/)
 
 ## Installation
 
-**Linux / macOS**:
+### With Script
+Linux / macOS
 
 ```sh
 curl -fsSL https://msisdev.github.io/dotler/install.sh | sh
 ```
 
-**Windows (PowerShell)**:
+Windows (PowerShell)
 
 ```powershell
 irm https://msisdev.github.io/dotler/install.ps1 | iex
 ```
 
-**Cargo**:
-
+### With Cargo
 ```sh
-# Install from crates.io
+# Build latest version
 cargo install dotler
-
-# Or install prebuilt binary via cargo-binstall
-cargo binstall dotler
 
 # Or build latest main branch from GitHub
 cargo install --git https://github.com/msisdev/dotler --locked

@@ -7,7 +7,7 @@ use crossterm::style::{Attribute, Color, ResetColor, SetAttribute, SetBackground
 
 pub const ICON_LEFT_BAR: &str = "▐";
 pub const ICON_RIGHT_BAR: &str = "▌";
-pub const SUMMARY_HEADER: &str = "Summary";
+pub const SUMMARY_HEADER: &str = "<Summary>";
 pub const ALL_OK_MESSAGE: &str = "☀️ All files are ok.";
 
 /// Three-column (`▐x▌`) status badge attached to an OS or repository path.
@@ -172,10 +172,10 @@ impl PreviewCounts {
     }
 }
 
-/// Formats a single [`PreviewItem`] as two indented lines (OS path on line 1, Repo path on line 2).
+/// Formats a single [`PreviewItem`] as two flush-left lines (OS path on line 1, Repo path on line 2).
 pub fn render_item(item: &PreviewItem) -> String {
     format!(
-        "  {} {}\n  {}{} {}",
+        "{} {}\n{}{} {}",
         item.os_op.render_styled(),
         item.os_path.display(),
         item.arrow.as_str(),
@@ -184,7 +184,7 @@ pub fn render_item(item: &PreviewItem) -> String {
     )
 }
 
-/// Formats the inline summary footer section (`Summary` header and 2-space indented badge counts).
+/// Formats the inline summary footer section (`<Summary>` header and flush-left badge counts).
 pub fn render_footer(counts: &PreviewCounts) -> String {
     let mut styled_parts = vec![
         format!("{}create {}", BadgeOp::Create.render_styled(), counts.create),
@@ -213,7 +213,7 @@ pub fn render_footer(counts: &PreviewCounts) -> String {
 
     styled_parts.push(format!("{}okay {}", BadgeOp::Okay.render_styled(), counts.okay));
 
-    format!("{SUMMARY_HEADER}\n  {}", styled_parts.join("   "))
+    format!("{SUMMARY_HEADER}\n{}", styled_parts.join("   "))
 }
 
 /// Formats the entire inline preview and returns the formatted string along with [`PreviewCounts`].
@@ -327,9 +327,9 @@ mod tests {
         let plain = strip_ansi(&raw);
 
         assert_eq!(counts.overwrite, 3);
-        assert!(plain.contains("[nvim]\n  ▐o▌ ~/.config/nvim/init.lua\n  ───▸ ▐w▌ ~/dotfiles/nvim/init.lua"));
-        assert!(plain.contains("[bash]\n  ▐o▌ ~/.bashrc\n  ──🔒 ▐w▌ ~/dotfiles/bash/.bashrc.enc"));
-        assert!(plain.contains("[zsh]\n  ▐w▌ ~/.zshrc\n  🔑── ▐o▌ ~/dotfiles/zsh/.zshrc.enc"));
+        assert!(plain.contains("[nvim]\n▐o▌ ~/.config/nvim/init.lua\n───▸ ▐w▌ ~/dotfiles/nvim/init.lua"));
+        assert!(plain.contains("[bash]\n▐o▌ ~/.bashrc\n──🔒 ▐w▌ ~/dotfiles/bash/.bashrc.enc"));
+        assert!(plain.contains("[zsh]\n▐w▌ ~/.zshrc\n🔑── ▐o▌ ~/dotfiles/zsh/.zshrc.enc"));
     }
 
     #[test]
@@ -372,7 +372,7 @@ mod tests {
         assert!(!plain.contains("[git]"), "Create-only group must be omitted when view_all = false");
         assert!(!plain.contains("[tmux]"), "Okay-only group must be omitted when view_all = false");
         assert!(plain.contains("[nvim]"), "Overwrite group must be shown");
-        assert!(plain.contains("Summary\n  ▐c▌create 1   ▐w▌overwrite 1   ▐d▌delete 0   ▐o▌okay 1"));
+        assert!(plain.contains("<Summary>\n▐c▌create 1   ▐w▌overwrite 1   ▐d▌delete 0   ▐o▌okay 1"));
     }
 
     #[test]
@@ -397,7 +397,7 @@ mod tests {
         assert!(!plain.contains("╭"));
         assert_eq!(
             plain.trim_end(),
-            "Summary\n  ▐c▌create 1   ▐w▌overwrite 0   ▐d▌delete 0   ▐o▌okay 0"
+            "<Summary>\n▐c▌create 1   ▐w▌overwrite 0   ▐d▌delete 0   ▐o▌okay 0"
         );
     }
 

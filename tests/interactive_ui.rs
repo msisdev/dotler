@@ -171,9 +171,9 @@ files = "*"
     assert!(!plain.contains("new2.sh"), "stdout:\n{plain}");
     assert!(!plain.contains("unchanged.lua"), "stdout:\n{plain}");
 
-    // Summary footer section must include the Summary header and 2-space indented counts
+    // Summary footer section must include the <Summary> header and flush-left counts
     assert!(
-        plain.contains("Summary\n  ▐c▌create 3   ▐w▌overwrite 1   ▐d▌delete 0   ▐o▌okay 1"),
+        plain.contains("<Summary>\n▐c▌create 3   ▐w▌overwrite 1   ▐d▌delete 0   ▐o▌okay 1"),
         "stdout:\n{plain}"
     );
     assert!(!plain.contains("╭"), "stdout:\n{plain}");
@@ -220,7 +220,7 @@ files = "*"
     let cancel_plain = strip_ansi(&String::from_utf8_lossy(&cancel_out.stdout));
     assert!(!cancel_plain.contains("[nvim]"), "stdout:\n{cancel_plain}");
     assert!(!cancel_plain.contains("first.lua"));
-    assert!(cancel_plain.contains("Summary\n  ▐c▌create 2"));
+    assert!(cancel_plain.contains("<Summary>\n▐c▌create 2"));
     assert!(cancel_plain.contains("▐w▌overwrite 0"));
     assert!(cancel_plain.contains("Do you want to proceed?"));
     assert!(!sandbox.repo_dir.join("nvim").join("first.lua").exists());

@@ -272,9 +272,15 @@ fn handle_passphrase_key(
     }
 }
 
+fn render_masked_passphrase_line(prompt: &str, buf: &str) -> String {
+    let mask: String = std::iter::repeat_n('*', buf.chars().count()).collect();
+    format!("{prompt}{mask}")
+}
+
 fn read_hidden_passphrase(prompt: &str) -> Result<String, KeyringError> {
     use crate::tui::confirm::{PromptAction, RawModeGuard};
     use crossterm::event::{self, Event};
+    use crossterm::terminal::{Clear, ClearType};
     use std::io::{IsTerminal, Write};
 
     if !std::io::stdin().is_terminal() {
@@ -282,15 +288,15 @@ fn read_hidden_passphrase(prompt: &str) -> Result<String, KeyringError> {
     }
 
     let mut stderr = std::io::stderr();
-    stderr
-        .write_all(prompt.as_bytes())
-        .map_err(|_| KeyringError::PromptCancelled)?;
-    stderr.flush().map_err(|_| KeyringError::PromptCancelled)?;
-
     let _guard = RawModeGuard::enter().map_err(|_| KeyringError::PromptCancelled)?;
     let mut buf = zeroize::Zeroizing::new(String::new());
 
     loop {
+        let masked_line = render_masked_passphrase_line(prompt, &buf);
+        write!(stderr, "\r{}{}", Clear(ClearType::CurrentLine), masked_line)
+            .map_err(|_| KeyringError::PromptCancelled)?;
+        stderr.flush().map_err(|_| KeyringError::PromptCancelled)?;
+
         let ev = match event::read() {
             Ok(ev) => ev,
             Err(_) => {
@@ -811,6 +817,10 @@ mod tests {
             PromptAction::Submit(true)
         );
         assert_eq!(buf, "secret");
+        assert_eq!(
+            render_masked_passphrase_line("Enter dotler vault passphrase: ", &buf),
+            "Enter dotler vault passphrase: ******"
+        );
 
         for cancel_event in [
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),

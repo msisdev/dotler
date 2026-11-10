@@ -74,8 +74,8 @@ impl ProgressReporter {
         s.chars().map(char_display_width).sum()
     }
 
-    /// Formats the two-line progress output for the current file, truncating the relative path
-    /// to `.../<filename>` if it would exceed `term_cols`.
+    /// Formats the two-line progress output for the current file, truncating both lines
+    /// so neither exceeds `term_cols` or wraps onto an extra physical terminal row.
     pub fn format_two_lines(
         &self,
         group_name: &str,
@@ -85,21 +85,51 @@ impl ProgressReporter {
         term_cols: usize,
     ) -> (String, String) {
         let bar = self.format_bar(self.current);
+        let count_plain = format!("{}/{}", self.current, self.total);
         let count_str = format!(
-            "{}{}/{}{}",
+            "{}{count_plain}{}",
             SetAttribute(Attribute::Bold),
-            self.current,
-            self.total,
             SetAttribute(Attribute::Reset),
         );
-        let group_str = format!(
-            "{}[{}]{} {}",
-            SetForegroundColor(Color::AnsiValue(12)),
-            group_name,
-            ResetColor,
-            group_base.display(),
-        );
-        let line1 = format!("{bar}  {count_str}  {group_str}");
+        let base_short = shorten_home_path(group_base);
+        let prefix_cols = self.width + 2 + Self::display_width(&count_plain) + 2;
+        let group_bracket = format!("[{group_name}]");
+        let group_cols = Self::display_width(&group_bracket);
+
+        let line1 = if term_cols == 0
+            || prefix_cols + group_cols + 1 + Self::display_width(&base_short) <= term_cols
+        {
+            format!(
+                "{bar}  {count_str}  {}{group_bracket}{} {base_short}",
+                SetForegroundColor(Color::AnsiValue(12)),
+                ResetColor,
+            )
+        } else if prefix_cols + group_cols + 1 < term_cols {
+            let avail = term_cols - (prefix_cols + group_cols + 1);
+            if avail >= 4 {
+                let clipped_base = truncate_to_columns(&base_short, avail);
+                format!(
+                    "{bar}  {count_str}  {}{group_bracket}{} {clipped_base}",
+                    SetForegroundColor(Color::AnsiValue(12)),
+                    ResetColor,
+                )
+            } else {
+                format!(
+                    "{bar}  {count_str}  {}{group_bracket}{}",
+                    SetForegroundColor(Color::AnsiValue(12)),
+                    ResetColor,
+                )
+            }
+        } else if prefix_cols < term_cols {
+            let clipped_group = truncate_to_columns(&group_bracket, term_cols - prefix_cols);
+            format!(
+                "{bar}  {count_str}  {}{clipped_group}{}",
+                SetForegroundColor(Color::AnsiValue(12)),
+                ResetColor,
+            )
+        } else {
+            format!("{bar}  {count_str}")
+        };
 
         let mut size_suffix = bytes
             .map(|b| format!(" ({})", Self::format_bytes(b)))
@@ -242,6 +272,18 @@ impl ProgressReporter {
     }
 }
 
+fn shorten_home_path(path: &Path) -> String {
+    if let Some(home) = std::env::home_dir()
+        && let Ok(rel) = path.strip_prefix(&home)
+    {
+        if rel.as_os_str().is_empty() {
+            return "~".to_string();
+        }
+        return format!("~/{}", rel.display());
+    }
+    path.display().to_string()
+}
+
 fn char_display_width(c: char) -> usize {
     let u = c as u32;
     if c.is_control() || (0x0300..=0x036F).contains(&u) || (0xFE00..=0xFE0F).contains(&u) {
@@ -339,15 +381,29 @@ mod tests {
         assert_eq!(p2, "  lua/plugins/telescope.lua (4.2 KB)");
         assert!(!p1.contains('%'), "percentage must not be displayed");
 
-        // Narrow terminal column limit triggers .../<filename> fallback
-        let (_, narrow_line2) = rep.format_two_lines(
+        // Narrow terminal column limit triggers .../<filename> fallback on line2
+        // and truncates line1 so neither line ever wraps onto an extra row.
+        let (narrow_line1, _) = rep.format_two_lines(
             "nvim",
-            Path::new("~/.config/nvim"),
+            Path::new("/home/hexed/.config/nvim"),
+            "lua/plugins/deeply/nested/dir/telescope.lua",
+            Some(4300),
+            54,
+        );
+        let p1_narrow = strip_ansi(&narrow_line1);
+        assert!(ProgressReporter::display_width(&p1_narrow) <= 54);
+        assert!(p1_narrow.ends_with(".config/nvim"));
+
+        let (very_narrow_line1, narrow_line2) = rep.format_two_lines(
+            "nvim",
+            Path::new("/home/hexed/.config/nvim"),
             "lua/plugins/deeply/nested/dir/telescope.lua",
             Some(4300),
             30,
         );
+        let p1_very_narrow = strip_ansi(&very_narrow_line1);
         let p2_narrow = strip_ansi(&narrow_line2);
+        assert!(ProgressReporter::display_width(&p1_very_narrow) <= 30);
         assert_eq!(p2_narrow, "  .../telescope.lua (4.2 KB)");
     }
 

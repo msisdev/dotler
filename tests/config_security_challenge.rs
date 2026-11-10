@@ -79,13 +79,12 @@ default_repo = "main"
 #[test]
 fn test_vault_config_deny_unknown_fields() {
     let content = r#"
-[vault]
 vault_id = "0123456789abcdef"
 password_slot = "cGFzc3dvcmQ="
 recovery_slot = "cmVjb3Zlcnk="
 encrpyt_algorithm = "argon2id"
 "#;
-    let err = RepoConfig::parse(content).expect_err("unknown field in vault must fail");
+    let err = RepoConfig::parse(content).expect_err("unknown root field must fail");
     assert!(matches!(
         err,
         ConfigError::UnknownField { .. } | ConfigError::TomlSyntaxError(_)
@@ -111,13 +110,22 @@ os-archlinux = "~/.zshrc"
 }
 
 #[test]
-fn test_repo_config_rejects_vault_used_as_group_name() {
-    let content = r#"
+fn test_repo_config_allows_vault_as_group_name_and_rejects_reserved_root_key_group() {
+    let valid_vault_group = r#"
 [vault]
 files = "secret"
 os-nux = "~/.secret"
 "#;
-    let err = RepoConfig::parse(content).expect_err("vault cannot be used as a group name");
+    let cfg = RepoConfig::parse(valid_vault_group).expect("[vault] can be used as a group name");
+    assert!(cfg.groups.contains_key("vault"));
+
+    let reserved_root_key_group = r#"
+[vault_id]
+files = "secret"
+os-nux = "~/.secret"
+"#;
+    let err = RepoConfig::parse(reserved_root_key_group)
+        .expect_err("reserved root vault key cannot be used as a group name");
     assert!(
         matches!(
             err,
@@ -612,7 +620,6 @@ fn test_empirical_path_traversal_and_malicious_patterns_with_prefixes() {
     for (malicious_rule, expected_exit) in malicious_cases {
         let manifest = format!(
             r#"
-[vault]
 vault_id = "0123456789abcdef"
 password_slot = "cGFzc3dvcmQ="
 recovery_slot = "cmVjb3Zlcnk="

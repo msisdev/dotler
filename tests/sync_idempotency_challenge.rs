@@ -219,7 +219,6 @@ fn test_import_reencryption_skipping_guarantees_byte_exact_repo_ciphertext() {
 
     let toml_str = format!(
         r#"
-[vault]
 vault_id = "{}"
 password_slot = "{}"
 recovery_slot = "{}"
@@ -313,7 +312,6 @@ fn test_import_reencryption_skipping_db_hash_bypass_avoids_repo_decryption() {
 
     let toml_str = format!(
         r#"
-[vault]
 vault_id = "{}"
 password_slot = "{}"
 recovery_slot = "{}"
@@ -843,7 +841,6 @@ fn test_zero_length_file_sync_and_encryption_lifecycle() {
 
     let toml_str = format!(
         r#"
-[vault]
 vault_id = "{}"
 password_slot = "{}"
 recovery_slot = "{}"

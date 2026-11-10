@@ -120,7 +120,7 @@ pub fn unlock_vault_if_needed(
     }
 
     let prompt_msg = match vault_cfg
-        .hint
+        .vault_hint
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -241,7 +241,7 @@ pub fn rotate_vault_passphrases(
             Ok(mut new_cfg) => {
                 if let Some(h) = new_hint {
                     let trimmed = h.trim();
-                    new_cfg.hint = if trimmed.is_empty() {
+                    new_cfg.vault_hint = if trimmed.is_empty() {
                         None
                     } else {
                         Some(trimmed.to_string())
@@ -350,7 +350,7 @@ pub fn resolve_old_passphrase_for_vaults(
 
     let first_hint = vault_targets
         .iter()
-        .filter_map(|(_, _, vcfg)| vcfg.hint.as_deref())
+        .filter_map(|(_, _, vcfg)| vcfg.vault_hint.as_deref())
         .map(str::trim)
         .find(|s| !s.is_empty());
     let prompt_msg = match first_hint {

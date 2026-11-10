@@ -903,8 +903,17 @@ fn test_e2e_vault_hint_and_use_keyring_optout() {
 
     let dotler_toml = fs::read_to_string(sandbox.repo_dir.join("dotler.toml")).unwrap();
     assert!(
-        dotler_toml.contains("hint = \"first pet name\""),
-        "dotler.toml should contain initial hint: {dotler_toml}"
+        dotler_toml.contains("vault_hint = \"first pet name\""),
+        "dotler.toml should contain initial vault_hint: {dotler_toml}"
+    );
+    let banner_end = dotler_toml
+        .find("# ──────────────────────────────────────────────────────────────────")
+        .unwrap();
+    let vault_id_pos = dotler_toml.find("vault_id = ").unwrap();
+    let bash_comment_pos = dotler_toml.find("# [bash]").unwrap();
+    assert!(
+        banner_end < vault_id_pos && vault_id_pos < bash_comment_pos,
+        "vault root keys must be inserted right below header comment banner and above group comments: {dotler_toml}"
     );
 
     // 3. Rotate passphrase with `--hint` updated
@@ -933,8 +942,8 @@ fn test_e2e_vault_hint_and_use_keyring_optout() {
     let dotler_toml_after_passwd =
         fs::read_to_string(sandbox.repo_dir.join("dotler.toml")).unwrap();
     assert!(
-        dotler_toml_after_passwd.contains("hint = \"second pet name\""),
-        "dotler.toml should contain updated hint: {dotler_toml_after_passwd}"
+        dotler_toml_after_passwd.contains("vault_hint = \"second pet name\""),
+        "dotler.toml should contain updated vault_hint: {dotler_toml_after_passwd}"
     );
 
     // 4. Recover vault with `--hint` updated
@@ -964,8 +973,8 @@ fn test_e2e_vault_hint_and_use_keyring_optout() {
     let dotler_toml_after_recover =
         fs::read_to_string(sandbox.repo_dir.join("dotler.toml")).unwrap();
     assert!(
-        dotler_toml_after_recover.contains("hint = \"recovered hint\""),
-        "dotler.toml should contain recovered hint: {dotler_toml_after_recover}"
+        dotler_toml_after_recover.contains("vault_hint = \"recovered hint\""),
+        "dotler.toml should contain recovered vault_hint: {dotler_toml_after_recover}"
     );
 
     // Ensure local config still has use_keyring = false

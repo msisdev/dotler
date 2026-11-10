@@ -358,7 +358,6 @@ fn test_clone_repo_rekeying_across_different_vaults() {
 
     let remote_toml = format!(
         r#"
-[vault]
 vault_id = "{}"
 password_slot = "{}"
 recovery_slot = "{}"

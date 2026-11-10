@@ -481,7 +481,7 @@ mod tests {
         // Plain file in repo when rule requires encrypt
         fs::write(repo_dir.join("sec/secret.txt"), b"top-secret").unwrap();
         let toml = format!(
-            "[sec]\nos-nux = \"~\"\nos-mac = \"~\"\nfiles = \"secret.txt encrypt\"\n\n[vault]\nvault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n",
+            "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[sec]\nos-nux = \"~\"\nos-mac = \"~\"\nfiles = \"secret.txt encrypt\"\n",
             vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
         );
         let repo_cfg = RepoConfig::parse(&toml).unwrap();

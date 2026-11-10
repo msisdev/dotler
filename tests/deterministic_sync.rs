@@ -430,7 +430,6 @@ fn test_plan_detects_encryption_mismatch() {
     let (vault_cfg, vault_key) = sandbox.create_vault("correct-passphrase-1234");
     let toml = format!(
         r#"
-[vault]
 vault_id = "{}"
 password_slot = "{}"
 recovery_slot = "{}"
@@ -668,7 +667,6 @@ fn test_export_decrypts_encrypted_file_to_os() {
     let (vault_cfg, vault_key) = sandbox.create_vault("passphrase-for-export");
     let toml = format!(
         r#"
-[vault]
 vault_id = "{}"
 password_slot = "{}"
 recovery_slot = "{}"
@@ -770,7 +768,6 @@ fn test_import_plaintext_hash_match_skips_reencryption() {
     let (vault_cfg, vault_key) = sandbox.create_vault("passphrase-import-skip");
     let toml = format!(
         r#"
-[vault]
 vault_id = "{}"
 password_slot = "{}"
 recovery_slot = "{}"
@@ -813,7 +810,6 @@ fn test_import_reencrypts_when_plaintext_modified() {
     let (vault_cfg, vault_key) = sandbox.create_vault("passphrase-reencrypt");
     let toml = format!(
         r#"
-[vault]
 vault_id = "{}"
 password_slot = "{}"
 recovery_slot = "{}"
@@ -893,7 +889,6 @@ fn test_tidy_converts_plaintext_to_encrypted_in_place() {
     let (vault_cfg, vault_key) = sandbox.create_vault("tidy-key");
     let toml = format!(
         r#"
-[vault]
 vault_id = "{}"
 password_slot = "{}"
 recovery_slot = "{}"
@@ -930,7 +925,6 @@ fn test_tidy_converts_encrypted_to_plaintext_in_place() {
     let (vault_cfg, vault_key) = sandbox.create_vault("tidy-decrypt");
     let toml = format!(
         r#"
-[vault]
 vault_id = "{}"
 password_slot = "{}"
 recovery_slot = "{}"

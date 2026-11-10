@@ -21,11 +21,16 @@ pub const RECOGNIZED_OS_KEYS: &[&str] = &[
     "os-bsd",
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub const ROOT_VAULT_KEYS: &[&str] = &[
+    "vault_id",
+    "password_slot",
+    "recovery_slot",
+    "vault_hint",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RepoConfig {
-    #[serde(default)]
     pub vault: Option<VaultConfig>,
-    #[serde(flatten)]
     pub groups: BTreeMap<String, GroupConfig>,
 }
 
@@ -36,7 +41,91 @@ pub struct VaultConfig {
     pub password_slot: String,
     pub recovery_slot: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hint: Option<String>,
+    pub vault_hint: Option<String>,
+}
+
+impl Serialize for RepoConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+        let vault_field_count = match &self.vault {
+            Some(v) => {
+                if v.vault_hint.is_some() {
+                    4
+                } else {
+                    3
+                }
+            }
+            None => 0,
+        };
+        let mut map = serializer.serialize_map(Some(vault_field_count + self.groups.len()))?;
+        if let Some(ref v) = self.vault {
+            map.serialize_entry("vault_id", &v.vault_id)?;
+            map.serialize_entry("password_slot", &v.password_slot)?;
+            map.serialize_entry("recovery_slot", &v.recovery_slot)?;
+            if let Some(ref h) = v.vault_hint {
+                map.serialize_entry("vault_hint", h)?;
+            }
+        }
+        for (group_name, group_cfg) in &self.groups {
+            map.serialize_entry(group_name, group_cfg)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for RepoConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut table = toml::Table::deserialize(deserializer)?;
+
+        let has_any_vault_key = ROOT_VAULT_KEYS.iter().any(|k| {
+            table
+                .get(*k)
+                .is_some_and(|v| !matches!(v, toml::Value::Table(_)))
+        });
+
+        let vault = if has_any_vault_key {
+            let mut vault_table = toml::Table::new();
+            for &k in ROOT_VAULT_KEYS {
+                if let Some(v) = table.remove(k) {
+                    vault_table.insert(k.to_string(), v);
+                }
+            }
+            let cfg = VaultConfig::deserialize(toml::Value::Table(vault_table))
+                .map_err(serde::de::Error::custom)?;
+            Some(cfg)
+        } else {
+            None
+        };
+
+        let mut groups = BTreeMap::new();
+        for (key, value) in table {
+            if ROOT_VAULT_KEYS.contains(&key.as_str()) {
+                return Err(serde::de::Error::custom(format!(
+                    "'{key}' is a reserved root vault key and cannot be used as a group section"
+                )));
+            }
+            match value {
+                toml::Value::Table(group_table) => {
+                    let group = GroupConfig::deserialize(toml::Value::Table(group_table))
+                        .map_err(serde::de::Error::custom)?;
+                    groups.insert(key, group);
+                }
+                _ => {
+                    return Err(serde::de::Error::custom(format!(
+                        "unknown field `{key}`, expected `vault_id`, `password_slot`, `recovery_slot`, `vault_hint`, or a `[<group>]` section"
+                    )));
+                }
+            }
+        }
+
+        Ok(RepoConfig { vault, groups })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -793,7 +882,7 @@ impl RepoConfig {
                 ConfigError::UnknownField {
                     field: msg.clone(),
                     hint:
-                        "Check dotler.toml for unexpected fields in [vault] or group definitions."
+                        "Check dotler.toml for unexpected root keys or group fields."
                             .to_string(),
                 }
             } else {
@@ -830,7 +919,7 @@ impl RepoConfig {
                 ConfigError::UnknownField {
                     field: msg.clone(),
                     hint:
-                        "Check dotler.toml for unexpected fields in [vault] or group definitions."
+                        "Check dotler.toml for unexpected root keys or group fields."
                             .to_string(),
                 }
             } else {
@@ -849,10 +938,12 @@ impl RepoConfig {
         let mut has_encrypted_rules = false;
 
         for (group_name, group) in &self.groups {
-            if group_name == "vault" {
+            if ROOT_VAULT_KEYS.contains(&group_name.as_str()) {
                 return Err(ConfigError::InvalidDeviceName {
                     device: group_name.clone(),
-                    reason: "'vault' is a reserved section name and cannot be a group".to_string(),
+                    reason: format!(
+                        "'{group_name}' is a reserved root vault key and cannot be a group"
+                    ),
                 });
             }
 
@@ -1152,15 +1243,7 @@ impl RepoConfig {
                         });
                 }
                 (None, Some(new_v)) => {
-                    let mut manifest_str = existing_str;
-                    manifest_str.push_str(&format!(
-                        "\n[vault]\nvault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n",
-                        new_v.vault_id, new_v.password_slot, new_v.recovery_slot
-                    ));
-                    if let Some(ref h) = new_v.hint {
-                        let escaped = toml::Value::String(h.clone()).to_string();
-                        manifest_str.push_str(&format!("hint = {escaped}\n"));
-                    }
+                    let manifest_str = insert_vault_root_keys(&existing_str, new_v);
                     return crate::config::state::write_file_safe(path, manifest_str.as_bytes())
                         .map_err(|e| match e {
                             crate::config::StateError::Io(io) => ConfigError::IoError(io),
@@ -1185,6 +1268,48 @@ impl RepoConfig {
     }
 }
 
+pub fn format_vault_root_keys(vault: &VaultConfig) -> String {
+    let mut out = format!(
+        "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n",
+        vault.vault_id, vault.password_slot, vault.recovery_slot
+    );
+    if let Some(ref h) = vault.vault_hint {
+        let escaped = toml::Value::String(h.clone()).to_string();
+        out.push_str(&format!("vault_hint = {escaped}\n"));
+    }
+    out
+}
+
+pub fn insert_vault_root_keys(existing_str: &str, new_v: &VaultConfig) -> String {
+    let vault_block = format_vault_root_keys(new_v);
+    let mut header_end_byte = 0;
+    let mut saw_comment = false;
+
+    for line in existing_str.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if !saw_comment && trimmed.is_empty() {
+            header_end_byte += line.len();
+            continue;
+        }
+        if trimmed.starts_with('#') {
+            saw_comment = true;
+            header_end_byte += line.len();
+        } else {
+            break;
+        }
+    }
+
+    let header = existing_str[..header_end_byte].trim_end();
+    let rest = existing_str[header_end_byte..].trim_start_matches(['\r', '\n']);
+
+    match (!header.is_empty(), !rest.is_empty()) {
+        (true, true) => format!("{header}\n\n{vault_block}\n{rest}"),
+        (true, false) => format!("{header}\n\n{vault_block}"),
+        (false, true) => format!("{vault_block}\n{rest}"),
+        (false, false) => vault_block,
+    }
+}
+
 pub fn update_vault_manifest_section(
     manifest_str: &str,
     old_cfg: &VaultConfig,
@@ -1198,23 +1323,26 @@ pub fn update_vault_manifest_section(
         &format!("recovery_slot = \"{}\"", old_cfg.recovery_slot),
         &format!("recovery_slot = \"{}\"", new_cfg.recovery_slot),
     );
-    if new_cfg.hint != old_cfg.hint {
-        match (&old_cfg.hint, &new_cfg.hint) {
+    if new_cfg.vault_hint != old_cfg.vault_hint {
+        match (&old_cfg.vault_hint, &new_cfg.vault_hint) {
             (Some(old_h), Some(new_h)) => {
                 let old_val = toml::Value::String(old_h.clone()).to_string();
                 let new_val = toml::Value::String(new_h.clone()).to_string();
-                updated =
-                    updated.replace(&format!("hint = {old_val}"), &format!("hint = {new_val}"));
+                updated = updated.replace(
+                    &format!("vault_hint = {old_val}"),
+                    &format!("vault_hint = {new_val}"),
+                );
             }
             (None, Some(new_h)) => {
                 let new_val = toml::Value::String(new_h.clone()).to_string();
                 let target = format!("recovery_slot = \"{}\"", new_cfg.recovery_slot);
-                updated = updated.replace(&target, &format!("{target}\nhint = {new_val}"));
+                updated =
+                    updated.replace(&target, &format!("{target}\nvault_hint = {new_val}"));
             }
             (Some(old_h), None) => {
                 let old_val = toml::Value::String(old_h.clone()).to_string();
-                updated = updated.replace(&format!("hint = {old_val}\n"), "");
-                updated = updated.replace(&format!("hint = {old_val}"), "");
+                updated = updated.replace(&format!("vault_hint = {old_val}\n"), "");
+                updated = updated.replace(&format!("vault_hint = {old_val}"), "");
             }
             (None, None) => {}
         }
@@ -1239,10 +1367,10 @@ mod tests {
     #[test]
     fn test_repo_config_parsing_with_vault() {
         let content = r#"
-[vault]
 vault_id = "0123456789abcdef"
 password_slot = "cGFzc3dvcmRfc2xvdF9wbGFjZWhvbGRlcg=="
 recovery_slot = "cmVjb3Zlcnlfc2xvdF9wbGFjZWhvbGRlcg=="
+vault_hint = "optional hint"
 
 [nvim]
 files = """
@@ -1251,13 +1379,43 @@ lua/*
 """
 laptop = "~/.config/nvim"
 os-nux = "~/.config/nvim"
+
+[vault]
+files = "config.hcl"
+os-nux = "~/.config/vault"
 "#;
-        let config = RepoConfig::parse(content).expect("repo config with vault should parse");
+        let config = RepoConfig::parse(content).expect("repo config with root vault keys should parse");
         assert!(config.vault.is_some());
         let vault = config.vault.unwrap();
         assert_eq!(vault.vault_id, "0123456789abcdef");
-        assert_eq!(config.groups.len(), 1);
+        assert_eq!(vault.vault_hint.as_deref(), Some("optional hint"));
+        assert_eq!(config.groups.len(), 2);
         assert!(config.groups.contains_key("nvim"));
+        assert!(config.groups.contains_key("vault"));
+    }
+
+    #[test]
+    fn test_insert_vault_root_keys_below_header_comment() {
+        let initial = format!(
+            "{}\n\n# [bash]\n# os-nux = \"~\"\n",
+            crate::agent::briefing::DOTLER_TOML_AI_HINT.trim_end()
+        );
+        let vault = VaultConfig {
+            vault_id: "0123456789abcdef".to_string(),
+            password_slot: "cGFzc3dvcmQ=".to_string(),
+            recovery_slot: "cmVjb3Zlcnk=".to_string(),
+            vault_hint: Some("pet name".to_string()),
+        };
+        let inserted = insert_vault_root_keys(&initial, &vault);
+        let banner_end = inserted
+            .find("# ──────────────────────────────────────────────────────────────────")
+            .unwrap();
+        let vault_pos = inserted.find("vault_id = \"0123456789abcdef\"").unwrap();
+        let hint_pos = inserted.find("vault_hint = \"pet name\"").unwrap();
+        let bash_pos = inserted.find("# [bash]").unwrap();
+        assert!(banner_end < vault_pos);
+        assert!(vault_pos < hint_pos);
+        assert!(hint_pos < bash_pos);
     }
 
     #[test]
@@ -1275,13 +1433,12 @@ os-nux = "~/.config/git"
     #[test]
     fn test_vault_config_deny_unknown_fields() {
         let content = r#"
-[vault]
 vault_id = "0123456789abcdef"
 password_slot = "cGFzc3dvcmQ="
 recovery_slot = "cmVjb3Zlcnk="
 extra_field = "unexpected"
 "#;
-        let err = RepoConfig::parse(content).expect_err("unknown field in vault must fail");
+        let err = RepoConfig::parse(content).expect_err("unknown root field must fail");
         assert!(matches!(
             err,
             ConfigError::UnknownField { .. } | ConfigError::TomlSyntaxError(_)

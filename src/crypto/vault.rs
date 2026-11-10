@@ -528,7 +528,7 @@ pub fn init_vault(
         vault_id: vault_key.vault_id(),
         password_slot: password_slot.to_base64(),
         recovery_slot: recovery_slot.to_base64(),
-        hint: None,
+        vault_hint: None,
     };
 
     Ok((config, vault_key, recovery_mnemonic))
@@ -554,7 +554,7 @@ pub fn change_password(
         vault_id: config.vault_id.clone(),
         password_slot: new_slot.to_base64(),
         recovery_slot: config.recovery_slot.clone(),
-        hint: config.hint.clone(),
+        vault_hint: config.vault_hint.clone(),
     })
 }
 
@@ -591,7 +591,7 @@ pub fn recover_vault(
         vault_id: config.vault_id.clone(),
         password_slot: new_password_slot.to_base64(),
         recovery_slot: new_recovery_slot.to_base64(),
-        hint: config.hint.clone(),
+        vault_hint: config.vault_hint.clone(),
     };
 
     Ok((new_config, new_mnemonic))

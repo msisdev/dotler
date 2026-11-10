@@ -108,7 +108,7 @@ impl std::fmt::Display for ConfigError {
             Self::UnknownOsKey { key, hint } => write!(f, "Unknown OS key '{key}'. {hint}"),
             Self::MissingVaultConfig => write!(
                 f,
-                "Missing [vault] configuration in repository manifest: encrypted files are declared but vault is not configured"
+                "Missing vault configuration in repository manifest: encrypted files are declared but vault is not configured"
             ),
             Self::CrossGroupFileCollision {
                 path,

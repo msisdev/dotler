@@ -549,7 +549,6 @@ fn test_import_files_hash_match_skip_commits_sqlite_upsert_encrypted() {
 
     let dotler_toml = format!(
         r#"
-[vault]
 vault_id = "{}"
 password_slot = "{}"
 recovery_slot = "{}"

@@ -888,7 +888,7 @@ fn handle_vault<W: Write>(
                 "Enter new vault passphrase: ",
             )?;
             let (mut vault_cfg, _vault_key, mnemonic) = init_vault(&pass)?;
-            vault_cfg.hint = args
+            vault_cfg.vault_hint = args
                 .hint
                 .as_deref()
                 .map(str::trim)
@@ -896,7 +896,7 @@ fn handle_vault<W: Write>(
                 .map(str::to_string);
 
             let vault_id = vault_cfg.vault_id.clone();
-            let vault_hint = vault_cfg.hint.clone();
+            let vault_hint = vault_cfg.vault_hint.clone();
             repo_cfg.vault = Some(vault_cfg);
 
             let mut repo_cfg_res = get_repo_config(manifest_path);
@@ -957,7 +957,7 @@ fn handle_vault<W: Write>(
                 recover_vault(vault_cfg, &mnemonic_phrase, &new_pass)?;
             if let Some(ref h) = args.hint {
                 let trimmed = h.trim();
-                new_cfg.hint = if trimmed.is_empty() {
+                new_cfg.vault_hint = if trimmed.is_empty() {
                     None
                 } else {
                     Some(trimmed.to_string())
@@ -965,7 +965,7 @@ fn handle_vault<W: Write>(
             }
 
             let vault_id = new_cfg.vault_id.clone();
-            let vault_hint = new_cfg.hint.clone();
+            let vault_hint = new_cfg.vault_hint.clone();
             repo_cfg.vault = Some(new_cfg);
             repo_cfg_res.set(repo_cfg)?;
 
@@ -1259,7 +1259,7 @@ mod tests {
 
         let write_vault_manifest = |dir: &Path, vcfg: &crate::config::repo::VaultConfig| {
             let content = format!(
-                "[shell]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nfiles = \"* encrypt\"\n\n[vault]\nvault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n",
+                "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[shell]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nfiles = \"* encrypt\"\n",
                 vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
             );
             write_file_safe(&dir.join("dotler.toml"), content.as_bytes()).unwrap();
@@ -1333,7 +1333,7 @@ mod tests {
 
             let reloaded = RepoConfig::load(&repo_dir.join("dotler.toml")).unwrap();
             let vcfg = reloaded.vault.unwrap();
-            assert_eq!(vcfg.hint.as_deref(), Some("updated-hint"));
+            assert_eq!(vcfg.vault_hint.as_deref(), Some("updated-hint"));
             let slot = VaultSlot::from_base64(&vcfg.password_slot).unwrap();
             assert!(slot.unwrap(&old_pass, Some(&vcfg.vault_id)).is_err());
             let unlocked_key = slot.unwrap(&keyring_secret, Some(&vcfg.vault_id)).unwrap();
@@ -1365,7 +1365,7 @@ mod tests {
 
         let pass = SecretString::new("keyring-disabled-secret-123".to_string());
         let (mut vault_cfg, expected_key, _mnemonic) = init_vault(&pass).unwrap();
-        vault_cfg.hint = Some("my hint".to_string());
+        vault_cfg.vault_hint = Some("my hint".to_string());
         let repo_cfg = RepoConfig {
             vault: Some(vault_cfg),
             ..Default::default()

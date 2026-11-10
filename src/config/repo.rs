@@ -404,7 +404,14 @@ pub fn validate_rule_pattern(pattern: &str) -> Result<(), ConfigError> {
         });
     }
 
-    let trimmed = pattern.trim_end_matches('/');
+    let trimmed = pattern.trim_start_matches("./").trim_end_matches('/');
+
+    if trimmed.is_empty() || trimmed == "." {
+        return Err(ConfigError::HardBlockedPath {
+            path: pattern.to_string(),
+            reason: "selection pattern cannot be empty".to_string(),
+        });
+    }
 
     if trimmed == ".config/dotler" || trimmed.starts_with(".config/dotler/") {
         return Err(ConfigError::HardBlockedPath {
@@ -534,8 +541,20 @@ pub fn rules_have_effective_encryption(rules: &[SelectionRule]) -> bool {
         if rule.mode != SelectionMode::EncryptedInclude {
             return false;
         }
-        let probe = if rule.pattern.ends_with('/') {
-            format!("{}__probe__", rule.pattern)
+        let trimmed = rule
+            .pattern
+            .trim_start_matches("./")
+            .trim_end_matches('/');
+        let dir_prefix = format!("{trimmed}/");
+        let is_dir_pattern = rule.pattern.ends_with('/')
+            || (!trimmed.is_empty()
+                && rules.iter().any(|r| {
+                    r.pattern
+                        .trim_start_matches("./")
+                        .starts_with(&dir_prefix)
+                }));
+        let probe = if is_dir_pattern {
+            format!("{trimmed}/__probe__")
         } else {
             rule.pattern.clone()
         };
@@ -746,11 +765,12 @@ impl RepoConfig {
                     concrete_files.push(normalized_base.clone());
                 } else {
                     for rule in &rules {
-                        let clean_pattern = rule
+                        let raw_pattern = rule
                             .pattern
                             .trim_start_matches("./")
-                            .trim_start_matches('/')
-                            .trim_end_matches('/');
+                            .trim_start_matches('/');
+                        let is_dir_slash = raw_pattern.ends_with('/');
+                        let clean_pattern = raw_pattern.trim_end_matches('/');
                         if clean_pattern.is_empty() {
                             continue;
                         }
@@ -761,6 +781,20 @@ impl RepoConfig {
                         {
                             if rule.mode != SelectionMode::Exclude {
                                 wildcard_rules.push(rule.clone());
+                            }
+                        } else if is_dir_slash {
+                            let probe = format!("{clean_pattern}/*");
+                            if rule.mode != SelectionMode::Exclude
+                                && matches!(
+                                    evaluate_selection(&rules, &probe),
+                                    Some(m) if m != SelectionMode::Exclude
+                                )
+                            {
+                                wildcard_rules.push(SelectionRule {
+                                    pattern: probe,
+                                    mode: rule.mode,
+                                    line_no: rule.line_no,
+                                });
                             }
                         } else if matches!(evaluate_selection(&rules, clean_pattern), Some(m) if m != SelectionMode::Exclude)
                         {
@@ -897,10 +931,22 @@ impl RepoConfig {
                     }
                 }
 
-                // 4. Identical Wildcard Target Collision
+                // 4. Wildcard Target & Directory Prefix Collision
                 for w1 in &g1.wildcard_rules {
                     let p1 = w1.pattern.trim_start_matches("./").trim_start_matches('/');
                     let target1 = format!("{}/{}", g1.base, p1);
+
+                    if let Some(rel) = rel_to_base(&target1, &g2.base)
+                        && !rel.is_empty()
+                        && matches!(evaluate_selection(&g1.rules, p1), Some(m) if m != SelectionMode::Exclude)
+                        && matches!(evaluate_selection(&g2.rules, &rel), Some(m) if m != SelectionMode::Exclude)
+                    {
+                        return Err(ConfigError::CrossGroupFileCollision {
+                            path: target1,
+                            group1: g1.name.to_string(),
+                            group2: g2.name.to_string(),
+                        });
+                    }
 
                     for w2 in &g2.wildcard_rules {
                         let p2 = w2.pattern.trim_start_matches("./").trim_start_matches('/');
@@ -913,6 +959,23 @@ impl RepoConfig {
                                 group2: g2.name.to_string(),
                             });
                         }
+                    }
+                }
+
+                for w2 in &g2.wildcard_rules {
+                    let p2 = w2.pattern.trim_start_matches("./").trim_start_matches('/');
+                    let target2 = format!("{}/{}", g2.base, p2);
+
+                    if let Some(rel) = rel_to_base(&target2, &g1.base)
+                        && !rel.is_empty()
+                        && matches!(evaluate_selection(&g2.rules, p2), Some(m) if m != SelectionMode::Exclude)
+                        && matches!(evaluate_selection(&g1.rules, &rel), Some(m) if m != SelectionMode::Exclude)
+                    {
+                        return Err(ConfigError::CrossGroupFileCollision {
+                            path: target2,
+                            group1: g1.name.to_string(),
+                            group2: g2.name.to_string(),
+                        });
                     }
                 }
             }
@@ -1537,5 +1600,60 @@ files = "lua/init.lua"
             repo.detect_cross_group_collisions(&[], &os_info),
             Err(ConfigError::CrossGroupFileCollision { .. })
         ));
+
+        // Directory rule without `/*` vs `lua/*` wildcard rule must collide
+        let dir_vs_wildcard = r#"
+[g1]
+os-nux = "~/.config/nvim"
+files = "lua"
+
+[g2]
+os-nux = "~/.config/nvim"
+files = "lua/*"
+"#;
+        let repo_dw = RepoConfig::parse(dir_vs_wildcard).expect("valid syntax");
+        assert!(matches!(
+            repo_dw.detect_cross_group_collisions(&[], &os_info),
+            Err(ConfigError::CrossGroupFileCollision { .. })
+        ));
+
+        // Directory rule in parent base vs `*` in child base must collide
+        let parent_vs_child_base = r#"
+[g1]
+os-nux = "~/.config/nvim"
+files = "lua"
+
+[g2]
+os-nux = "~/.config/nvim/lua"
+files = "*"
+"#;
+        let repo_pc = RepoConfig::parse(parent_vs_child_base).expect("valid syntax");
+        assert!(matches!(
+            repo_pc.detect_cross_group_collisions(&[], &os_info),
+            Err(ConfigError::CrossGroupFileCollision { .. })
+        ));
+
+        // Group 1 excluding `!lua/*` and Group 2 claiming `lua/` must NOT collide
+        let separated_groups = r#"
+[g1]
+os-nux = "~/.config/nvim"
+files = """
+*
+!lua/*
+"""
+
+[g2]
+os-nux = "~/.config/nvim"
+files = "lua/"
+"#;
+        let repo_sep = RepoConfig::parse(separated_groups).expect("valid syntax");
+        assert!(
+            repo_sep.detect_cross_group_collisions(&[], &os_info).is_ok(),
+            "g1 excluding !lua/* and g2 claiming lua/ must not collide"
+        );
+
+        // Overridden encrypted directory rule (`secrets encrypt` -> `!secrets/*`) must not require vault
+        let overridden_dir_enc = parse_selection_rules("secrets encrypt\n!secrets/*").unwrap();
+        assert!(!rules_have_effective_encryption(&overridden_dir_enc));
     }
 }

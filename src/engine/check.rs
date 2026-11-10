@@ -469,6 +469,11 @@ pub fn plan(
             if target_base_path.join(trimmed).is_dir()
                 || group_repo_dir.join(trimmed).is_dir()
                 || candidates.iter().any(|c| c.starts_with(&dir_prefix))
+                || rules.iter().any(|r| {
+                    r.pattern
+                        .trim_start_matches("./")
+                        .starts_with(&dir_prefix)
+                })
             {
                 continue;
             }
@@ -783,5 +788,72 @@ lua
         let plans2 = plan(&engine2, None, &lock).unwrap();
         let rel_paths2: Vec<&str> = plans2.iter().map(|p| p.relative_path.as_str()).collect();
         assert_eq!(rel_paths2, vec!["lua/core.lua"]);
+
+        // Test 3: Nested override chain (`*` -> `!cache` -> `cache/keep.txt` -> `!cache/sub`)
+        // where `cache/keep.txt` does not yet exist on disk
+        let toml_nested = r#"[nvim]
+os-nux = "~/.config/nvim"
+os-mac = "~/.config/nvim"
+files = """
+*
+!cache
+cache/keep.txt
+!cache/sub
+!tmp_dir/
+!lua
+"""
+"#;
+        let repo_cfg3 = RepoConfig::parse(toml_nested).unwrap();
+        let engine3 = SyncEngine::new(
+            "main",
+            &repo_dir,
+            &repo_cfg3,
+            &state_db,
+            vec![],
+            OsInfo::detect(),
+            None,
+        )
+        .with_home_dir(&home_dir);
+
+        let plans3 = plan(&engine3, None, &lock).unwrap();
+        let rel_paths3: Vec<(&str, FileSyncStatus)> = plans3
+            .iter()
+            .map(|p| (p.relative_path.as_str(), p.status))
+            .collect();
+        assert_eq!(
+            rel_paths3,
+            vec![
+                ("cache/keep.txt", FileSyncStatus::MissingInRepo),
+                ("init.lua", FileSyncStatus::ModifiedLocally),
+            ]
+        );
+
+        // Test 4: Non-existent directory rule `nonexistent_dir` accompanied by `!nonexistent_dir/sub`
+        // must not treat `nonexistent_dir` itself as a missing single file
+        let toml_nonexistent_dir = r#"[nvim]
+os-nux = "~/.config/nvim"
+os-mac = "~/.config/nvim"
+files = """
+nonexistent_dir
+!nonexistent_dir/sub
+"""
+"#;
+        let repo_cfg4 = RepoConfig::parse(toml_nonexistent_dir).unwrap();
+        let engine4 = SyncEngine::new(
+            "main",
+            &repo_dir,
+            &repo_cfg4,
+            &state_db,
+            vec![],
+            OsInfo::detect(),
+            None,
+        )
+        .with_home_dir(&home_dir);
+
+        let plans4 = plan(&engine4, None, &lock).unwrap();
+        assert!(
+            plans4.is_empty(),
+            "non-existent directory with sub-rule must not be planned as a single file: {plans4:?}"
+        );
     }
 }

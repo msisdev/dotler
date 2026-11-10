@@ -1045,11 +1045,13 @@ pub fn install_remote_with_observer(
                 rel_path_str.clone()
             };
 
-            if matches!(
-                evaluate_selection(&rules, &clean_rel)
-                    .or_else(|| evaluate_selection(&rules, &rel_path_str)),
-                Some(SelectionMode::Exclude)
-            ) {
+            if !rules.is_empty()
+                && matches!(
+                    evaluate_selection(&rules, &clean_rel)
+                        .or_else(|| evaluate_selection(&rules, &rel_path_str)),
+                    None | Some(SelectionMode::Exclude)
+                )
+            {
                 continue;
             }
 

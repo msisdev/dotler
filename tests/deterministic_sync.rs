@@ -2111,4 +2111,33 @@ lua
         nvim_dir.join("lua/plugins/telescope.lua").is_file(),
         "OS file must never be deleted by tidy with KeepOnOs"
     );
+
+    // Also verify `install_remote` honors standalone directory include (`lua`) and exclude (`!lua/plugins`)
+    // and skips unselected sibling files (`cache/state.bin`)
+    let remote_mock = MockBareRepo::new(
+        toml_after,
+        &[
+            ("nvim/init.lua", b"-- remote init\n"),
+            ("nvim/lua/core.lua", b"-- remote core\n"),
+            ("nvim/lua/plugins/telescope.lua", b"-- excluded plugin\n"),
+            ("nvim/unselected/extra.txt", b"-- unselected\n"),
+        ],
+    );
+    let remote_url = parse_url(&remote_mock.clone_url).unwrap();
+    let deploy_dir = sb.home_dir.join("remote_deploy");
+    let install_rep = install_remote(
+        &remote_url,
+        &["nvim".to_string()],
+        Some(&deploy_dir),
+        None,
+        &[],
+        &sb.state_db,
+        &lock,
+    )
+    .unwrap();
+    assert_eq!(install_rep.installed_files.len(), 2);
+    assert!(deploy_dir.join("init.lua").is_file());
+    assert!(deploy_dir.join("lua/core.lua").is_file());
+    assert!(!deploy_dir.join("lua/plugins/telescope.lua").exists());
+    assert!(!deploy_dir.join("unselected/extra.txt").exists());
 }

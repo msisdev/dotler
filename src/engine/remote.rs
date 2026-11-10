@@ -1038,16 +1038,20 @@ pub fn install_remote_with_observer(
             let rel_path = entry.path().strip_prefix(&group_dir).unwrap();
             let rel_path_str = rel_path.to_string_lossy().to_string();
 
-            if let Some(SelectionMode::Exclude) = evaluate_selection(&rules, &rel_path_str) {
-                continue;
-            }
-
             let is_enc = rel_path_str.ends_with(".enc");
             let clean_rel = if let Some(stripped) = rel_path_str.strip_suffix(".enc") {
                 stripped.to_string()
             } else {
                 rel_path_str.clone()
             };
+
+            if matches!(
+                evaluate_selection(&rules, &clean_rel)
+                    .or_else(|| evaluate_selection(&rules, &rel_path_str)),
+                Some(SelectionMode::Exclude)
+            ) {
+                continue;
+            }
 
             let target_file_path = target_base.join(&clean_rel);
             validate_os_target_path(&target_file_path, &home)?;

@@ -2023,3 +2023,93 @@ fn test_remote_git_multi_manifest_bfs_unicode_order_and_explicit_subpath() {
     assert_eq!(gh_sub.clone_url, "https://github.com/owner/repo.git");
     assert_eq!(gh_sub.subpath.as_deref(), Some("configs/linux"));
 }
+
+#[test]
+fn test_directory_selection_rules_without_wildcard_import_export_and_tidy() {
+    let sb = SyncTestSandbox::new();
+    let lock = sb.acquire_lock();
+
+    let nvim_dir = sb.home_dir.join(".config").join("nvim");
+    fs::create_dir_all(nvim_dir.join("lua").join("plugins")).unwrap();
+    fs::create_dir_all(nvim_dir.join("cache").join("nested")).unwrap();
+    fs::create_dir_all(nvim_dir.join("logs")).unwrap();
+
+    fs::write(nvim_dir.join("init.lua"), "require('core')\n").unwrap();
+    fs::write(nvim_dir.join("lua").join("core.lua"), "return {}\n").unwrap();
+    fs::write(
+        nvim_dir.join("lua").join("plugins").join("telescope.lua"),
+        "return { 'telescope' }\n",
+    )
+    .unwrap();
+    fs::write(nvim_dir.join("cache").join("state.bin"), "cached\n").unwrap();
+    fs::write(
+        nvim_dir.join("cache").join("nested").join("index.bin"),
+        "nested cached\n",
+    )
+    .unwrap();
+    fs::write(nvim_dir.join("logs").join("debug.log"), "log\n").unwrap();
+
+    // Import using `lua` (directory rule without `/*`), `!cache`, and `!logs/`
+    let toml = r#"[nvim]
+os-nux = "~/.config/nvim"
+os-mac = "~/.config/nvim"
+files = """
+init.lua
+lua
+!cache
+!logs/
+"""
+"#;
+    let repo_cfg = RepoConfig::parse(toml).unwrap();
+    let engine = sb.sync_engine(&repo_cfg, None);
+
+    let plans = engine.plan(None, &lock).unwrap();
+    let planned_rels: Vec<&str> = plans.iter().map(|p| p.relative_path.as_str()).collect();
+    assert_eq!(
+        planned_rels,
+        vec![
+            "init.lua",
+            "lua/core.lua",
+            "lua/plugins/telescope.lua",
+        ]
+    );
+
+    let import_rep = engine.import_files(&plans, &lock, false).unwrap();
+    assert_eq!(import_rep.processed, 3);
+    assert!(sb.repo_dir.join("nvim/init.lua").is_file());
+    assert!(sb.repo_dir.join("nvim/lua/core.lua").is_file());
+    assert!(sb.repo_dir.join("nvim/lua/plugins/telescope.lua").is_file());
+    assert!(!sb.repo_dir.join("nvim/cache").exists());
+    assert!(!sb.repo_dir.join("nvim/logs").exists());
+
+    // Now exclude `lua/plugins` (without `/*`) and verify `Orphaned` status + `tidy` cleanup
+    let toml_after = r#"[nvim]
+os-nux = "~/.config/nvim"
+os-mac = "~/.config/nvim"
+files = """
+init.lua
+lua
+!lua/plugins
+!cache
+!logs/
+"""
+"#;
+    let repo_cfg_after = RepoConfig::parse(toml_after).unwrap();
+    let engine_after = sb.sync_engine(&repo_cfg_after, None);
+    let plans_after = engine_after.plan(None, &lock).unwrap();
+    let orphan_plan = plans_after
+        .iter()
+        .find(|p| p.relative_path == "lua/plugins/telescope.lua")
+        .expect("excluded directory child must be detected as Orphaned");
+    assert_eq!(orphan_plan.status, FileSyncStatus::Orphaned);
+
+    let tidy_rep = engine_after
+        .tidy(None, &lock, TidyOrphanPolicy::KeepOnOs, false)
+        .unwrap();
+    assert_eq!(tidy_rep.removed_from_repo, 1);
+    assert!(!sb.repo_dir.join("nvim/lua/plugins/telescope.lua").exists());
+    assert!(
+        nvim_dir.join("lua/plugins/telescope.lua").is_file(),
+        "OS file must never be deleted by tidy with KeepOnOs"
+    );
+}

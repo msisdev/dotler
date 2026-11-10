@@ -531,8 +531,15 @@ pub fn evaluate_selection(rules: &[SelectionRule], relative_path: &str) -> Optio
 
 pub fn rules_have_effective_encryption(rules: &[SelectionRule]) -> bool {
     rules.iter().any(|rule| {
-        rule.mode == SelectionMode::EncryptedInclude
-            && evaluate_selection(rules, &rule.pattern) == Some(SelectionMode::EncryptedInclude)
+        if rule.mode != SelectionMode::EncryptedInclude {
+            return false;
+        }
+        let probe = if rule.pattern.ends_with('/') {
+            format!("{}__probe__", rule.pattern)
+        } else {
+            rule.pattern.clone()
+        };
+        evaluate_selection(rules, &probe) == Some(SelectionMode::EncryptedInclude)
     })
 }
 
@@ -541,11 +548,44 @@ fn matches_pattern(pattern: &str, path: &str) -> bool {
         return true;
     }
 
-    if let Ok(glob_pattern) = glob::Pattern::new(pattern) {
-        glob_pattern.matches(path)
-    } else {
-        pattern == path
+    let trimmed_pattern = pattern
+        .trim_start_matches("./")
+        .trim_end_matches('/');
+    let trimmed_path = path
+        .trim_start_matches("./")
+        .trim_end_matches('/');
+
+    if !trimmed_pattern.is_empty() {
+        if trimmed_pattern == trimmed_path {
+            return true;
+        }
+        if let Some(rest) = trimmed_path.strip_prefix(trimmed_pattern)
+            && rest.starts_with('/')
+        {
+            return true;
+        }
     }
+
+    if let Ok(glob_pattern) = glob::Pattern::new(pattern)
+        && glob_pattern.matches(path)
+    {
+        return true;
+    }
+
+    if !trimmed_pattern.is_empty()
+        && let Ok(glob_pattern) = glob::Pattern::new(trimmed_pattern)
+    {
+        if glob_pattern.matches(trimmed_path) {
+            return true;
+        }
+        for (idx, ch) in trimmed_path.char_indices() {
+            if ch == '/' && glob_pattern.matches(&trimmed_path[..idx]) {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 pub fn resolve_group_target_path(
@@ -709,7 +749,8 @@ impl RepoConfig {
                         let clean_pattern = rule
                             .pattern
                             .trim_start_matches("./")
-                            .trim_start_matches('/');
+                            .trim_start_matches('/')
+                            .trim_end_matches('/');
                         if clean_pattern.is_empty() {
                             continue;
                         }
@@ -1402,5 +1443,98 @@ os-nux = "~/.config/app"
             .expect("load_without_vault_check must allow encrypted rules before vault init");
         assert!(loaded.vault.is_none());
         assert!(loaded.groups.contains_key("shell"));
+    }
+
+    #[test]
+    fn test_directory_prefix_matching_without_wildcard_suffix() {
+        let content = r#"
+*
+!cache
+!logs/
+secrets encrypt
+plugins/ encrypt
+!plugins/disabled
+"#;
+        let rules = parse_selection_rules(content).expect("rules should parse");
+
+        // Regular root file matches `*`
+        assert_eq!(
+            evaluate_selection(&rules, "init.lua"),
+            Some(SelectionMode::PlaintextInclude)
+        );
+
+        // `!cache` (without trailing slash or `/*`) excludes files and nested subfolders under `cache/`
+        assert_eq!(
+            evaluate_selection(&rules, "cache/state.json"),
+            Some(SelectionMode::Exclude)
+        );
+        assert_eq!(
+            evaluate_selection(&rules, "cache/sub/deep.bin"),
+            Some(SelectionMode::Exclude)
+        );
+        // Sibling prefix `cache_other` must NOT be excluded by `!cache`
+        assert_eq!(
+            evaluate_selection(&rules, "cache_other/state.json"),
+            Some(SelectionMode::PlaintextInclude)
+        );
+
+        // `!logs/` (with trailing slash) excludes files and nested subfolders under `logs/`
+        assert_eq!(
+            evaluate_selection(&rules, "logs/app.log"),
+            Some(SelectionMode::Exclude)
+        );
+        assert_eq!(
+            evaluate_selection(&rules, "logs/2026/11/debug.log"),
+            Some(SelectionMode::Exclude)
+        );
+
+        // `secrets encrypt` and `plugins/ encrypt` match descendant paths
+        assert_eq!(
+            evaluate_selection(&rules, "secrets/api_key.txt"),
+            Some(SelectionMode::EncryptedInclude)
+        );
+        assert_eq!(
+            evaluate_selection(&rules, "secrets/nested/token"),
+            Some(SelectionMode::EncryptedInclude)
+        );
+        assert_eq!(
+            evaluate_selection(&rules, "plugins/telescope/init.lua"),
+            Some(SelectionMode::EncryptedInclude)
+        );
+        assert_eq!(
+            evaluate_selection(&rules, "plugins/disabled/init.lua"),
+            Some(SelectionMode::Exclude)
+        );
+        assert!(rules_have_effective_encryption(&rules));
+    }
+
+    #[test]
+    fn test_standalone_directory_include_rule_and_cross_group_collision() {
+        let rules = parse_selection_rules("lua\nlua/plugins/").expect("rules should parse");
+        assert_eq!(
+            evaluate_selection(&rules, "lua/init.lua"),
+            Some(SelectionMode::PlaintextInclude)
+        );
+        assert_eq!(
+            evaluate_selection(&rules, "lua/plugins/lsp.lua"),
+            Some(SelectionMode::PlaintextInclude)
+        );
+        assert_eq!(evaluate_selection(&rules, "other/file.lua"), None);
+
+        let collision_content = r#"
+[g1]
+os-nux = "~/.config/nvim"
+files = "lua"
+
+[g2]
+os-nux = "~/.config/nvim"
+files = "lua/init.lua"
+"#;
+        let repo = RepoConfig::parse(collision_content).expect("valid syntax");
+        let os_info = OsInfo::new("arch", "nux");
+        assert!(matches!(
+            repo.detect_cross_group_collisions(&[], &os_info),
+            Err(ConfigError::CrossGroupFileCollision { .. })
+        ));
     }
 }

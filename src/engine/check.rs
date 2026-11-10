@@ -379,15 +379,6 @@ pub fn plan(
             }
         }
 
-        for rule in &rules {
-            if !rule.pattern.contains('*')
-                && !rule.pattern.contains('?')
-                && !rule.pattern.contains('[')
-            {
-                candidates.insert(rule.pattern.clone());
-            }
-        }
-
         if let Ok(records) = engine.state_db.list_synced_files(Some(&engine.repo_label)) {
             for r in records {
                 if r.group_name == *group_name {
@@ -456,6 +447,31 @@ pub fn plan(
                     }
                 }
             }
+        }
+
+        for rule in &rules {
+            if rule.mode == SelectionMode::Exclude || rule.pattern.ends_with('/') {
+                continue;
+            }
+            let trimmed = rule
+                .pattern
+                .trim_start_matches("./")
+                .trim_end_matches('/');
+            if trimmed.is_empty()
+                || trimmed.contains('*')
+                || trimmed.contains('?')
+                || trimmed.contains('[')
+            {
+                continue;
+            }
+            let dir_prefix = format!("{trimmed}/");
+            if target_base_path.join(trimmed).is_dir()
+                || group_repo_dir.join(trimmed).is_dir()
+                || candidates.iter().any(|c| c.starts_with(&dir_prefix))
+            {
+                continue;
+            }
+            candidates.insert(trimmed.to_string());
         }
 
         // 2. Evaluate each candidate
@@ -680,5 +696,91 @@ files = ".bashrc"
         assert_eq!(plans1, plans2);
         assert_eq!(plans1[0].status, FileSyncStatus::Synced);
         assert!(state_db.list_synced_files(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn plan_handles_directory_include_and_exclude_rules_without_wildcard_suffix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let repo_dir = tmp.path().join("repo");
+        let nvim_os = home_dir.join(".config").join("nvim");
+        fs::create_dir_all(nvim_os.join("lua").join("plugins")).unwrap();
+        fs::create_dir_all(nvim_os.join("cache").join("sub")).unwrap();
+        fs::create_dir_all(nvim_os.join("tmp_dir")).unwrap();
+        fs::create_dir_all(repo_dir.join("nvim")).unwrap();
+
+        fs::write(nvim_os.join("init.lua"), b"-- root\n").unwrap();
+        fs::write(nvim_os.join("lua").join("core.lua"), b"-- core\n").unwrap();
+        fs::write(
+            nvim_os.join("lua").join("plugins").join("lsp.lua"),
+            b"-- lsp\n",
+        )
+        .unwrap();
+        fs::write(nvim_os.join("cache").join("a.txt"), b"cached a\n").unwrap();
+        fs::write(
+            nvim_os.join("cache").join("sub").join("b.txt"),
+            b"cached b\n",
+        )
+        .unwrap();
+        fs::write(nvim_os.join("tmp_dir").join("c.txt"), b"temp c\n").unwrap();
+
+        // Test 1: `*` with `!cache` and `!tmp_dir/` excludes all files under both directories
+        let toml_exclude = r#"[nvim]
+os-nux = "~/.config/nvim"
+os-mac = "~/.config/nvim"
+files = """
+*
+!cache
+!tmp_dir/
+"""
+"#;
+        let repo_cfg1 = RepoConfig::parse(toml_exclude).unwrap();
+        let state_db = StateDb::open(&tmp.path().join("state.db")).unwrap();
+        let lock = DotlerLock::new(tmp.path().join("dotler.lock"))
+            .acquire(Duration::from_millis(500), Duration::from_millis(10))
+            .unwrap();
+
+        let engine1 = SyncEngine::new(
+            "main",
+            &repo_dir,
+            &repo_cfg1,
+            &state_db,
+            vec![],
+            OsInfo::detect(),
+            None,
+        )
+        .with_home_dir(&home_dir);
+
+        let plans1 = plan(&engine1, None, &lock).unwrap();
+        let rel_paths1: Vec<&str> = plans1.iter().map(|p| p.relative_path.as_str()).collect();
+        assert_eq!(
+            rel_paths1,
+            vec!["init.lua", "lua/core.lua", "lua/plugins/lsp.lua"]
+        );
+
+        // Test 2: Standalone directory include rules (`lua` and `lua/plugins/`) without `*`
+        let toml_include_dir = r#"[nvim]
+os-nux = "~/.config/nvim"
+os-mac = "~/.config/nvim"
+files = """
+lua
+!lua/plugins
+"""
+"#;
+        let repo_cfg2 = RepoConfig::parse(toml_include_dir).unwrap();
+        let engine2 = SyncEngine::new(
+            "main",
+            &repo_dir,
+            &repo_cfg2,
+            &state_db,
+            vec![],
+            OsInfo::detect(),
+            None,
+        )
+        .with_home_dir(&home_dir);
+
+        let plans2 = plan(&engine2, None, &lock).unwrap();
+        let rel_paths2: Vec<&str> = plans2.iter().map(|p| p.relative_path.as_str()).collect();
+        assert_eq!(rel_paths2, vec!["lua/core.lua"]);
     }
 }

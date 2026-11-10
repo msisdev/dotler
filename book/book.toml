@@ -5,6 +5,4 @@ language = "en"
 src = "src"
 
 [output.html]
-site-url = "/dotler/"
 git-repository-url = "https://github.com/msisdev/dotler"
-additional-js = ["theme/home-link.js"]

@@ -89,7 +89,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// Initialize a dotler repository and register device/repo in config.toml (run 'dotler ai' for AI agent briefing)
+    /// Initialize a dotler repository and register device/repo in config.toml (run 'dotler ai' for AI context)
     Init(InitArgs),
 
     /// Remote Git repository operations (ls, clone, install, uninstall)

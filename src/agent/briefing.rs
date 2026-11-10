@@ -40,10 +40,10 @@ impl EnvironmentSnapshot {
 pub const OFFICIAL_MANUAL_URL: &str = "https://msisdev.github.io/dotler/";
 
 /// Top-of-file comment banner placed in `dotler.toml` to direct AI coding agents to `dotler ai`.
-pub const DOTLER_TOML_AI_HINT: &str = "# [AI Agent Hint] Run 'dotler ai' before editing this file or syncing dotfiles to inspect the full schema, active OS/device keys, and non-interactive CLI/MCP workflows.\n";
+pub const DOTLER_TOML_AI_HINT: &str = "# [AI Agent Hint] Run 'dotler ai' for AI context.\n";
 
 /// Onboarding hint returned by `dotler init` (both inline terminal output and `--json` `hint` field).
-pub const INIT_AI_HINT: &str = "Run 'dotler ai' for the AI agent context briefing, dotler.toml schema, and active OS/device keys.";
+pub const INIT_AI_HINT: &str = "Run 'dotler ai' for AI context.";
 
 /// Shared static operational guide embedded in `dotler ai` (`render_briefing`).
 pub const SHARED_OPERATIONAL_GUIDE: &str = r#"## 2. Group Layout & Selection Rules (dotler.toml)

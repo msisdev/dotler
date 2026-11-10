@@ -7,6 +7,7 @@ use crossterm::style::{Attribute, Color, ResetColor, SetAttribute, SetBackground
 
 pub const ICON_LEFT_BAR: &str = "▐";
 pub const ICON_RIGHT_BAR: &str = "▌";
+pub const SUMMARY_HEADER: &str = "Summary";
 pub const ALL_OK_MESSAGE: &str = "☀️ All files are ok.";
 
 /// Three-column (`▐x▌`) status badge attached to an OS or repository path.
@@ -183,7 +184,7 @@ pub fn render_item(item: &PreviewItem) -> String {
     )
 }
 
-/// Formats the single-line inline summary footer displaying counts per badge operation.
+/// Formats the inline summary footer section (`Summary` header and 2-space indented badge counts).
 pub fn render_footer(counts: &PreviewCounts) -> String {
     let mut styled_parts = vec![
         format!("{}create {}", BadgeOp::Create.render_styled(), counts.create),
@@ -212,7 +213,7 @@ pub fn render_footer(counts: &PreviewCounts) -> String {
 
     styled_parts.push(format!("{}okay {}", BadgeOp::Okay.render_styled(), counts.okay));
 
-    styled_parts.join("   ")
+    format!("{SUMMARY_HEADER}\n  {}", styled_parts.join("   "))
 }
 
 /// Formats the entire inline preview and returns the formatted string along with [`PreviewCounts`].
@@ -371,7 +372,7 @@ mod tests {
         assert!(!plain.contains("[git]"), "Create-only group must be omitted when view_all = false");
         assert!(!plain.contains("[tmux]"), "Okay-only group must be omitted when view_all = false");
         assert!(plain.contains("[nvim]"), "Overwrite group must be shown");
-        assert!(plain.contains("▐c▌create 1   ▐w▌overwrite 1   ▐d▌delete 0   ▐o▌okay 1"));
+        assert!(plain.contains("Summary\n  ▐c▌create 1   ▐w▌overwrite 1   ▐d▌delete 0   ▐o▌okay 1"));
     }
 
     #[test]
@@ -395,8 +396,8 @@ mod tests {
         assert!(!plain.contains("~/.gitconfig"));
         assert!(!plain.contains("╭"));
         assert_eq!(
-            plain.trim(),
-            "▐c▌create 1   ▐w▌overwrite 0   ▐d▌delete 0   ▐o▌okay 0"
+            plain.trim_end(),
+            "Summary\n  ▐c▌create 1   ▐w▌overwrite 0   ▐d▌delete 0   ▐o▌okay 0"
         );
     }
 

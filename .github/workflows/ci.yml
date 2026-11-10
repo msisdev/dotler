@@ -3,11 +3,9 @@ name: CI
 on:
   push:
     branches:
-      - pre
       - main
   pull_request:
     branches:
-      - pre
       - main
   workflow_dispatch:
 
@@ -40,9 +38,9 @@ jobs:
         run: cargo test --locked
 
   publish-dry-run:
-    name: Crates.io Publish Dry-Run (pre)
+    name: Crates.io Publish Dry-Run (main)
     needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/pre'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

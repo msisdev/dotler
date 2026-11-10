@@ -118,7 +118,8 @@ impl ConfirmPrompt {
         }
 
         if key.code == KeyCode::Esc
-            || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+            || (matches!(key.code, KeyCode::Char('c' | 'C' | 'd' | 'D'))
+                && key.modifiers.contains(KeyModifiers::CONTROL))
         {
             return PromptAction::Cancel;
         }

@@ -248,7 +248,7 @@ fn handle_passphrase_key(
     }
 
     if key.code == KeyCode::Esc
-        || (matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d'))
+        || (matches!(key.code, KeyCode::Char('c' | 'C' | 'd' | 'D'))
             && key.modifiers.contains(KeyModifiers::CONTROL))
     {
         return PromptAction::Cancel;
@@ -288,13 +288,12 @@ fn read_hidden_passphrase(prompt: &str) -> Result<String, KeyringError> {
     stderr.flush().map_err(|_| KeyringError::PromptCancelled)?;
 
     let _guard = RawModeGuard::enter().map_err(|_| KeyringError::PromptCancelled)?;
-    let mut buf = String::new();
+    let mut buf = zeroize::Zeroizing::new(String::new());
 
     loop {
         let ev = match event::read() {
             Ok(ev) => ev,
             Err(_) => {
-                zeroize::Zeroize::zeroize(&mut buf);
                 let _ = stderr.write_all(b"\r\n");
                 let _ = stderr.flush();
                 return Err(KeyringError::PromptCancelled);
@@ -307,10 +306,9 @@ fn read_hidden_passphrase(prompt: &str) -> Result<String, KeyringError> {
                 PromptAction::Submit(_) => {
                     let _ = stderr.write_all(b"\r\n");
                     let _ = stderr.flush();
-                    return Ok(buf);
+                    return Ok(std::mem::take(&mut *buf));
                 }
                 PromptAction::Cancel => {
-                    zeroize::Zeroize::zeroize(&mut buf);
                     let _ = stderr.write_all(b"\r\n");
                     let _ = stderr.flush();
                     return Err(KeyringError::PromptCancelled);
@@ -761,7 +759,7 @@ mod tests {
     #[test]
     fn test_passphrase_key_event_state_machine() {
         use crate::tui::confirm::PromptAction;
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
         let mut buf = String::new();
         for ch in ['s', 'e', 'c', 'x'] {
@@ -770,29 +768,46 @@ mod tests {
                 PromptAction::Continue
             );
         }
+        // KeyEventKind::Release on Windows consoles must be ignored
+        assert_eq!(
+            handle_passphrase_key(
+                &mut buf,
+                KeyEvent {
+                    code: KeyCode::Char('z'),
+                    modifiers: KeyModifiers::NONE,
+                    kind: KeyEventKind::Release,
+                    state: KeyEventState::NONE,
+                }
+            ),
+            PromptAction::Continue
+        );
         assert_eq!(
             handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
             PromptAction::Continue
         );
-        for ch in ['r', 'e', 't'] {
+        // Multi-byte UTF-8 characters and Backspace boundary safety
+        for ch in ['r', 'e', 't', '한', '🔒'] {
             handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
         }
+        handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         assert_eq!(
             handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             PromptAction::Submit(true)
         );
         assert_eq!(buf, "secret");
 
-        assert_eq!(
-            handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-            PromptAction::Cancel
-        );
-        assert_eq!(
-            handle_passphrase_key(
-                &mut buf,
-                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
-            ),
-            PromptAction::Cancel
-        );
+        for cancel_event in [
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('D'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        ] {
+            assert_eq!(
+                handle_passphrase_key(&mut buf, cancel_event),
+                PromptAction::Cancel
+            );
+        }
     }
 }

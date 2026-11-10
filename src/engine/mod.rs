@@ -258,7 +258,7 @@ impl EngineError {
                 format!("Remote dotler.toml exceeds maximum limit of {limit_bytes} bytes (1 MiB).")
             }
             EngineError::InvalidUrlFormat { .. } => {
-                "Specify a valid Git URL or supported shorthand prefix (gh:, gl:, cb:, srht:, bb:).".to_string()
+                "Specify a valid Git URL or supported provider prefix (gh:/github:, gl:/gitlab:, cb:/codeberg:, srht:/sourcehut:, bb:/bitbucket:).".to_string()
             }
             EngineError::GitError { .. } => {
                 "Verify the remote Git URL, network connectivity, and repository access permissions.".to_string()

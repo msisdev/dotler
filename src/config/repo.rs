@@ -21,12 +21,7 @@ pub const RECOGNIZED_OS_KEYS: &[&str] = &[
     "os-bsd",
 ];
 
-pub const ROOT_VAULT_KEYS: &[&str] = &[
-    "vault_id",
-    "password_slot",
-    "recovery_slot",
-    "vault_hint",
-];
+pub const ROOT_VAULT_KEYS: &[&str] = &["vault_id", "password_slot", "recovery_slot", "vault_hint"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RepoConfig {
@@ -42,6 +37,88 @@ pub struct VaultConfig {
     pub recovery_slot: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault_hint: Option<String>,
+}
+
+impl VaultConfig {
+    /// Parses external vault metadata from a TOML manifest or JSON payload,
+    /// ignoring any unrelated group tables or extra keys.
+    pub fn parse_external_payload(raw: &str) -> Result<Self, ConfigError> {
+        if let Ok(table) = toml::from_str::<toml::Table>(raw) {
+            let password_slot = table
+                .get("password_slot")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or(ConfigError::MissingVaultConfig)?
+                .to_string();
+            let recovery_slot = table
+                .get("recovery_slot")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or(ConfigError::MissingVaultConfig)?
+                .to_string();
+            let vault_id = table
+                .get("vault_id")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            let vault_hint = table
+                .get("vault_hint")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            return Ok(Self {
+                vault_id,
+                password_slot,
+                recovery_slot,
+                vault_hint,
+            });
+        }
+
+        match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(serde_json::Value::Object(map)) => {
+                let password_slot = map
+                    .get("password_slot")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or(ConfigError::MissingVaultConfig)?
+                    .to_string();
+                let recovery_slot = map
+                    .get("recovery_slot")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or(ConfigError::MissingVaultConfig)?
+                    .to_string();
+                let vault_id = map
+                    .get("vault_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .to_string();
+                let vault_hint = map
+                    .get("vault_hint")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                Ok(Self {
+                    vault_id,
+                    password_slot,
+                    recovery_slot,
+                    vault_hint,
+                })
+            }
+            _ => {
+                let err = toml::from_str::<toml::Table>(raw).unwrap_err();
+                Err(ConfigError::TomlSyntaxError(err.to_string()))
+            }
+        }
+    }
 }
 
 impl Serialize for RepoConfig {
@@ -881,9 +958,7 @@ impl RepoConfig {
             if msg.contains("unknown field") {
                 ConfigError::UnknownField {
                     field: msg.clone(),
-                    hint:
-                        "Check dotler.toml for unexpected root keys or group fields."
-                            .to_string(),
+                    hint: "Check dotler.toml for unexpected root keys or group fields.".to_string(),
                 }
             } else {
                 ConfigError::TomlSyntaxError(msg)
@@ -918,9 +993,7 @@ impl RepoConfig {
             if msg.contains("unknown field") {
                 ConfigError::UnknownField {
                     field: msg.clone(),
-                    hint:
-                        "Check dotler.toml for unexpected root keys or group fields."
-                            .to_string(),
+                    hint: "Check dotler.toml for unexpected root keys or group fields.".to_string(),
                 }
             } else {
                 ConfigError::TomlSyntaxError(msg)
@@ -1336,8 +1409,7 @@ pub fn update_vault_manifest_section(
             (None, Some(new_h)) => {
                 let new_val = toml::Value::String(new_h.clone()).to_string();
                 let target = format!("recovery_slot = \"{}\"", new_cfg.recovery_slot);
-                updated =
-                    updated.replace(&target, &format!("{target}\nvault_hint = {new_val}"));
+                updated = updated.replace(&target, &format!("{target}\nvault_hint = {new_val}"));
             }
             (Some(old_h), None) => {
                 let old_val = toml::Value::String(old_h.clone()).to_string();
@@ -1384,7 +1456,8 @@ os-nux = "~/.config/nvim"
 files = "config.hcl"
 os-nux = "~/.config/vault"
 "#;
-        let config = RepoConfig::parse(content).expect("repo config with root vault keys should parse");
+        let config =
+            RepoConfig::parse(content).expect("repo config with root vault keys should parse");
         assert!(config.vault.is_some());
         let vault = config.vault.unwrap();
         assert_eq!(vault.vault_id, "0123456789abcdef");

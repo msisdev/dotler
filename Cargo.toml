@@ -45,6 +45,9 @@ sha2 = { version = "0.10", default-features = false }
 zeroize = { version = "1.8", default-features = false, features = ["alloc"] }
 getrandom = "0.2"
 crossterm = { version = "0.29", default-features = false, features = ["events", "windows"] }
+gix = { version = "0.87", default-features = false, features = ["blocking-network-client", "sha1", "max-performance-safe"] }
+gix-transport = { version = "0.59", default-features = false, features = ["http-client"] }
+ureq = { version = "3.5", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 tempfile = { version = "3.27", default-features = false }

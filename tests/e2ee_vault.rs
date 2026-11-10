@@ -263,3 +263,230 @@ fn test_mock_keyring_multithreaded_concurrency() {
 
     assert!(OsKeyring::get().unwrap().is_some());
 }
+
+#[test]
+fn test_external_vault_payload_toml_and_json_fallback_parsing() {
+    use dotler::config::VaultConfig;
+
+    let pass = SecretString::new("shared-vault-passphrase-42".to_string());
+    let (orig_cfg, orig_key, _mnemonic) = init_vault(&pass).unwrap();
+
+    // 1. Full dotler.toml with [group] sections must ignore groups and extract vault keys
+    let full_toml = format!(
+        r#"vault_id = "{}"
+password_slot = "{}"
+recovery_slot = "{}"
+vault_hint = "work-laptop"
+
+[shell]
+os-nux = "~"
+files = ".zshrc"
+"#,
+        orig_cfg.vault_id, orig_cfg.password_slot, orig_cfg.recovery_slot
+    );
+    let parsed_toml = VaultConfig::parse_external_payload(&full_toml).unwrap();
+    assert_eq!(parsed_toml.vault_id, orig_cfg.vault_id);
+    assert_eq!(parsed_toml.password_slot, orig_cfg.password_slot);
+    assert_eq!(parsed_toml.recovery_slot, orig_cfg.recovery_slot);
+    assert_eq!(parsed_toml.vault_hint.as_deref(), Some("work-laptop"));
+
+    // 2. JSON fallback without vault_id (derived on unwrap) and with extra unrelated fields
+    let json_payload = serde_json::json!({
+        "password_slot": orig_cfg.password_slot,
+        "recovery_slot": orig_cfg.recovery_slot,
+        "vault_hint": "json-endpoint",
+        "extra_group": { "os-nux": "~" }
+    })
+    .to_string();
+    let parsed_json = VaultConfig::parse_external_payload(&json_payload).unwrap();
+    assert_eq!(parsed_json.vault_id, "");
+    assert_eq!(parsed_json.password_slot, orig_cfg.password_slot);
+    assert_eq!(parsed_json.recovery_slot, orig_cfg.recovery_slot);
+    assert_eq!(parsed_json.vault_hint.as_deref(), Some("json-endpoint"));
+
+    let slot = VaultSlot::from_base64(&parsed_json.password_slot).unwrap();
+    let unwrapped_key = slot.unwrap(&pass, None).unwrap();
+    assert_eq!(unwrapped_key.vault_id(), orig_key.vault_id());
+}
+
+#[test]
+fn test_e2e_vault_init_import_from_git_url_and_local_sources() {
+    use std::fs;
+    use std::process::{Command, Stdio};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let home_dir = root.join("home");
+    let dotler_dir = home_dir.join(".config").join("dotler");
+    let repo_origin = home_dir.join("repo_origin");
+    let repo_from_label = home_dir.join("repo_from_label");
+    let repo_from_url = home_dir.join("repo_from_url");
+    let repo_from_git = home_dir.join("repo_from_git");
+    fs::create_dir_all(&dotler_dir).unwrap();
+
+    let run_dotler = |cwd: &std::path::Path, args: &[&str], pass: Option<&str>| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_dotler"));
+        cmd.env("HOME", &home_dir)
+            .env("DOTLER_MOCK_KEYRING", "1")
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .args(args);
+        if let Some(p) = pass {
+            cmd.env("DOTLER_PASSPHRASE", p);
+        } else {
+            cmd.env_remove("DOTLER_PASSPHRASE");
+        }
+        cmd.output().unwrap()
+    };
+
+    // 1. Initialize origin repo and create a new vault
+    fs::create_dir_all(&repo_origin).unwrap();
+    assert_eq!(
+        run_dotler(&repo_origin, &["init", "--label", "origin", "--json"], None)
+            .status
+            .code(),
+        Some(0)
+    );
+    let init_out = run_dotler(
+        &repo_origin,
+        &["vault", "init", "--hint", "shared-hint", "--json"],
+        Some("master-shared-pass-777"),
+    );
+    assert_eq!(init_out.status.code(), Some(0));
+    let init_json: serde_json::Value =
+        serde_json::from_slice(&init_out.stdout).expect("valid JSON");
+    let origin_vault_id = init_json["data"]["vault_id"].as_str().unwrap().to_string();
+    assert!(
+        init_json["data"]["mnemonic"].is_string(),
+        "New vault init must include recovery mnemonic"
+    );
+
+    // 2. Import vault into second repo via `--from origin` (registered repo label)
+    fs::create_dir_all(&repo_from_label).unwrap();
+    assert_eq!(
+        run_dotler(
+            &repo_from_label,
+            &["init", "--label", "second", "--json"],
+            None
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    let from_out = run_dotler(
+        &repo_from_label,
+        &["vault", "init", "--from", "origin", "--json"],
+        Some("master-shared-pass-777"),
+    );
+    assert_eq!(from_out.status.code(), Some(0));
+    let from_json: serde_json::Value = serde_json::from_slice(&from_out.stdout).unwrap();
+    assert_eq!(from_json["data"]["vault_id"], origin_vault_id);
+    assert!(
+        from_json["data"].get("mnemonic").is_none(),
+        "Imported vault must omit recovery mnemonic"
+    );
+    assert_eq!(from_json["data"]["hint"], "shared-hint");
+
+    // Wrong passphrase must fail with exit code 4
+    let repo_wrong = home_dir.join("repo_wrong");
+    fs::create_dir_all(&repo_wrong).unwrap();
+    run_dotler(&repo_wrong, &["init", "--label", "wrong", "--json"], None);
+    let wrong_out = run_dotler(
+        &repo_wrong,
+        &["vault", "init", "--from", "origin", "--json"],
+        Some("wrong-passphrase"),
+    );
+    assert_eq!(wrong_out.status.code(), Some(4));
+
+    // 3. Import vault via `--url` pointing to a JSON endpoint (testing JSON fallback)
+    let origin_cfg = dotler::config::RepoConfig::load(&repo_origin.join("dotler.toml")).unwrap();
+    let origin_v = origin_cfg.vault.unwrap();
+    let json_file = root.join("vault_endpoint.json");
+    fs::write(
+        &json_file,
+        serde_json::json!({
+            "password_slot": origin_v.password_slot,
+            "recovery_slot": origin_v.recovery_slot,
+            "vault_hint": "from-json-url"
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    fs::create_dir_all(&repo_from_url).unwrap();
+    run_dotler(
+        &repo_from_url,
+        &["init", "--label", "third", "--json"],
+        None,
+    );
+    let file_url = format!("file://{}", json_file.display());
+    let url_out = run_dotler(
+        &repo_from_url,
+        &["vault", "init", "--url", &file_url, "--json"],
+        Some("master-shared-pass-777"),
+    );
+    assert_eq!(url_out.status.code(), Some(0));
+    let url_json: serde_json::Value = serde_json::from_slice(&url_out.stdout).unwrap();
+    assert_eq!(url_json["data"]["vault_id"], origin_vault_id);
+    assert_eq!(url_json["data"]["hint"], "from-json-url");
+
+    // 4. Import vault via `--git` from a bare Git repository
+    let bare_git = root.join("origin_bare.git");
+    Command::new("git")
+        .args(["init", repo_origin.to_str().unwrap()])
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args([
+            "-C",
+            repo_origin.to_str().unwrap(),
+            "config",
+            "user.name",
+            "T",
+        ])
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args([
+            "-C",
+            repo_origin.to_str().unwrap(),
+            "config",
+            "user.email",
+            "t@e.com",
+        ])
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["-C", repo_origin.to_str().unwrap(), "add", "dotler.toml"])
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["-C", repo_origin.to_str().unwrap(), "commit", "-m", "init"])
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args([
+            "clone",
+            "--bare",
+            repo_origin.to_str().unwrap(),
+            bare_git.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap();
+
+    fs::create_dir_all(&repo_from_git).unwrap();
+    run_dotler(
+        &repo_from_git,
+        &["init", "--label", "fourth", "--json"],
+        None,
+    );
+    let git_url = format!("file://{}", bare_git.display());
+    let git_out = run_dotler(
+        &repo_from_git,
+        &["vault", "init", "--git", &git_url, "--json"],
+        Some("master-shared-pass-777"),
+    );
+    assert_eq!(git_out.status.code(), Some(0));
+    let git_json: serde_json::Value = serde_json::from_slice(&git_out.stdout).unwrap();
+    assert_eq!(git_json["data"]["vault_id"], origin_vault_id);
+}

@@ -312,7 +312,8 @@ pub fn styled_hint_label() -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VaultInitReport {
     pub vault_id: String,
-    pub mnemonic: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mnemonic: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
 }
@@ -516,10 +517,13 @@ impl InlineRender for crate::engine::remote::UninstallReport {
 
 impl InlineRender for VaultInitReport {
     fn render_inline(&self) -> String {
-        format!(
-            "Vault init done. (id: {})\n🔑 Recovery mnemonic: {}",
-            self.vault_id, self.mnemonic
-        )
+        match &self.mnemonic {
+            Some(m) => format!(
+                "Vault init done. (id: {})\n🔑 Recovery mnemonic: {}",
+                self.vault_id, m
+            ),
+            None => format!("Vault init done. (id: {})", self.vault_id),
+        }
     }
 }
 
@@ -813,12 +817,22 @@ mod tests {
 
         let vinit_rep = VaultInitReport {
             vault_id: "vid-123".to_string(),
-            mnemonic: "word1 word2".to_string(),
+            mnemonic: Some("word1 word2".to_string()),
             hint: None,
         };
         assert_eq!(
             vinit_rep.render_inline(),
             "Vault init done. (id: vid-123)\n🔑 Recovery mnemonic: word1 word2"
+        );
+
+        let vinit_import_rep = VaultInitReport {
+            vault_id: "vid-123".to_string(),
+            mnemonic: None,
+            hint: None,
+        };
+        assert_eq!(
+            vinit_import_rep.render_inline(),
+            "Vault init done. (id: vid-123)"
         );
 
         let vpasswd_rep = VaultPasswdReport {

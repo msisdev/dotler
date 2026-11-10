@@ -13,20 +13,21 @@ use crate::cli::output::{
 use crate::config::local::{
     LOCAL_CONFIG_FILE, LocalConfig, expand_tilde, get_local_config, resolve_repo_path_with_cwd,
 };
-use crate::config::repo::{OsInfo, RepoConfig, get_repo_config};
+use crate::config::repo::{OsInfo, RepoConfig, VaultConfig, get_repo_config};
 use crate::config::state::{DOTLER_LOCK_PATH, DotlerLockGuard, get_lock};
 use crate::core::context::CoreContext;
 use crate::core::vault_loader::{read_new_passphrase, rotate_vault_passphrases};
 use crate::crypto::SecretString;
 use crate::crypto::keyring::{OsKeyring, get_password};
-use crate::crypto::vault::{init_vault, recover_vault};
+use crate::crypto::vault::{VaultSlot, init_vault, recover_vault};
 use crate::engine::EngineError;
 use crate::engine::check::{run_check, run_init, run_status};
 use crate::engine::observer::{
     CommandObserver, NoopObserver, PlanActionKind, PlanDirection, PlanPreviewEntry,
 };
 use crate::engine::remote::{
-    GroupSelector, run_git_clone, run_git_install, run_git_ls, run_git_uninstall,
+    GitRunner, GroupSelector, REMOTE_TOML_FETCH_MAX_BYTES, fetch_http_text, parse_url,
+    run_git_clone, run_git_install, run_git_ls, run_git_uninstall,
 };
 use crate::engine::sync::{run_export, run_import};
 use crate::engine::tidy::{TidyOrphanPolicy, run_tidy};
@@ -370,6 +371,27 @@ pub enum VaultCommand {
 
 #[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
 pub struct VaultInitArgs {
+    #[arg(
+        long,
+        conflicts_with_all = ["url", "from"],
+        help = "Import existing vault metadata from a remote Git repository"
+    )]
+    pub git: Option<String>,
+
+    #[arg(
+        long,
+        conflicts_with_all = ["git", "from"],
+        help = "Import existing vault metadata via HTTP GET (TOML or JSON)"
+    )]
+    pub url: Option<String>,
+
+    #[arg(
+        long,
+        conflicts_with_all = ["git", "url"],
+        help = "Import existing vault metadata from a registered repository label or local path (TOML or JSON)"
+    )]
+    pub from: Option<String>,
+
     #[arg(long = "password-stdin", help = "Read passphrase from standard input")]
     pub password_stdin: bool,
 
@@ -865,6 +887,7 @@ fn resolve_vault_init_passphrase<W: Write>(
     password_stdin: bool,
     is_interactive: bool,
     json_mode: bool,
+    is_import: bool,
 ) -> Result<(SecretString, bool), EngineError> {
     let has_env_pass = std::env::var(crate::crypto::keyring::PASSPHRASE_ENV_VAR)
         .is_ok_and(|v| !v.trim_end_matches(['\r', '\n']).is_empty());
@@ -892,13 +915,58 @@ fn resolve_vault_init_passphrase<W: Write>(
         }
     }
 
-    let pass = read_new_passphrase(
-        password_stdin,
-        true,
-        is_interactive,
-        "Enter new vault passphrase: ",
-    )?;
+    let prompt = if is_import {
+        "Enter vault passphrase: "
+    } else {
+        "Enter new vault passphrase: "
+    };
+    let pass = read_new_passphrase(password_stdin, true, is_interactive, prompt)?;
     Ok((pass, true))
+}
+
+fn fetch_external_vault_payload(
+    local_cfg: &LocalConfig,
+    args: &VaultInitArgs,
+) -> Result<Option<String>, EngineError> {
+    if let Some(ref git_url) = args.git {
+        let parsed = parse_url(git_url)?;
+        let rel_path = match &parsed.subpath {
+            Some(sub) if !sub.is_empty() => format!("{}/dotler.toml", sub.trim_matches('/')),
+            _ => "dotler.toml".to_string(),
+        };
+        let raw_bytes = GitRunner::fetch_file_shallow(
+            &parsed.clone_url,
+            None,
+            &rel_path,
+            REMOTE_TOML_FETCH_MAX_BYTES,
+        )?;
+        let raw = String::from_utf8(raw_bytes).map_err(|e| {
+            EngineError::Config(crate::config::ConfigError::TomlSyntaxError(e.to_string()))
+        })?;
+        return Ok(Some(raw));
+    }
+    if let Some(ref http_url) = args.url {
+        let raw = fetch_http_text(http_url, REMOTE_TOML_FETCH_MAX_BYTES)?;
+        return Ok(Some(raw));
+    }
+    if let Some(ref from_source) = args.from {
+        let target_file = if let Some(registered) = local_cfg.repos.get(from_source) {
+            expand_tilde(registered).join("dotler.toml")
+        } else {
+            let expanded = expand_tilde(from_source);
+            if expanded.is_dir() {
+                expanded.join("dotler.toml")
+            } else {
+                expanded
+            }
+        };
+        if !target_file.exists() {
+            return Err(EngineError::FileNotFound { path: target_file });
+        }
+        let raw = std::fs::read_to_string(&target_file)?;
+        return Ok(Some(raw));
+    }
+    Ok(None)
 }
 
 fn handle_vault<W: Write>(
@@ -923,20 +991,63 @@ fn handle_vault<W: Write>(
                     hint: "Vault is already initialized in dotler.toml. Use 'dotler vault passwd' to change password.".to_string(),
                 }));
             }
-            let (pass, should_update_keyring) = resolve_vault_init_passphrase(
-                stdout,
-                local_cfg.use_keyring,
-                args.password_stdin,
-                is_interactive,
-                cli.json,
-            )?;
-            let (mut vault_cfg, _vault_key, mnemonic) = init_vault(&pass)?;
-            vault_cfg.vault_hint = args
+
+            let explicit_hint = args
                 .hint
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string);
+
+            let (vault_cfg, mnemonic_opt, pass, should_update_keyring) =
+                if let Some(raw_payload) = fetch_external_vault_payload(local_cfg, args)? {
+                    let ext_vault = VaultConfig::parse_external_payload(&raw_payload)?;
+                    let pw_slot = VaultSlot::from_base64(&ext_vault.password_slot)?;
+                    let _rec_slot = VaultSlot::from_base64(&ext_vault.recovery_slot)?;
+
+                    let (pass, should_update_keyring) = resolve_vault_init_passphrase(
+                        stdout,
+                        local_cfg.use_keyring,
+                        args.password_stdin,
+                        is_interactive,
+                        cli.json,
+                        true,
+                    )?;
+
+                    let expected_vid = if ext_vault.vault_id.is_empty() {
+                        None
+                    } else {
+                        Some(ext_vault.vault_id.as_str())
+                    };
+                    let vault_key = pw_slot.unwrap(&pass, expected_vid)?;
+                    let verified_vault_id = vault_key.vault_id();
+                    let final_hint = explicit_hint.or(ext_vault.vault_hint);
+
+                    let cfg = VaultConfig {
+                        vault_id: verified_vault_id,
+                        password_slot: ext_vault.password_slot,
+                        recovery_slot: ext_vault.recovery_slot,
+                        vault_hint: final_hint,
+                    };
+                    (cfg, None, pass, should_update_keyring)
+                } else {
+                    let (pass, should_update_keyring) = resolve_vault_init_passphrase(
+                        stdout,
+                        local_cfg.use_keyring,
+                        args.password_stdin,
+                        is_interactive,
+                        cli.json,
+                        false,
+                    )?;
+                    let (mut cfg, _vault_key, mnemonic) = init_vault(&pass)?;
+                    cfg.vault_hint = explicit_hint;
+                    (
+                        cfg,
+                        Some(mnemonic.phrase().to_string()),
+                        pass,
+                        should_update_keyring,
+                    )
+                };
 
             let vault_id = vault_cfg.vault_id.clone();
             let vault_hint = vault_cfg.vault_hint.clone();
@@ -953,7 +1064,7 @@ fn handle_vault<W: Write>(
 
             let data = VaultInitReport {
                 vault_id,
-                mnemonic: mnemonic.phrase().to_string(),
+                mnemonic: mnemonic_opt,
                 hint: vault_hint,
             };
             Ok(render_success_to(stdout, "vault init", &data, cli.json))
@@ -1456,7 +1567,7 @@ mod tests {
         ConfirmPrompt::push_mock_input("yes");
         let mut out = Vec::new();
         let (resolved_yes, should_update_yes) =
-            resolve_vault_init_passphrase(&mut out, true, false, true, false).unwrap();
+            resolve_vault_init_passphrase(&mut out, true, false, true, false, false).unwrap();
         assert_eq!(resolved_yes.expose_secret(), "existing-keyring-pass-111");
         assert!(!should_update_yes);
 
@@ -1465,11 +1576,78 @@ mod tests {
         OsKeyring::push_mock_prompt_reply("brand-new-pass-222");
         let mut out2 = Vec::new();
         let (resolved_no, should_update_no) =
-            resolve_vault_init_passphrase(&mut out2, true, false, true, false).unwrap();
+            resolve_vault_init_passphrase(&mut out2, true, false, true, false, false).unwrap();
         assert_eq!(resolved_no.expose_secret(), "brand-new-pass-222");
         assert!(should_update_no);
 
         OsKeyring::clear_mock();
         OsKeyring::disable_mock();
+    }
+
+    #[test]
+    fn test_vault_init_external_flags_mutual_exclusion() {
+        let g = Cli::try_parse_from(["dotler", "vault", "init", "--git", "github:user/dots"])
+            .expect("--git must parse");
+        match g.command {
+            Command::Vault {
+                command: VaultCommand::Init(a),
+            } => assert_eq!(a.git.as_deref(), Some("github:user/dots")),
+            other => panic!("Unexpected: {other:?}"),
+        }
+
+        let u = Cli::try_parse_from([
+            "dotler",
+            "vault",
+            "init",
+            "--url",
+            "https://example.com/vault.json",
+        ])
+        .expect("--url must parse");
+        match u.command {
+            Command::Vault {
+                command: VaultCommand::Init(a),
+            } => assert_eq!(a.url.as_deref(), Some("https://example.com/vault.json")),
+            other => panic!("Unexpected: {other:?}"),
+        }
+
+        let f = Cli::try_parse_from(["dotler", "vault", "init", "--from", "main"])
+            .expect("--from must parse");
+        match f.command {
+            Command::Vault {
+                command: VaultCommand::Init(a),
+            } => assert_eq!(a.from.as_deref(), Some("main")),
+            other => panic!("Unexpected: {other:?}"),
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "dotler",
+                "vault",
+                "init",
+                "--git",
+                "gh:u/r",
+                "--url",
+                "https://example.com/v.toml"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "dotler", "vault", "init", "--git", "gh:u/r", "--from", "main"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "dotler",
+                "vault",
+                "init",
+                "--url",
+                "https://example.com/v.toml",
+                "--from",
+                "main"
+            ])
+            .is_err()
+        );
     }
 }

@@ -6,8 +6,9 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::sync::atomic::AtomicBool;
 
 use serde::{Deserialize, Serialize};
 
@@ -172,184 +173,542 @@ fn is_git_repo_dir(dir: &Path) -> bool {
     dir.join(".git").exists() || (dir.join("HEAD").is_file() && dir.join("objects").is_dir())
 }
 
-pub fn parse_url(raw: &str) -> Result<RemoteRepoUrl, EngineError> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(EngineError::InvalidUrlFormat {
-            url: raw.to_string(),
-            reason: "URL cannot be empty".to_string(),
-        });
-    }
+impl RemoteRepoUrl {
+    /// Parses and normalizes a raw Git repository URL or shorthand (`gh:`/`github:`, `gl:`/`gitlab:`,
+    /// `cb:`/`codeberg:`, `srht:`/`sourcehut:`, `bb:`/`bitbucket:`, `https://`, `http://`, `file://`).
+    pub fn parse(raw: &str) -> Result<Self, EngineError> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(EngineError::InvalidUrlFormat {
+                url: raw.to_string(),
+                reason: "URL cannot be empty".to_string(),
+            });
+        }
 
-    let (clone_url, subpath) = if let Some(slug) = trimmed.strip_prefix("gh:") {
-        let clean = slug.trim_matches('/');
-        if clean.is_empty() {
-            return Err(EngineError::InvalidUrlFormat {
-                url: raw.to_string(),
-                reason: "Repository slug cannot be empty".to_string(),
-            });
-        }
-        let (repo_part, sub) = split_two_segment_slug(clean);
-        let sub_norm = match sub {
-            Some(s) => Some(normalize_subpath(s)?),
-            None => None,
-        };
-        (format!("https://github.com/{}.git", repo_part), sub_norm)
-    } else if let Some(slug) = trimmed.strip_prefix("gl:") {
-        let clean = slug.trim_matches('/');
-        if clean.is_empty() {
-            return Err(EngineError::InvalidUrlFormat {
-                url: raw.to_string(),
-                reason: "Repository slug cannot be empty".to_string(),
-            });
-        }
-        if let Some((repo_part, sub_part)) = clean.split_once(".git/") {
-            (
-                format!("https://gitlab.com/{}.git", repo_part),
-                Some(normalize_subpath(sub_part)?),
-            )
-        } else if clean.ends_with("/dotler.toml") {
+        let (clone_url, subpath) = if let Some(slug) = trimmed
+            .strip_prefix("gh:")
+            .or_else(|| trimmed.strip_prefix("github:"))
+        {
+            let clean = slug.trim_matches('/');
+            if clean.is_empty() {
+                return Err(EngineError::InvalidUrlFormat {
+                    url: raw.to_string(),
+                    reason: "Repository slug cannot be empty".to_string(),
+                });
+            }
             let (repo_part, sub) = split_two_segment_slug(clean);
             let sub_norm = match sub {
                 Some(s) => Some(normalize_subpath(s)?),
-                None => Some(String::new()),
+                None => None,
             };
-            (format!("https://gitlab.com/{}.git", repo_part), sub_norm)
-        } else {
-            (
-                format!("https://gitlab.com/{}.git", clean.trim_end_matches(".git")),
-                None,
-            )
-        }
-    } else if let Some(slug) = trimmed.strip_prefix("cb:") {
-        let clean = slug.trim_matches('/');
-        if clean.is_empty() {
-            return Err(EngineError::InvalidUrlFormat {
-                url: raw.to_string(),
-                reason: "Repository slug cannot be empty".to_string(),
-            });
-        }
-        let (repo_part, sub) = split_two_segment_slug(clean);
-        let sub_norm = match sub {
-            Some(s) => Some(normalize_subpath(s)?),
-            None => None,
-        };
-        (format!("https://codeberg.org/{}.git", repo_part), sub_norm)
-    } else if let Some(slug) = trimmed.strip_prefix("srht:") {
-        let clean = slug.trim_matches('/');
-        if clean.is_empty() {
-            return Err(EngineError::InvalidUrlFormat {
-                url: raw.to_string(),
-                reason: "Repository slug cannot be empty".to_string(),
-            });
-        }
-        let (repo_part, sub) = split_two_segment_slug(clean);
-        let sub_norm = match sub {
-            Some(s) => Some(normalize_subpath(s)?),
-            None => None,
-        };
-        (format!("https://git.sr.ht/{}", repo_part), sub_norm)
-    } else if let Some(slug) = trimmed.strip_prefix("bb:") {
-        let clean = slug.trim_matches('/');
-        if clean.is_empty() {
-            return Err(EngineError::InvalidUrlFormat {
-                url: raw.to_string(),
-                reason: "Repository slug cannot be empty".to_string(),
-            });
-        }
-        let (repo_part, sub) = split_two_segment_slug(clean);
-        let sub_norm = match sub {
-            Some(s) => Some(normalize_subpath(s)?),
-            None => None,
-        };
-        (format!("https://bitbucket.org/{}.git", repo_part), sub_norm)
-    } else if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
-        if let Some((left, right)) = trimmed.split_once(".git/") {
-            (format!("{left}.git"), Some(normalize_subpath(right)?))
-        } else if let Some((scheme, rest)) = trimmed.split_once("://")
-            && let Some((host, path_part)) = rest.split_once('/')
+            (format!("https://github.com/{}.git", repo_part), sub_norm)
+        } else if let Some(slug) = trimmed
+            .strip_prefix("gl:")
+            .or_else(|| trimmed.strip_prefix("gitlab:"))
         {
-            let clean_path = path_part.trim_matches('/');
-            let is_two_seg_host = matches!(
-                host,
-                "github.com" | "codeberg.org" | "bitbucket.org" | "git.sr.ht"
-            );
-            if is_two_seg_host || clean_path.ends_with("/dotler.toml") {
-                let (repo_part, sub) = split_two_segment_slug(clean_path);
+            let clean = slug.trim_matches('/');
+            if clean.is_empty() {
+                return Err(EngineError::InvalidUrlFormat {
+                    url: raw.to_string(),
+                    reason: "Repository slug cannot be empty".to_string(),
+                });
+            }
+            if let Some((repo_part, sub_part)) = clean.split_once(".git/") {
+                (
+                    format!("https://gitlab.com/{}.git", repo_part),
+                    Some(normalize_subpath(sub_part)?),
+                )
+            } else if clean.ends_with("/dotler.toml") {
+                let (repo_part, sub) = split_two_segment_slug(clean);
                 let sub_norm = match sub {
                     Some(s) => Some(normalize_subpath(s)?),
-                    None => None,
+                    None => Some(String::new()),
                 };
-                let url_out = format!("{scheme}://{host}/{repo_part}.git");
-                (url_out, sub_norm)
+                (format!("https://gitlab.com/{}.git", repo_part), sub_norm)
+            } else {
+                (
+                    format!("https://gitlab.com/{}.git", clean.trim_end_matches(".git")),
+                    None,
+                )
+            }
+        } else if let Some(slug) = trimmed
+            .strip_prefix("cb:")
+            .or_else(|| trimmed.strip_prefix("codeberg:"))
+        {
+            let clean = slug.trim_matches('/');
+            if clean.is_empty() {
+                return Err(EngineError::InvalidUrlFormat {
+                    url: raw.to_string(),
+                    reason: "Repository slug cannot be empty".to_string(),
+                });
+            }
+            let (repo_part, sub) = split_two_segment_slug(clean);
+            let sub_norm = match sub {
+                Some(s) => Some(normalize_subpath(s)?),
+                None => None,
+            };
+            (format!("https://codeberg.org/{}.git", repo_part), sub_norm)
+        } else if let Some(slug) = trimmed
+            .strip_prefix("srht:")
+            .or_else(|| trimmed.strip_prefix("sourcehut:"))
+        {
+            let clean = slug.trim_matches('/');
+            if clean.is_empty() {
+                return Err(EngineError::InvalidUrlFormat {
+                    url: raw.to_string(),
+                    reason: "Repository slug cannot be empty".to_string(),
+                });
+            }
+            let (repo_part, sub) = split_two_segment_slug(clean);
+            let sub_norm = match sub {
+                Some(s) => Some(normalize_subpath(s)?),
+                None => None,
+            };
+            (format!("https://git.sr.ht/{}", repo_part), sub_norm)
+        } else if let Some(slug) = trimmed
+            .strip_prefix("bb:")
+            .or_else(|| trimmed.strip_prefix("bitbucket:"))
+        {
+            let clean = slug.trim_matches('/');
+            if clean.is_empty() {
+                return Err(EngineError::InvalidUrlFormat {
+                    url: raw.to_string(),
+                    reason: "Repository slug cannot be empty".to_string(),
+                });
+            }
+            let (repo_part, sub) = split_two_segment_slug(clean);
+            let sub_norm = match sub {
+                Some(s) => Some(normalize_subpath(s)?),
+                None => None,
+            };
+            (format!("https://bitbucket.org/{}.git", repo_part), sub_norm)
+        } else if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+            if let Some((left, right)) = trimmed.split_once(".git/") {
+                (format!("{left}.git"), Some(normalize_subpath(right)?))
+            } else if let Some((scheme, rest)) = trimmed.split_once("://")
+                && let Some((host, path_part)) = rest.split_once('/')
+            {
+                let clean_path = path_part.trim_matches('/');
+                let is_two_seg_host = matches!(
+                    host,
+                    "github.com" | "codeberg.org" | "bitbucket.org" | "git.sr.ht"
+                );
+                if is_two_seg_host || clean_path.ends_with("/dotler.toml") {
+                    let (repo_part, sub) = split_two_segment_slug(clean_path);
+                    let sub_norm = match sub {
+                        Some(s) => Some(normalize_subpath(s)?),
+                        None => None,
+                    };
+                    let url_out = format!("{scheme}://{host}/{repo_part}.git");
+                    (url_out, sub_norm)
+                } else if trimmed.ends_with(".git") {
+                    (trimmed.to_string(), None)
+                } else {
+                    (format!("{}.git", trimmed.trim_end_matches('/')), None)
+                }
             } else if trimmed.ends_with(".git") {
                 (trimmed.to_string(), None)
             } else {
-                (format!("{}.git", trimmed.trim_end_matches('/')), None)
+                (format!("{}.git", trimmed), None)
             }
-        } else if trimmed.ends_with(".git") {
-            (trimmed.to_string(), None)
-        } else {
-            (format!("{}.git", trimmed), None)
-        }
-    } else if trimmed.starts_with("file://")
-        || trimmed.starts_with('/')
-        || trimmed.starts_with("./")
-    {
-        if let Some((left, right)) = trimmed.split_once(".git/")
-            && !left.ends_with('/')
+        } else if trimmed.starts_with("file://")
+            || trimmed.starts_with('/')
+            || trimmed.starts_with("./")
         {
-            (format!("{left}.git"), Some(normalize_subpath(right)?))
-        } else {
-            let has_file_scheme = trimmed.starts_with("file://");
-            let fs_str = trimmed.strip_prefix("file://").unwrap_or(trimmed);
-            let (cand_str, explicit_toml) = if let Some(s) = fs_str.strip_suffix("/dotler.toml") {
-                (s, true)
+            if let Some((left, right)) = trimmed.split_once(".git/")
+                && !left.ends_with('/')
+            {
+                (format!("{left}.git"), Some(normalize_subpath(right)?))
             } else {
-                (fs_str, false)
-            };
-            let cand_path = Path::new(cand_str);
-            let mut found_split: Option<(String, String)> = None;
-            if explicit_toml || !is_git_repo_dir(cand_path) {
-                for anc in cand_path.ancestors() {
-                    if is_git_repo_dir(anc) {
-                        if let Ok(rel) = cand_path.strip_prefix(anc) {
-                            let repo_str = if has_file_scheme {
-                                format!("file://{}", anc.display())
-                            } else {
-                                anc.display().to_string()
-                            };
-                            found_split = Some((repo_str, rel.to_string_lossy().to_string()));
+                let has_file_scheme = trimmed.starts_with("file://");
+                let fs_str = trimmed.strip_prefix("file://").unwrap_or(trimmed);
+                let (cand_str, explicit_toml) = if let Some(s) = fs_str.strip_suffix("/dotler.toml")
+                {
+                    (s, true)
+                } else {
+                    (fs_str, false)
+                };
+                let cand_path = Path::new(cand_str);
+                let mut found_split: Option<(String, String)> = None;
+                if explicit_toml || !is_git_repo_dir(cand_path) {
+                    for anc in cand_path.ancestors() {
+                        if is_git_repo_dir(anc) {
+                            if let Ok(rel) = cand_path.strip_prefix(anc) {
+                                let repo_str = if has_file_scheme {
+                                    format!("file://{}", anc.display())
+                                } else {
+                                    anc.display().to_string()
+                                };
+                                found_split = Some((repo_str, rel.to_string_lossy().to_string()));
+                            }
+                            break;
                         }
-                        break;
                     }
                 }
-            }
-            if let Some((repo_str, rel_str)) = found_split {
-                (repo_str, Some(normalize_subpath(&rel_str)?))
-            } else if explicit_toml {
-                let repo_str = if has_file_scheme {
-                    format!("file://{cand_str}")
+                if let Some((repo_str, rel_str)) = found_split {
+                    (repo_str, Some(normalize_subpath(&rel_str)?))
+                } else if explicit_toml {
+                    let repo_str = if has_file_scheme {
+                        format!("file://{cand_str}")
+                    } else {
+                        cand_str.to_string()
+                    };
+                    (repo_str, Some(String::new()))
                 } else {
-                    cand_str.to_string()
-                };
-                (repo_str, Some(String::new()))
-            } else {
-                (trimmed.to_string(), None)
+                    (trimmed.to_string(), None)
+                }
+            }
+        } else {
+            return Err(EngineError::InvalidUrlFormat {
+                url: trimmed.to_string(),
+                reason: "Unrecognized URL scheme. Use gh:/github:, gl:/gitlab:, cb:/codeberg:, srht:/sourcehut:, bb:/bitbucket:, or https://"
+                    .to_string(),
+            });
+        };
+
+        Ok(RemoteRepoUrl {
+            raw: trimmed.to_string(),
+            clone_url,
+            subpath,
+        })
+    }
+}
+
+pub fn parse_url(raw: &str) -> Result<RemoteRepoUrl, EngineError> {
+    RemoteRepoUrl::parse(raw)
+}
+
+#[derive(Default)]
+struct UreqGitHttp {
+    redirected_base: Option<String>,
+}
+
+impl UreqGitHttp {
+    fn effective_url(&self, base_url: &str, mut url: String) -> String {
+        if let Some(effective_base) = &self.redirected_base {
+            url.replace_range(..base_url.len(), effective_base);
+        }
+        url
+    }
+}
+
+impl gix_transport::client::blocking_io::http::Http for UreqGitHttp {
+    type Headers = gix::features::io::pipe::Reader;
+    type ResponseBody = gix::features::io::pipe::Reader;
+    type PostBody = gix::features::io::pipe::Writer;
+
+    fn get(
+        &mut self,
+        url: &str,
+        base_url: &str,
+        headers: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<
+        gix_transport::client::blocking_io::http::GetResponse<Self::Headers, Self::ResponseBody>,
+        gix_transport::client::blocking_io::http::Error,
+    > {
+        use gix::features::io::pipe;
+        use gix_transport::client::blocking_io::http::{Error as HttpError, GetResponse};
+
+        let effective_url = self.effective_url(base_url, url.to_owned());
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(30)))
+            .http_status_as_error(false)
+            .build();
+        let agent: ureq::Agent = config.into();
+        let mut req = agent.get(&effective_url);
+        for h in headers {
+            if let Some((k, v)) = h.as_ref().split_once(':') {
+                req = req.header(k.trim(), v.trim());
             }
         }
-    } else {
+
+        let res = req.call().map_err(|e| HttpError::InitHttpClient {
+            source: Box::new(e),
+        })?;
+        let status = res.status().as_u16();
+        if !(200..300).contains(&status) {
+            let kind = if status == 401 {
+                std::io::ErrorKind::PermissionDenied
+            } else {
+                std::io::ErrorKind::Other
+            };
+            return Err(HttpError::PostBody(std::io::Error::new(
+                kind,
+                format!("HTTP status {status}"),
+            )));
+        }
+
+        let (mut headers_tx, headers_rx) = pipe::unidirectional(0);
+        let (mut body_tx, body_rx) = pipe::unidirectional(0);
+
+        for (name, val) in res.headers() {
+            if let Ok(v_str) = val.to_str() {
+                let _ = writeln!(headers_tx, "{}:{v_str}", name.as_str());
+            }
+        }
+        drop(headers_tx);
+
+        let mut reader = res.into_body().into_reader();
+        std::thread::spawn(move || {
+            if let Err(e) = std::io::copy(&mut reader, &mut body_tx) {
+                let _ = body_tx.channel.send(Err(e));
+            }
+        });
+
+        Ok(GetResponse {
+            headers: headers_rx,
+            body: body_rx,
+        })
+    }
+
+    fn post(
+        &mut self,
+        url: &str,
+        base_url: &str,
+        headers: impl IntoIterator<Item = impl AsRef<str>>,
+        _body: gix_transport::client::blocking_io::http::PostBodyDataKind,
+    ) -> Result<
+        gix_transport::client::blocking_io::http::PostResponse<
+            Self::Headers,
+            Self::ResponseBody,
+            Self::PostBody,
+        >,
+        gix_transport::client::blocking_io::http::Error,
+    > {
+        use gix::features::io::pipe;
+        use gix_transport::client::blocking_io::http::PostResponse;
+
+        let effective_url = self.effective_url(base_url, url.to_owned());
+        let header_list: Vec<(String, String)> = headers
+            .into_iter()
+            .filter_map(|h| {
+                h.as_ref()
+                    .split_once(':')
+                    .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+            })
+            .collect();
+
+        let (post_body_tx, mut post_body_rx) = pipe::unidirectional(0);
+        let (mut headers_tx, headers_rx) = pipe::unidirectional(0);
+        let (mut body_tx, body_rx) = pipe::unidirectional(0);
+
+        std::thread::spawn(move || {
+            let mut upload_buf = Vec::new();
+            if let Err(e) = post_body_rx.read_to_end(&mut upload_buf) {
+                let _ = headers_tx.channel.send(Err(e));
+                return;
+            }
+            let config = ureq::Agent::config_builder()
+                .timeout_global(Some(std::time::Duration::from_secs(30)))
+                .http_status_as_error(false)
+                .build();
+            let agent: ureq::Agent = config.into();
+            let mut req = agent.post(&effective_url);
+            for (k, v) in &header_list {
+                req = req.header(k, v);
+            }
+            let res = match req.send(&upload_buf[..]) {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = headers_tx.channel.send(Err(std::io::Error::other(e)));
+                    return;
+                }
+            };
+            let status = res.status().as_u16();
+            if !(200..300).contains(&status) {
+                let kind = if status == 401 {
+                    std::io::ErrorKind::PermissionDenied
+                } else {
+                    std::io::ErrorKind::Other
+                };
+                let _ = headers_tx.channel.send(Err(std::io::Error::new(
+                    kind,
+                    format!("HTTP status {status}"),
+                )));
+                return;
+            }
+            for (name, val) in res.headers() {
+                if let Ok(v_str) = val.to_str() {
+                    let _ = writeln!(headers_tx, "{}:{v_str}", name.as_str());
+                }
+            }
+            drop(headers_tx);
+
+            let mut reader = res.into_body().into_reader();
+            if let Err(e) = std::io::copy(&mut reader, &mut body_tx) {
+                let _ = body_tx.channel.send(Err(e));
+            }
+        });
+
+        Ok(PostResponse {
+            post_body: post_body_tx,
+            headers: headers_rx,
+            body: body_rx,
+        })
+    }
+
+    fn configure(
+        &mut self,
+        _config: &dyn std::any::Any,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
+        Ok(())
+    }
+
+    fn redirected_base_url(&self) -> Option<String> {
+        self.redirected_base.clone()
+    }
+}
+
+fn materialize_tree_to_dir(
+    repo: &gix::Repository,
+    tree_id: gix::ObjectId,
+    dest: &Path,
+) -> Result<(), EngineError> {
+    fs::create_dir_all(dest)?;
+    let tree = repo
+        .find_object(tree_id)
+        .map_err(|e| EngineError::GitError {
+            operation: "checkout".to_string(),
+            message: format!("Failed to read tree object: {e}"),
+        })?
+        .try_into_tree()
+        .map_err(|e| EngineError::GitError {
+            operation: "checkout".to_string(),
+            message: format!("Object is not a git tree: {e}"),
+        })?;
+
+    for entry_res in tree.iter() {
+        let entry = entry_res.map_err(|e| EngineError::GitError {
+            operation: "checkout".to_string(),
+            message: format!("Failed to decode tree entry: {e}"),
+        })?;
+        let name = std::str::from_utf8(entry.filename()).map_err(|_| EngineError::GitError {
+            operation: "checkout".to_string(),
+            message: "Tree entry filename is not valid UTF-8".to_string(),
+        })?;
+        if name == ".git" || name.contains('/') || name.contains('\\') || name == ".." {
+            continue;
+        }
+        let target_path = dest.join(name);
+        match entry.mode().kind() {
+            gix::objs::tree::EntryKind::Tree => {
+                materialize_tree_to_dir(repo, entry.oid().to_owned(), &target_path)?;
+            }
+            gix::objs::tree::EntryKind::Blob | gix::objs::tree::EntryKind::BlobExecutable => {
+                let obj = repo
+                    .find_object(entry.oid())
+                    .map_err(|e| EngineError::GitError {
+                        operation: "checkout".to_string(),
+                        message: format!("Failed to read blob object: {e}"),
+                    })?;
+                fs::write(&target_path, &obj.data)?;
+                #[cfg(unix)]
+                if entry.mode().kind() == gix::objs::tree::EntryKind::BlobExecutable {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(&target_path, fs::Permissions::from_mode(0o755));
+                }
+            }
+            gix::objs::tree::EntryKind::Link => {
+                let obj = repo
+                    .find_object(entry.oid())
+                    .map_err(|e| EngineError::GitError {
+                        operation: "checkout".to_string(),
+                        message: format!("Failed to read symlink object: {e}"),
+                    })?;
+                let link_target =
+                    std::str::from_utf8(&obj.data).map_err(|_| EngineError::GitError {
+                        operation: "checkout".to_string(),
+                        message: "Symlink target is not valid UTF-8".to_string(),
+                    })?;
+                #[cfg(unix)]
+                {
+                    std::os::unix::fs::symlink(link_target, &target_path)?;
+                }
+                #[cfg(windows)]
+                {
+                    let _ = std::os::windows::fs::symlink_file(link_target, &target_path);
+                }
+            }
+            gix::objs::tree::EntryKind::Commit => {}
+        }
+    }
+    Ok(())
+}
+
+/// Fetches a UTF-8 text payload (such as `dotler.toml` or JSON vault config) over HTTP/HTTPS GET
+/// (or `file://` for local fixtures) within `max_bytes` using pure-Rust `ureq`.
+pub fn fetch_http_text(url: &str, max_bytes: usize) -> Result<String, EngineError> {
+    let trimmed = url.trim();
+    if let Some(file_path) = trimmed.strip_prefix("file://") {
+        let p = Path::new(file_path);
+        if is_symlink(p) {
+            return Err(EngineError::HardBlockedPath {
+                path: p.to_path_buf(),
+                reason: "symbolic links are prohibited".to_string(),
+            });
+        }
+        let metadata = fs::metadata(p).map_err(|e| EngineError::GitError {
+            operation: "http-get".to_string(),
+            message: format!("Failed to read '{}': {e}", p.display()),
+        })?;
+        if metadata.len() as usize > max_bytes {
+            return Err(EngineError::PayloadExceeded {
+                size_bytes: metadata.len() as usize,
+                limit_bytes: max_bytes,
+            });
+        }
+        let bytes = fs::read(p)?;
+        return String::from_utf8(bytes).map_err(|_| EngineError::GitError {
+            operation: "http-get".to_string(),
+            message: "Response payload is not valid UTF-8".to_string(),
+        });
+    }
+
+    if !trimmed.starts_with("https://") && !trimmed.starts_with("http://") {
         return Err(EngineError::InvalidUrlFormat {
             url: trimmed.to_string(),
-            reason: "Unrecognized URL scheme. Use gh:, gl:, cb:, srht:, bb:, or https://"
-                .to_string(),
+            reason: "Expected an http:// or https:// URL".to_string(),
         });
-    };
+    }
 
-    Ok(RemoteRepoUrl {
-        raw: trimmed.to_string(),
-        clone_url,
-        subpath,
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(20)))
+        .build();
+    let agent: ureq::Agent = config.into();
+    let response = agent
+        .get(trimmed)
+        .header("User-Agent", concat!("dotler/", env!("CARGO_PKG_VERSION")))
+        .header(
+            "Accept",
+            "application/toml, application/json, text/plain, */*",
+        )
+        .call()
+        .map_err(|e| EngineError::GitError {
+            operation: "http-get".to_string(),
+            message: format!("HTTP GET request to '{trimmed}' failed: {e}"),
+        })?;
+
+    let mut reader = response
+        .into_body()
+        .into_reader()
+        .take((max_bytes + 1) as u64);
+    let mut buf = Vec::new();
+    reader
+        .read_to_end(&mut buf)
+        .map_err(|e| EngineError::GitError {
+            operation: "http-get".to_string(),
+            message: format!("Failed to read HTTP response body: {e}"),
+        })?;
+    if buf.len() > max_bytes {
+        return Err(EngineError::PayloadExceeded {
+            size_bytes: buf.len(),
+            limit_bytes: max_bytes,
+        });
+    }
+
+    String::from_utf8(buf).map_err(|_| EngineError::GitError {
+        operation: "http-get".to_string(),
+        message: "HTTP response body is not valid UTF-8".to_string(),
     })
 }
 
@@ -357,26 +716,152 @@ pub struct GitRunner;
 
 impl GitRunner {
     pub fn clone_shallow(url: &str, branch: Option<&str>, dest: &Path) -> Result<(), EngineError> {
-        let mut cmd = Command::new("git");
-        cmd.arg("clone").arg("--depth").arg("1");
-        if let Some(b) = branch {
-            cmd.arg("--branch").arg(b);
-        }
-        cmd.arg(url).arg(dest);
+        let local_candidate = if let Some(stripped) = url.strip_prefix("file://") {
+            Some(Path::new(stripped))
+        } else if !url.contains("://") {
+            Some(Path::new(url))
+        } else {
+            None
+        };
 
-        let output = cmd.output().map_err(|e| EngineError::GitError {
+        if let Some(local_path) = local_candidate {
+            if !local_path.exists() {
+                return Err(EngineError::GitError {
+                    operation: "clone".to_string(),
+                    message: format!(
+                        "Local git repository '{}' does not exist",
+                        local_path.display()
+                    ),
+                });
+            }
+            let src_repo = gix::open(local_path).map_err(|e| EngineError::GitError {
+                operation: "clone".to_string(),
+                message: format!(
+                    "Failed to open git repository '{}': {e}",
+                    local_path.display()
+                ),
+            })?;
+
+            let commit_id = if let Some(b) = branch {
+                let ref_name = format!("refs/heads/{b}");
+                let mut r = src_repo
+                    .find_reference(&ref_name)
+                    .or_else(|_| src_repo.find_reference(b))
+                    .map_err(|e| EngineError::GitError {
+                        operation: "clone".to_string(),
+                        message: format!("Branch '{b}' not found: {e}"),
+                    })?;
+                r.peel_to_id()
+                    .map_err(|e| EngineError::GitError {
+                        operation: "clone".to_string(),
+                        message: format!("Failed to peel branch '{b}': {e}"),
+                    })?
+                    .detach()
+            } else {
+                src_repo
+                    .head_id()
+                    .map_err(|e| EngineError::GitError {
+                        operation: "clone".to_string(),
+                        message: format!("Failed to resolve HEAD: {e}"),
+                    })?
+                    .detach()
+            };
+
+            let tree_id = src_repo
+                .find_object(commit_id)
+                .map_err(|e| EngineError::GitError {
+                    operation: "clone".to_string(),
+                    message: format!("Failed to find commit {commit_id}: {e}"),
+                })?
+                .peel_to_tree()
+                .map_err(|e| EngineError::GitError {
+                    operation: "clone".to_string(),
+                    message: format!("Failed to peel commit {commit_id} to tree: {e}"),
+                })?
+                .id;
+
+            fs::create_dir_all(dest)?;
+            let _ = gix::init(dest);
+            materialize_tree_to_dir(&src_repo, tree_id, dest)?;
+            return Ok(());
+        }
+
+        fs::create_dir_all(dest)?;
+        let repo = gix::init(dest).map_err(|e| EngineError::GitError {
             operation: "clone".to_string(),
-            message: format!("Failed to execute git clone: {e}"),
+            message: format!("Failed to initialize staging repository: {e}"),
         })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(EngineError::GitError {
+        let refspec = match branch {
+            Some(b) => format!("+refs/heads/{b}:refs/remotes/origin/{b}"),
+            None => "+HEAD:refs/remotes/origin/HEAD".to_string(),
+        };
+        let remote = repo
+            .remote_at(url)
+            .map_err(|e| EngineError::GitError {
                 operation: "clone".to_string(),
-                message: format!("git clone failed: {}", stderr.trim()),
-            });
-        }
+                message: format!("Invalid remote URL '{url}': {e}"),
+            })?
+            .with_fetch_tags(gix::remote::fetch::Tags::None)
+            .with_refspecs(Some(refspec.as_str()), gix::remote::Direction::Fetch)
+            .map_err(|e| EngineError::GitError {
+                operation: "clone".to_string(),
+                message: format!("Invalid refspec '{refspec}': {e}"),
+            })?;
 
+        let (sanitized_url, version) = remote
+            .sanitized_url_and_version(gix::remote::Direction::Fetch)
+            .map_err(|e| EngineError::GitError {
+                operation: "clone".to_string(),
+                message: format!("Failed to prepare remote URL '{url}': {e}"),
+            })?;
+
+        let transport = gix_transport::client::blocking_io::http::connect_http(
+            UreqGitHttp::default(),
+            sanitized_url,
+            version,
+            false,
+        );
+        let connection = remote.to_connection_with_transport(transport);
+        let should_interrupt = AtomicBool::new(false);
+        let depth = std::num::NonZeroU32::new(1).expect("non-zero");
+        let outcome = connection
+            .prepare_fetch(&mut gix::progress::Discard, Default::default())
+            .map_err(|e| EngineError::GitError {
+                operation: "clone".to_string(),
+                message: format!("Failed to connect to '{url}': {e}"),
+            })?
+            .with_shallow(gix::remote::fetch::Shallow::DepthAtRemote(depth))
+            .receive(&mut gix::progress::Discard, &should_interrupt)
+            .map_err(|e| EngineError::GitError {
+                operation: "clone".to_string(),
+                message: format!("Failed to fetch pack from '{url}': {e}"),
+            })?;
+
+        let commit_id = outcome
+            .ref_map
+            .mappings
+            .iter()
+            .find_map(|m| m.remote.as_id().map(|id| id.to_owned()))
+            .ok_or_else(|| EngineError::GitError {
+                operation: "clone".to_string(),
+                message: format!("No commit found on remote '{url}'"),
+            })?;
+
+        let tree_id = repo
+            .find_object(commit_id)
+            .map_err(|e| EngineError::GitError {
+                operation: "clone".to_string(),
+                message: format!("Failed to find fetched commit {commit_id}: {e}"),
+            })?
+            .peel_to_tree()
+            .map_err(|e| EngineError::GitError {
+                operation: "clone".to_string(),
+                message: format!("Failed to peel fetched commit {commit_id} to tree: {e}"),
+            })?
+            .id;
+
+        materialize_tree_to_dir(&repo, tree_id, dest)?;
         Ok(())
     }
 
@@ -1409,17 +1894,32 @@ mod tests {
         assert_eq!(gh.clone_url, "https://github.com/user/repo.git");
         assert_eq!(gh.subpath, None);
 
+        let github = parse_url("github:user/repo").unwrap();
+        assert_eq!(github.clone_url, "https://github.com/user/repo.git");
+
         let gl = parse_url("gl:user/repo").unwrap();
         assert_eq!(gl.clone_url, "https://gitlab.com/user/repo.git");
+
+        let gitlab = parse_url("gitlab:user/repo").unwrap();
+        assert_eq!(gitlab.clone_url, "https://gitlab.com/user/repo.git");
 
         let cb = parse_url("cb:user/repo").unwrap();
         assert_eq!(cb.clone_url, "https://codeberg.org/user/repo.git");
 
+        let codeberg = parse_url("codeberg:user/repo").unwrap();
+        assert_eq!(codeberg.clone_url, "https://codeberg.org/user/repo.git");
+
         let srht = parse_url("srht:~user/repo").unwrap();
         assert_eq!(srht.clone_url, "https://git.sr.ht/~user/repo");
 
+        let sourcehut = parse_url("sourcehut:~user/repo").unwrap();
+        assert_eq!(sourcehut.clone_url, "https://git.sr.ht/~user/repo");
+
         let bb = parse_url("bb:user/repo").unwrap();
         assert_eq!(bb.clone_url, "https://bitbucket.org/user/repo.git");
+
+        let bitbucket = parse_url("bitbucket:user/repo").unwrap();
+        assert_eq!(bitbucket.clone_url, "https://bitbucket.org/user/repo.git");
 
         assert!(parse_url("").is_err());
         assert!(parse_url("invalid:scheme").is_err());

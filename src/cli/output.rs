@@ -331,10 +331,11 @@ impl<T: InlineRender> InlineRender for Vec<T> {
 impl InlineRender for crate::engine::check::InitReport {
     fn render_inline(&self) -> String {
         format!(
-            "Initialized repository '{}' at '{}' (device: {})",
+            "Initialized repository '{}' at '{}' (device: {})\nHint: {}",
             self.label,
             self.repo_path.display(),
-            self.device
+            self.device,
+            self.hint
         )
     }
 }

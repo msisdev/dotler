@@ -9,7 +9,7 @@ mkdir ~/dotfiles && cd ~/dotfiles
 dotler init
 ```
 
-`dotler init` creates `dotler.toml` and `SKILL.md` (existing files are never overwritten) and registers the repository in `~/.config/dotler/config.toml`.
+`dotler init` creates `dotler.toml` (existing files are never overwritten), registers the repository in `~/.config/dotler/config.toml`, and prints an onboarding hint for `dotler ai`.
 
 ## 2. Configure `dotler.toml`
 

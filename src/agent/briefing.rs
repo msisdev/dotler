@@ -1,17 +1,14 @@
-//! Dynamic agent briefing and repository skill document generation.
+//! Dynamic agent briefing and onboarding hint definitions.
 //!
-//! Renders structured operational manuals for AI coding agents and scaffolds
-//! `<repo>/SKILL.md` during repository initialization.
+//! Renders structured operational manuals for AI coding agents (`dotler ai`) and provides
+//! standardized onboarding hints embedded in `dotler.toml` and `dotler init` output.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent::AgentError;
 use crate::config::local::LocalConfig;
 use crate::config::repo::OsInfo;
-use crate::config::state::write_file_safe;
 
 /// Snapshot of the local system configuration and OS environment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,8 +39,13 @@ impl EnvironmentSnapshot {
 /// Official online documentation URL for Dotler.
 pub const OFFICIAL_MANUAL_URL: &str = "https://msisdev.github.io/dotler/";
 
-/// Shared static operational guide embedded in both `dotler ai` (`render_briefing`)
-/// and `<repo>/SKILL.md` (`scaffold_skill_md`).
+/// Top-of-file comment banner placed in `dotler.toml` to direct AI coding agents to `dotler ai`.
+pub const DOTLER_TOML_AI_HINT: &str = "# [AI Agent Hint] Run 'dotler ai' before editing this file or syncing dotfiles to inspect the full schema, active OS/device keys, and non-interactive CLI/MCP workflows.\n";
+
+/// Onboarding hint returned by `dotler init` (both inline terminal output and `--json` `hint` field).
+pub const INIT_AI_HINT: &str = "Run 'dotler ai' for the AI agent context briefing, dotler.toml schema, and active OS/device keys.";
+
+/// Shared static operational guide embedded in `dotler ai` (`render_briefing`).
 pub const SHARED_OPERATIONAL_GUIDE: &str = r#"## 2. Group Layout & Selection Rules (dotler.toml)
 - Official Documentation: https://msisdev.github.io/dotler/
 - Single Home Path Rule: All dotfile target paths MUST start with `~` or `~/` (e.g. `~/.bashrc`, `~/.config/nvim`). Directory traversal (`..`), backslashes, and shell variables (`$HOME`, `%VAR%`) are strictly prohibited.
@@ -142,49 +144,15 @@ pub fn render_briefing(
     out
 }
 
-/// Scaffolds the default `<repo>/SKILL.md` file in the target repository directory
-/// if it does not already exist.
-pub fn scaffold_skill_md(repo_dir: &Path) -> Result<PathBuf, AgentError> {
-    let skill_path = repo_dir.join("SKILL.md");
-    if skill_path.exists() {
-        return Ok(skill_path);
-    }
-
-    let mut content = String::from(
-        "# Dotler Repository Operational Manual for AI Coding Agents\n\n\
-         ## 1. Repository Architecture & Standards\n\
-         - This repository is managed by `dotler`, a privacy-first, deterministic dotfile synchronization engine.\n\
-         - Dotfiles are organized in top-level group directories defined within `dotler.toml`.\n\
-         - Run `dotler ai` (or MCP `dotler_briefing`) to inspect live device/OS keys and keyring status on the current machine.\n\n",
-    );
-    content.push_str(SHARED_OPERATIONAL_GUIDE);
-
-    write_file_safe(&skill_path, content.as_bytes())?;
-
-    Ok(skill_path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[test]
-    fn test_init_scaffolds_skill_md() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = scaffold_skill_md(temp.path()).unwrap();
-        assert!(path.is_file());
-
-        let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("~/"));
-        assert!(content.contains("<pattern> encrypt"));
-        assert!(content.contains("ZERO SECRET LEAKAGE"));
-
-        // Verify existing SKILL.md is preserved and never overwritten
-        fs::write(&path, "# Custom Skill Guide\n").unwrap();
-        let preserved_path = scaffold_skill_md(temp.path()).unwrap();
-        assert_eq!(preserved_path, path);
-        assert_eq!(fs::read_to_string(&path).unwrap(), "# Custom Skill Guide\n");
+    fn test_onboarding_ai_hints() {
+        assert!(DOTLER_TOML_AI_HINT.starts_with("# "));
+        assert!(DOTLER_TOML_AI_HINT.contains("dotler ai"));
+        assert!(INIT_AI_HINT.contains("dotler ai"));
     }
 
     #[test]

@@ -1,5 +1,5 @@
-//! Integration tests for AI Agent interface: SKILL.md scaffolding, dotler ai briefing,
-//! and Model Context Protocol (MCP) JSON-RPC 2.0 stdio server.
+//! Integration tests for AI Agent interface: dotler.toml & dotler init onboarding hints,
+//! dotler ai briefing, and Model Context Protocol (MCP) JSON-RPC 2.0 stdio server.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -141,7 +141,7 @@ files = """
 }
 
 #[test]
-fn test_dotler_init_skill_md_generation() {
+fn test_dotler_init_ai_hint_and_no_skill_md() {
     let sandbox = AgentTestSandbox::new();
 
     let output = sandbox
@@ -157,37 +157,43 @@ fn test_dotler_init_skill_md_generation() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Verify dotler.toml was created
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout_str.contains("Hint:") && stdout_str.contains("dotler ai"),
+        "dotler init stdout must include an onboarding hint pointing to 'dotler ai'. Got: {stdout_str}"
+    );
+
+    // Verify dotler.toml was created with top AI hint comment
     let dotler_toml = sandbox.repo_dir.join("dotler.toml");
     assert!(dotler_toml.is_file(), "dotler.toml must be created");
+    let toml_text = fs::read_to_string(&dotler_toml).expect("Failed to read dotler.toml");
+    assert!(
+        toml_text.starts_with("# [AI Agent Hint]") && toml_text.contains("dotler ai"),
+        "dotler.toml must start with the AI Agent Hint comment pointing to 'dotler ai'"
+    );
 
-    // Verify SKILL.md was generated
+    // Verify no standalone SKILL.md was generated
     let skill_md = sandbox.repo_dir.join("SKILL.md");
     assert!(
-        skill_md.is_file(),
-        "SKILL.md must be scaffolded during dotler init"
+        !skill_md.exists(),
+        "dotler init must not pollute the repository with a standalone SKILL.md file"
     );
 
-    let skill_text = fs::read_to_string(&skill_md).expect("Failed to read SKILL.md");
-
-    // Check mandatory operational contents
+    // Verify --json output also includes the hint field
+    let json_output = sandbox
+        .bin_cmd()
+        .args(["init", "--label", "test-repo", "--device", "desktop", "--json"])
+        .output()
+        .expect("Execution of dotler init --json failed");
+    assert_eq!(json_output.status.code(), Some(0));
+    let parsed: Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    assert_eq!(parsed["ok"], json!(true));
     assert!(
-        skill_text.contains("~/"),
-        "SKILL.md must document the ~/ path prefix constraint"
-    );
-    assert!(
-        skill_text.contains("<pattern>") && skill_text.contains("encrypt"),
-        "SKILL.md must document 3-state selection rules"
-    );
-    assert!(
-        skill_text.contains("check")
-            && skill_text.contains("tidy")
-            && skill_text.contains("import"),
-        "SKILL.md must document the standard agent execution loop"
-    );
-    assert!(
-        skill_text.contains("ZERO SECRET LEAKAGE") || skill_text.contains("Never ask"),
-        "SKILL.md must include security guardrails prohibiting password solicitation"
+        parsed["data"]["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("dotler ai"),
+        "dotler init --json must include 'hint' pointing to 'dotler ai'"
     );
 }
 

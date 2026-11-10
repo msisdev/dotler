@@ -957,8 +957,9 @@ impl RepoConfig {
             }
         }
 
-        let serialized = toml::to_string_pretty(self)
+        let body = toml::to_string_pretty(self)
             .map_err(|e| ConfigError::TomlSyntaxError(e.to_string()))?;
+        let serialized = format!("{}\n{}", crate::agent::briefing::DOTLER_TOML_AI_HINT.trim_end(), body);
         crate::config::state::write_file_safe(path, serialized.as_bytes()).map_err(|e| match e {
             crate::config::StateError::Io(io) => ConfigError::IoError(io),
             other => ConfigError::AtomicRenameFailed(other.to_string()),

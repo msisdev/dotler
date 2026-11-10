@@ -1,12 +1,12 @@
 //! AI coding agent context briefing and built-in Model Context Protocol (MCP) server.
 //!
-//! Provides dynamic `SKILL.md` repository scaffolding, `dotler ai` one-shot briefings,
+//! Provides `dotler ai` one-shot briefings, onboarding hints for `dotler.toml` and `dotler init`,
 //! and a stateless JSON-RPC 2.0 stdio MCP server exposing 7 dotfile operations.
 
 pub mod briefing;
 pub mod mcp;
 
-pub use briefing::{EnvironmentSnapshot, render_briefing, scaffold_skill_md};
+pub use briefing::{DOTLER_TOML_AI_HINT, EnvironmentSnapshot, INIT_AI_HINT, render_briefing};
 pub use mcp::{
     McpErrorObject, McpRequest, McpResponse, McpToolDefinition, ToolCallResult, ToolContent,
     list_tools, run_mcp_server,

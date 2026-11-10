@@ -29,7 +29,7 @@ A dotfile manager collects configuration files (= dotfiles) scattered across you
 
 **AI-Ready**
 - AI-friendly terminal output (`--json`, `dotler ai`).
-- Automatic `SKILL.md` generation.
+- Built-in AI onboarding hints in `dotler.toml` and `dotler init`.
 - Built-in MCP server (`dotler mcp`).
 
 ---

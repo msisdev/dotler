@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent::briefing::scaffold_skill_md;
+use crate::agent::briefing::{DOTLER_TOML_AI_HINT, INIT_AI_HINT};
 use crate::config::local::{WalkDir, expand_tilde};
 use crate::config::repo::{
     SelectionMode, evaluate_selection, parse_selection_rules, resolve_group_target_path,
@@ -72,10 +72,10 @@ pub struct InitReport {
     pub label: String,
     pub device: String,
     pub repo_path: PathBuf,
-    pub skill_path: PathBuf,
+    pub hint: String,
 }
 
-/// Scaffolds a new dotler repository (`dotler.toml` and `SKILL.md`) and registers it in `config.toml`.
+/// Scaffolds a new dotler repository (`dotler.toml` with top AI hint comment) and registers it in `config.toml`.
 pub fn run_init(
     ctx: &mut CoreContext,
     params: InitParams,
@@ -90,7 +90,10 @@ pub fn run_init(
 
     let dotler_toml_path = repo_dir.join("dotler.toml");
     if !dotler_toml_path.exists() {
-        let initial_toml = r#"# [bash]
+        let initial_toml = format!(
+            "{}\n{}",
+            DOTLER_TOML_AI_HINT.trim_end(),
+            r#"# [bash]
 # # Priority 1: Custom device names (configured in ~/.config/dotler/config.toml `default_devices`)
 # default = "~"
 #
@@ -115,12 +118,10 @@ pub fn run_init(
 # .bashrc encrypt
 # .bashrc
 # """
-"#;
+"#
+        );
         write_file_safe(&dotler_toml_path, initial_toml.as_bytes())?;
     }
-
-    let skill_path = scaffold_skill_md(&repo_dir)
-        .map_err(|e| EngineError::Io(std::io::Error::other(e.to_string())))?;
 
     let mut local_cfg = ctx.local_config.get().cloned().unwrap_or_default();
 
@@ -171,7 +172,7 @@ pub fn run_init(
         label,
         device,
         repo_path: repo_dir,
-        skill_path,
+        hint: INIT_AI_HINT.to_string(),
     })
 }
 

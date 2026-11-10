@@ -1466,7 +1466,6 @@ fn test_sync_wildcard_home_filters_internal_state_and_git() {
         "[shell]\nos-nux = \"~\"\nfiles = \"*\"\n",
     )
     .unwrap();
-    fs::write(internal_repo.join("SKILL.md"), "# Dotler\n").unwrap();
 
     let toml = r#"
 [shell]

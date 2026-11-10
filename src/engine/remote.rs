@@ -1271,12 +1271,7 @@ pub fn uninstall_remote_with_observer(
         }
 
         if !dry_run {
-            observer.on_file_progress(
-                &record.group_name,
-                &group_base,
-                &record.relative_path,
-                None,
-            );
+            observer.on_file_progress(&record.group_name, &group_base, &record.relative_path, None);
         }
     }
 
@@ -1430,4 +1425,3 @@ mod tests {
         assert!(parse_url("invalid:scheme").is_err());
     }
 }
-

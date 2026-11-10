@@ -118,7 +118,9 @@ pub fn tidy_groups_with_observer(
     dry_run: bool,
     observer: &mut dyn CommandObserver,
 ) -> Result<TidyReport, EngineError> {
-    let all_synced = engine.state_db.list_synced_files(Some(&engine.repo_label))?;
+    let all_synced = engine
+        .state_db
+        .list_synced_files(Some(&engine.repo_label))?;
 
     for filter in group_filters {
         let exists_in_repo = engine.repo_config.groups.contains_key(filter);

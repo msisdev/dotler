@@ -764,7 +764,10 @@ mod tests {
         let mut buf = String::new();
         for ch in ['s', 'e', 'c', 'x'] {
             assert_eq!(
-                handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+                handle_passphrase_key(
+                    &mut buf,
+                    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)
+                ),
                 PromptAction::Continue
             );
         }
@@ -782,15 +785,27 @@ mod tests {
             PromptAction::Continue
         );
         assert_eq!(
-            handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            handle_passphrase_key(
+                &mut buf,
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)
+            ),
             PromptAction::Continue
         );
         // Multi-byte UTF-8 characters and Backspace boundary safety
         for ch in ['r', 'e', 't', '한', '🔒'] {
-            handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+            handle_passphrase_key(
+                &mut buf,
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+            );
         }
-        handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        handle_passphrase_key(
+            &mut buf,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        );
+        handle_passphrase_key(
+            &mut buf,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        );
         assert_eq!(
             handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             PromptAction::Submit(true)
@@ -800,9 +815,15 @@ mod tests {
         for cancel_event in [
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+            KeyEvent::new(
+                KeyCode::Char('C'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
-            KeyEvent::new(KeyCode::Char('D'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+            KeyEvent::new(
+                KeyCode::Char('D'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
         ] {
             assert_eq!(
                 handle_passphrase_key(&mut buf, cancel_event),

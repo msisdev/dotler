@@ -30,9 +30,7 @@ use crate::engine::remote::{
 };
 use crate::engine::sync::{run_export, run_import};
 use crate::engine::tidy::{TidyOrphanPolicy, run_tidy};
-use crate::tui::confirm::{
-    ConfirmError, ConfirmPrompt, DEFAULT_CONFIRM_TITLE, confirm_proceed_to,
-};
+use crate::tui::confirm::{ConfirmError, ConfirmPrompt, DEFAULT_CONFIRM_TITLE, confirm_proceed_to};
 use crate::tui::preview::{BadgeOp, PreviewArrow, PreviewItem, render_preview_to};
 use crate::tui::progress::ProgressReporter;
 
@@ -225,7 +223,10 @@ pub struct GitInstallArgs {
     #[arg(short = 'a', long = "all", help = "Show all files in preview")]
     pub all: bool,
 
-    #[arg(long = "dry-run", help = "Simulate installation without writing changes")]
+    #[arg(
+        long = "dry-run",
+        help = "Simulate installation without writing changes"
+    )]
     pub dry_run: bool,
 }
 
@@ -1055,12 +1056,10 @@ fn handle_update<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use crate::config::state::write_file_safe;
-    use crate::core::vault_loader::{
-        resolve_old_passphrase_for_vaults, unlock_vault_if_needed,
-    };
+    use crate::core::vault_loader::{resolve_old_passphrase_for_vaults, unlock_vault_if_needed};
     use crate::crypto::vault::{VaultSlot, change_password};
+    use std::fs;
 
     #[test]
     fn test_parse_tidy_purge_and_reject_removed_flags() {
@@ -1101,27 +1100,47 @@ mod tests {
             other => panic!("Unexpected: {other:?}"),
         }
 
-        let tidy = Cli::try_parse_from(["dotler", "tidy", "-y", "-a", "--dry-run", "--purge"]).unwrap();
+        let tidy =
+            Cli::try_parse_from(["dotler", "tidy", "-y", "-a", "--dry-run", "--purge"]).unwrap();
         match tidy.command {
             Command::Tidy(a) => assert!(a.yes && a.all && a.dry_run && a.purge),
             other => panic!("Unexpected: {other:?}"),
         }
 
-        let clone = Cli::try_parse_from(["dotler", "git", "clone", "gh:u/r", "-y", "-a", "--dry-run"]).unwrap();
+        let clone =
+            Cli::try_parse_from(["dotler", "git", "clone", "gh:u/r", "-y", "-a", "--dry-run"])
+                .unwrap();
         match clone.command {
-            Command::Git { command: GitCommand::Clone(a) } => assert!(a.yes && a.all && a.dry_run),
+            Command::Git {
+                command: GitCommand::Clone(a),
+            } => assert!(a.yes && a.all && a.dry_run),
             other => panic!("Unexpected: {other:?}"),
         }
 
-        let install = Cli::try_parse_from(["dotler", "git", "install", "gh:u/r", "nvim", "-y", "-a", "--dry-run"]).unwrap();
+        let install = Cli::try_parse_from([
+            "dotler",
+            "git",
+            "install",
+            "gh:u/r",
+            "nvim",
+            "-y",
+            "-a",
+            "--dry-run",
+        ])
+        .unwrap();
         match install.command {
-            Command::Git { command: GitCommand::Install(a) } => assert!(a.yes && a.all && a.dry_run),
+            Command::Git {
+                command: GitCommand::Install(a),
+            } => assert!(a.yes && a.all && a.dry_run),
             other => panic!("Unexpected: {other:?}"),
         }
 
-        let uninstall = Cli::try_parse_from(["dotler", "git", "uninstall", "-y", "-a", "--dry-run"]).unwrap();
+        let uninstall =
+            Cli::try_parse_from(["dotler", "git", "uninstall", "-y", "-a", "--dry-run"]).unwrap();
         match uninstall.command {
-            Command::Git { command: GitCommand::Uninstall(a) } => assert!(a.yes && a.all && a.dry_run),
+            Command::Git {
+                command: GitCommand::Uninstall(a),
+            } => assert!(a.yes && a.all && a.dry_run),
             other => panic!("Unexpected: {other:?}"),
         }
     }

@@ -2066,11 +2066,7 @@ lua
     let planned_rels: Vec<&str> = plans.iter().map(|p| p.relative_path.as_str()).collect();
     assert_eq!(
         planned_rels,
-        vec![
-            "init.lua",
-            "lua/core.lua",
-            "lua/plugins/telescope.lua",
-        ]
+        vec!["init.lua", "lua/core.lua", "lua/plugins/telescope.lua",]
     );
 
     let import_rep = engine.import_files(&plans, &lock, false).unwrap();

@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 
-use crate::config::local::{LOCAL_CONFIG_FILE, LocalConfig, expand_tilde, resolve_repo_path_with_cwd};
+use crate::config::local::{
+    LOCAL_CONFIG_FILE, LocalConfig, expand_tilde, resolve_repo_path_with_cwd,
+};
 use crate::config::repo::{OsInfo, RepoConfig};
 use crate::config::state::{DOTLER_LOCK_PATH, DotlerLockGuard, STATE_DB_PATH, StateDb};
 use crate::config::{ConfigError, LockError, StateError};

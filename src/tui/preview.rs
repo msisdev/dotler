@@ -3,7 +3,9 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use crossterm::style::{Attribute, Color, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor};
+use crossterm::style::{
+    Attribute, Color, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
+};
 
 pub const ICON_LEFT_BAR: &str = "▐";
 pub const ICON_RIGHT_BAR: &str = "▌";
@@ -118,7 +120,11 @@ impl PreviewItem {
         for op in [self.os_op, self.repo_op] {
             if matches!(
                 op,
-                BadgeOp::Delete | BadgeOp::Overwrite | BadgeOp::Create | BadgeOp::Untrack | BadgeOp::Skip
+                BadgeOp::Delete
+                    | BadgeOp::Overwrite
+                    | BadgeOp::Create
+                    | BadgeOp::Untrack
+                    | BadgeOp::Skip
             ) {
                 return op;
             }
@@ -187,13 +193,21 @@ pub fn render_item(item: &PreviewItem) -> String {
 /// Formats the inline summary footer section (`<Summary>` header and flush-left badge counts).
 pub fn render_footer(counts: &PreviewCounts) -> String {
     let mut styled_parts = vec![
-        format!("{}create {}", BadgeOp::Create.render_styled(), counts.create),
+        format!(
+            "{}create {}",
+            BadgeOp::Create.render_styled(),
+            counts.create
+        ),
         format!(
             "{}overwrite {}",
             BadgeOp::Overwrite.render_styled(),
             counts.overwrite
         ),
-        format!("{}delete {}", BadgeOp::Delete.render_styled(), counts.delete),
+        format!(
+            "{}delete {}",
+            BadgeOp::Delete.render_styled(),
+            counts.delete
+        ),
     ];
 
     if counts.untrack > 0 {
@@ -211,7 +225,11 @@ pub fn render_footer(counts: &PreviewCounts) -> String {
         ));
     }
 
-    styled_parts.push(format!("{}okay {}", BadgeOp::Okay.render_styled(), counts.okay));
+    styled_parts.push(format!(
+        "{}okay {}",
+        BadgeOp::Okay.render_styled(),
+        counts.okay
+    ));
 
     format!("{SUMMARY_HEADER}\n{}", styled_parts.join("   "))
 }
@@ -327,7 +345,10 @@ mod tests {
         let plain = strip_ansi(&raw);
 
         assert_eq!(counts.overwrite, 3);
-        assert!(plain.contains("[nvim]\n▐o▌ ~/.config/nvim/init.lua\n───▸ ▐w▌ ~/dotfiles/nvim/init.lua"));
+        assert!(
+            plain
+                .contains("[nvim]\n▐o▌ ~/.config/nvim/init.lua\n───▸ ▐w▌ ~/dotfiles/nvim/init.lua")
+        );
         assert!(plain.contains("[bash]\n▐o▌ ~/.bashrc\n──🔒 ▐w▌ ~/dotfiles/bash/.bashrc.enc"));
         assert!(plain.contains("[zsh]\n▐w▌ ~/.zshrc\n🔑── ▐o▌ ~/dotfiles/zsh/.zshrc.enc"));
     }
@@ -369,10 +390,18 @@ mod tests {
         assert_eq!(counts.okay, 1);
         assert_eq!(counts.total_updates(), 2);
 
-        assert!(!plain.contains("[git]"), "Create-only group must be omitted when view_all = false");
-        assert!(!plain.contains("[tmux]"), "Okay-only group must be omitted when view_all = false");
+        assert!(
+            !plain.contains("[git]"),
+            "Create-only group must be omitted when view_all = false"
+        );
+        assert!(
+            !plain.contains("[tmux]"),
+            "Okay-only group must be omitted when view_all = false"
+        );
         assert!(plain.contains("[nvim]"), "Overwrite group must be shown");
-        assert!(plain.contains("<Summary>\n▐c▌create 1   ▐w▌overwrite 1   ▐d▌delete 0   ▐o▌okay 1"));
+        assert!(
+            plain.contains("<Summary>\n▐c▌create 1   ▐w▌overwrite 1   ▐d▌delete 0   ▐o▌okay 1")
+        );
     }
 
     #[test]

@@ -1103,9 +1103,7 @@ fn test_e2e_non_json_inline_formats_emoji_rules_and_colored_labels() {
     assert_eq!(out_update.status.code(), Some(0));
     let update_stdout = String::from_utf8_lossy(&out_update.stdout);
     assert!(
-        update_stdout
-            .trim()
-            .starts_with("Update check done. (v"),
+        update_stdout.trim().starts_with("Update check done. (v"),
         "unexpected update stdout: {update_stdout}"
     );
     assert!(update_stdout.trim().ends_with(", up to date)"));
@@ -1181,4 +1179,3 @@ files = "hello.txt"
         "stderr must contain styled Hint: label: {err_stderr:?}"
     );
 }
-

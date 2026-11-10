@@ -182,7 +182,14 @@ fn test_dotler_init_ai_hint_and_no_skill_md() {
     // Verify --json output also includes the hint field
     let json_output = sandbox
         .bin_cmd()
-        .args(["init", "--label", "test-repo", "--device", "desktop", "--json"])
+        .args([
+            "init",
+            "--label",
+            "test-repo",
+            "--device",
+            "desktop",
+            "--json",
+        ])
         .output()
         .expect("Execution of dotler init --json failed");
     assert_eq!(json_output.status.code(), Some(0));

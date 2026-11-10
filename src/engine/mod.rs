@@ -28,7 +28,9 @@ pub use sync::{
     ATOMIC_REPLACE_RETRIES, SyncEngine, SyncReport, TMP_FILE_PREFIX, export_files, import_files,
     run_export, run_import, write_file_safe,
 };
-pub use tidy::{TidyOrphanPolicy, TidyReport, run_tidy, tidy, tidy_groups, tidy_groups_with_observer};
+pub use tidy::{
+    TidyOrphanPolicy, TidyReport, run_tidy, tidy, tidy_groups, tidy_groups_with_observer,
+};
 
 use std::path::PathBuf;
 
@@ -290,4 +292,3 @@ impl EngineError {
         }
     }
 }
-

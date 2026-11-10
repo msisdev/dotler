@@ -541,18 +541,13 @@ pub fn rules_have_effective_encryption(rules: &[SelectionRule]) -> bool {
         if rule.mode != SelectionMode::EncryptedInclude {
             return false;
         }
-        let trimmed = rule
-            .pattern
-            .trim_start_matches("./")
-            .trim_end_matches('/');
+        let trimmed = rule.pattern.trim_start_matches("./").trim_end_matches('/');
         let dir_prefix = format!("{trimmed}/");
         let is_dir_pattern = rule.pattern.ends_with('/')
             || (!trimmed.is_empty()
-                && rules.iter().any(|r| {
-                    r.pattern
-                        .trim_start_matches("./")
-                        .starts_with(&dir_prefix)
-                }));
+                && rules
+                    .iter()
+                    .any(|r| r.pattern.trim_start_matches("./").starts_with(&dir_prefix)));
         let probe = if is_dir_pattern {
             format!("{trimmed}/__probe__")
         } else {
@@ -567,12 +562,8 @@ fn matches_pattern(pattern: &str, path: &str) -> bool {
         return true;
     }
 
-    let trimmed_pattern = pattern
-        .trim_start_matches("./")
-        .trim_end_matches('/');
-    let trimmed_path = path
-        .trim_start_matches("./")
-        .trim_end_matches('/');
+    let trimmed_pattern = pattern.trim_start_matches("./").trim_end_matches('/');
+    let trimmed_path = path.trim_start_matches("./").trim_end_matches('/');
 
     if !trimmed_pattern.is_empty() {
         if trimmed_pattern == trimmed_path {
@@ -728,7 +719,8 @@ impl GlobPattern {
         for (ti, token) in self.tokens[token_idx..].iter().enumerate() {
             match token {
                 GlobToken::AnySequence | GlobToken::AnyRecursiveSequence => {
-                    let res = self.matches_from(follows_separator, file.clone(), token_idx + ti + 1);
+                    let res =
+                        self.matches_from(follows_separator, file.clone(), token_idx + ti + 1);
                     if res != 1 {
                         return res;
                     }
@@ -1181,7 +1173,11 @@ impl RepoConfig {
 
         let body = toml::to_string_pretty(self)
             .map_err(|e| ConfigError::TomlSyntaxError(e.to_string()))?;
-        let serialized = format!("{}\n{}", crate::agent::briefing::DOTLER_TOML_AI_HINT.trim_end(), body);
+        let serialized = format!(
+            "{}\n{}",
+            crate::agent::briefing::DOTLER_TOML_AI_HINT.trim_end(),
+            body
+        );
         crate::config::state::write_file_safe(path, serialized.as_bytes()).map_err(|e| match e {
             crate::config::StateError::Io(io) => ConfigError::IoError(io),
             other => ConfigError::AtomicRenameFailed(other.to_string()),
@@ -1807,7 +1803,9 @@ files = "lua/"
 "#;
         let repo_sep = RepoConfig::parse(separated_groups).expect("valid syntax");
         assert!(
-            repo_sep.detect_cross_group_collisions(&[], &os_info).is_ok(),
+            repo_sep
+                .detect_cross_group_collisions(&[], &os_info)
+                .is_ok(),
             "g1 excluding !lua/* and g2 claiming lua/ must not collide"
         );
 
@@ -1822,10 +1820,22 @@ files = "lua/"
         assert!(!GlobPattern::new("c?t").unwrap().matches("caat"));
         assert!(GlobPattern::new("k[!e]tteh").unwrap().matches("kitteh"));
         assert!(!GlobPattern::new("k[!e]tteh").unwrap().matches("ketteh"));
-        assert!(GlobPattern::new("file[0-9].conf").unwrap().matches("file7.conf"));
-        assert!(!GlobPattern::new("file[0-9].conf").unwrap().matches("filea.conf"));
+        assert!(
+            GlobPattern::new("file[0-9].conf")
+                .unwrap()
+                .matches("file7.conf")
+        );
+        assert!(
+            !GlobPattern::new("file[0-9].conf")
+                .unwrap()
+                .matches("filea.conf")
+        );
         assert!(GlobPattern::new("**/init.lua").unwrap().matches("init.lua"));
-        assert!(GlobPattern::new("**/init.lua").unwrap().matches("a/b/init.lua"));
+        assert!(
+            GlobPattern::new("**/init.lua")
+                .unwrap()
+                .matches("a/b/init.lua")
+        );
 
         assert!(GlobPattern::new("***").is_err());
         assert!(GlobPattern::new("a**b").is_err());

@@ -454,10 +454,7 @@ pub fn plan(
             if rule.mode == SelectionMode::Exclude || rule.pattern.ends_with('/') {
                 continue;
             }
-            let trimmed = rule
-                .pattern
-                .trim_start_matches("./")
-                .trim_end_matches('/');
+            let trimmed = rule.pattern.trim_start_matches("./").trim_end_matches('/');
             if trimmed.is_empty()
                 || trimmed.contains('*')
                 || trimmed.contains('?')
@@ -469,11 +466,9 @@ pub fn plan(
             if target_base_path.join(trimmed).is_dir()
                 || group_repo_dir.join(trimmed).is_dir()
                 || candidates.iter().any(|c| c.starts_with(&dir_prefix))
-                || rules.iter().any(|r| {
-                    r.pattern
-                        .trim_start_matches("./")
-                        .starts_with(&dir_prefix)
-                })
+                || rules
+                    .iter()
+                    .any(|r| r.pattern.trim_start_matches("./").starts_with(&dir_prefix))
             {
                 continue;
             }

@@ -13,6 +13,7 @@ pub use resource::{
     Resource, get_local_config, get_lock, get_password, get_repo_config, get_state_db,
 };
 pub use vault_loader::{
-    VaultUnlockPolicy, has_encrypted_repo_files, has_encrypted_rules, read_new_passphrase,
-    resolve_old_passphrase_for_vaults, rotate_vault_passphrases, unlock_vault_if_needed,
+    VaultPasswdReport, VaultUnlockPolicy, has_encrypted_repo_files, has_encrypted_rules,
+    read_new_passphrase, resolve_old_passphrase_for_vaults, rotate_vault_passphrases,
+    unlock_vault_if_needed,
 };

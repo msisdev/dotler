@@ -4,10 +4,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
-use serde_json::json;
 
 use crate::agent::briefing::render_briefing;
-use crate::cli::output::{EXIT_SUCCESS, render_success_to};
+use crate::cli::output::{
+    EXIT_SUCCESS, ExportReport, KeyReport, UpdateReport, VaultInitReport, VaultRecoverReport,
+    render_success_to,
+};
 use crate::config::local::{
     LOCAL_CONFIG_FILE, LocalConfig, expand_tilde, get_local_config, resolve_repo_path_with_cwd,
 };
@@ -438,6 +440,7 @@ struct TuiObserver<'a, W: Write> {
     view_all: bool,
     yes: bool,
     is_interactive: bool,
+    approved: bool,
     progress: Option<ProgressReporter>,
 }
 
@@ -455,6 +458,7 @@ impl<'a, W: Write> TuiObserver<'a, W> {
             view_all,
             yes,
             is_interactive,
+            approved: false,
             progress: None,
         }
     }
@@ -506,6 +510,7 @@ impl<W: Write> CommandObserver for TuiObserver<'_, W> {
         }
 
         if self.yes {
+            self.approved = true;
             self.progress = Some(ProgressReporter::new(total_updates, true));
             return Ok(true);
         }
@@ -527,6 +532,7 @@ impl<W: Write> CommandObserver for TuiObserver<'_, W> {
         };
 
         if approved {
+            self.approved = true;
             self.progress = Some(ProgressReporter::new(total_updates, true));
         }
 
@@ -664,7 +670,7 @@ fn handle_git<W: Write>(
             } else {
                 let mut obs =
                     TuiObserver::new(stdout, "git clone", args.all, args.yes, is_interactive);
-                let _report = run_git_clone(
+                let report = run_git_clone(
                     &args.url,
                     &selectors,
                     args.branch.as_deref(),
@@ -676,6 +682,10 @@ fn handle_git<W: Write>(
                     dry_run,
                     &mut obs,
                 )?;
+                let approved = obs.approved;
+                if approved {
+                    render_success_to(stdout, "git clone", &report, false);
+                }
                 Ok(EXIT_SUCCESS)
             }
         }
@@ -701,7 +711,7 @@ fn handle_git<W: Write>(
             } else {
                 let mut obs =
                     TuiObserver::new(stdout, "git install", args.all, args.yes, is_interactive);
-                let _report = run_git_install(
+                let report = run_git_install(
                     &ctx,
                     &args.url,
                     &args.groups,
@@ -711,6 +721,10 @@ fn handle_git<W: Write>(
                     dry_run,
                     &mut obs,
                 )?;
+                let approved = obs.approved;
+                if approved {
+                    render_success_to(stdout, "git install", &report, false);
+                }
                 Ok(EXIT_SUCCESS)
             }
         }
@@ -725,7 +739,11 @@ fn handle_git<W: Write>(
             } else {
                 let mut obs =
                     TuiObserver::new(stdout, "git uninstall", args.all, args.yes, is_interactive);
-                let _report = run_git_uninstall(&ctx, &args.groups, lock, dry_run, &mut obs)?;
+                let report = run_git_uninstall(&ctx, &args.groups, lock, dry_run, &mut obs)?;
+                let approved = obs.approved;
+                if approved {
+                    render_success_to(stdout, "git uninstall", &report, false);
+                }
                 Ok(EXIT_SUCCESS)
             }
         }
@@ -773,7 +791,11 @@ fn handle_import<W: Write>(
         Ok(render_success_to(stdout, "import", &report, true))
     } else {
         let mut obs = TuiObserver::new(stdout, "import", args.all, args.yes, is_interactive);
-        let _report = run_import(&ctx, &groups, args.force, dry_run, lock, &mut obs)?;
+        let report = run_import(&ctx, &groups, args.force, dry_run, lock, &mut obs)?;
+        let approved = obs.approved;
+        if approved {
+            render_success_to(stdout, "import", &report, false);
+        }
         Ok(EXIT_SUCCESS)
     }
 }
@@ -795,7 +817,12 @@ fn handle_export<W: Write>(
         Ok(render_success_to(stdout, "export", &report, true))
     } else {
         let mut obs = TuiObserver::new(stdout, "export", args.all, args.yes, is_interactive);
-        let _report = run_export(&ctx, &groups, args.force, dry_run, lock, &mut obs)?;
+        let report = run_export(&ctx, &groups, args.force, dry_run, lock, &mut obs)?;
+        let approved = obs.approved;
+        if approved {
+            let exp_report = ExportReport(report);
+            render_success_to(stdout, "export", &exp_report, false);
+        }
         Ok(EXIT_SUCCESS)
     }
 }
@@ -822,7 +849,11 @@ fn handle_tidy<W: Write>(
         Ok(render_success_to(stdout, "tidy", &report, true))
     } else {
         let mut obs = TuiObserver::new(stdout, "tidy", args.all, args.yes, is_interactive);
-        let _report = run_tidy(&ctx, &groups, policy, dry_run, lock, &mut obs)?;
+        let report = run_tidy(&ctx, &groups, policy, dry_run, lock, &mut obs)?;
+        let approved = obs.approved;
+        if approved {
+            render_success_to(stdout, "tidy", &report, false);
+        }
         Ok(EXIT_SUCCESS)
     }
 }
@@ -873,13 +904,11 @@ fn handle_vault<W: Write>(
             let mut password_res = get_password(local_cfg.use_keyring, None, is_interactive, None);
             let _ = password_res.set(pass);
 
-            let mut data = json!({
-                "vault_id": vault_id,
-                "mnemonic": mnemonic.phrase(),
-            });
-            if let Some(ref h) = vault_hint {
-                data["hint"] = json!(h);
-            }
+            let data = VaultInitReport {
+                vault_id,
+                mnemonic: mnemonic.phrase().to_string(),
+                hint: vault_hint,
+            };
             Ok(render_success_to(stdout, "vault init", &data, cli.json))
         }
 
@@ -942,14 +971,12 @@ fn handle_vault<W: Write>(
             let mut password_res = get_password(local_cfg.use_keyring, None, is_interactive, None);
             let _ = password_res.set(new_pass);
 
-            let mut data = json!({
-                "vault_id": vault_id,
-                "status": "recovered",
-                "new_mnemonic": new_mnemonic.phrase(),
-            });
-            if let Some(ref h) = vault_hint {
-                data["hint"] = json!(h);
-            }
+            let data = VaultRecoverReport {
+                vault_id,
+                status: "recovered".to_string(),
+                new_mnemonic: new_mnemonic.phrase().to_string(),
+                hint: vault_hint,
+            };
             Ok(render_success_to(stdout, "vault recover", &data, cli.json))
         }
     }
@@ -974,13 +1001,17 @@ fn handle_key<W: Write>(
             password_res
                 .set(pass)
                 .map_err(|e| EngineError::Crypto(crate::crypto::CryptoError::Keyring(e)))?;
-            let data = json!({ "status": "keyring_updated" });
+            let data = KeyReport {
+                status: "keyring_updated".to_string(),
+            };
             Ok(render_success_to(stdout, "key set", &data, cli.json))
         }
         KeyCommand::Del(_) => {
             OsKeyring::delete()
                 .map_err(|e| EngineError::Crypto(crate::crypto::CryptoError::Keyring(e)))?;
-            let data = json!({ "status": "keyring_deleted" });
+            let data = KeyReport {
+                status: "keyring_deleted".to_string(),
+            };
             Ok(render_success_to(stdout, "key del", &data, cli.json))
         }
     }
@@ -1013,11 +1044,11 @@ fn handle_update<W: Write>(
     stdout: &mut W,
     _lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
-    let data = json!({
-        "status": "up_to_date",
-        "check_only": args.check,
-        "version": env!("CARGO_PKG_VERSION"),
-    });
+    let data = UpdateReport {
+        status: "up_to_date".to_string(),
+        check_only: args.check,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    };
     Ok(render_success_to(stdout, "update", &data, cli.json))
 }
 
@@ -1256,13 +1287,20 @@ mod tests {
         let report = rotate_vault_passphrases(&local_cfg, None, false, Some("updated-hint"), true)
             .expect("multi-repo rotation must succeed");
 
-        assert_eq!(report["status"], "password_rotated");
-        assert_eq!(report["rotated_repos"], json!(["repo_a", "repo_b"]));
+        assert_eq!(report.status, "password_rotated");
         assert_eq!(
-            report["skipped_repos"],
-            json!(["repo_missing", "repo_other", "repo_plain"])
+            report.rotated_repos,
+            vec!["repo_a".to_string(), "repo_b".to_string()]
         );
-        assert_eq!(report["keyring_updated"], true);
+        assert_eq!(
+            report.skipped_repos,
+            vec![
+                "repo_missing".to_string(),
+                "repo_other".to_string(),
+                "repo_plain".to_string()
+            ]
+        );
+        assert!(report.keyring_updated);
 
         let keyring_secret = OsKeyring::get().unwrap().unwrap();
         assert_eq!(keyring_secret.expose_secret(), "shared-new-pass-999");

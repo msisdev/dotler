@@ -972,3 +972,213 @@ fn test_e2e_vault_hint_and_use_keyring_optout() {
     let final_local_cfg = fs::read_to_string(&config_toml_path).unwrap();
     assert!(final_local_cfg.contains("use_keyring = false"));
 }
+
+#[test]
+fn test_e2e_non_json_inline_formats_emoji_rules_and_colored_labels() {
+    let sandbox = E2eSandbox::new();
+
+    // 1. init (non-JSON): no sun emoji, colored Hint: label
+    let out_init = sandbox
+        .cmd()
+        .args(["init", "--label", "main"])
+        .output()
+        .unwrap();
+    assert_eq!(out_init.status.code(), Some(0));
+    let init_stdout = String::from_utf8_lossy(&out_init.stdout);
+    assert!(
+        init_stdout.starts_with("Init done. ('main' at '"),
+        "unexpected init stdout: {init_stdout}"
+    );
+    assert!(!init_stdout.contains("☀️"));
+    assert!(!init_stdout.trim_start().starts_with('{'));
+    assert!(
+        init_stdout.contains("\x1b[38;5;12m\x1b[1mHint:\x1b[0m"),
+        "Init Hint: label must be styled in Info Blue + Bold: {init_stdout:?}"
+    );
+
+    // 2. check (non-JSON): `☀️ Config is ok. (0 groups)` on fresh init
+    let out_check = sandbox.cmd().arg("check").output().unwrap();
+    assert_eq!(out_check.status.code(), Some(0));
+    let check_stdout = String::from_utf8_lossy(&out_check.stdout);
+    assert_eq!(check_stdout.trim(), "☀️ Config is ok. (0 groups)");
+
+    // 3. key set & key del (non-JSON): no raw JSON, no emoji
+    let mut key_child = sandbox
+        .cmd()
+        .args(["key", "set", "--password-stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Some(mut stdin) = key_child.stdin.take() {
+        writeln!(stdin, "master_password_passphrase_12345").unwrap();
+    }
+    let key_out = key_child.wait_with_output().unwrap();
+    assert_eq!(key_out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&key_out.stdout).trim(),
+        "Key set done."
+    );
+
+    let out_key_del = sandbox.cmd().args(["key", "del"]).output().unwrap();
+    assert_eq!(out_key_del.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out_key_del.stdout).trim(),
+        "Key delete done."
+    );
+
+    // 4. vault init, passwd, recover (non-JSON)
+    let mut vault_child = sandbox
+        .cmd()
+        .args(["vault", "init", "--password-stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Some(mut stdin) = vault_child.stdin.take() {
+        writeln!(stdin, "vault_pass_111").unwrap();
+    }
+    let vault_init_out = vault_child.wait_with_output().unwrap();
+    assert_eq!(vault_init_out.status.code(), Some(0));
+    let vault_init_stdout = String::from_utf8_lossy(&vault_init_out.stdout);
+    let vault_init_lines: Vec<&str> = vault_init_stdout.lines().collect();
+    assert_eq!(vault_init_lines.len(), 2, "stdout: {vault_init_stdout}");
+    assert!(vault_init_lines[0].starts_with("Vault init done. (id: "));
+    assert!(!vault_init_lines[0].contains("☀️"));
+    assert!(vault_init_lines[1].starts_with("🔑 Recovery mnemonic: "));
+    let mnemonic = vault_init_lines[1]
+        .strip_prefix("🔑 Recovery mnemonic: ")
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let mut passwd_child = sandbox
+        .cmd()
+        .env("DOTLER_PASSPHRASE", "vault_pass_111")
+        .args(["vault", "passwd", "--password-stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Some(mut stdin) = passwd_child.stdin.take() {
+        writeln!(stdin, "vault_pass_222").unwrap();
+    }
+    let passwd_out = passwd_child.wait_with_output().unwrap();
+    assert_eq!(passwd_out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&passwd_out.stdout).trim(),
+        "☀️ Passphrase rotation done. (1 rotated, 0 skipped)"
+    );
+
+    let mut recover_child = sandbox
+        .cmd()
+        .args([
+            "vault",
+            "recover",
+            "--mnemonic",
+            &mnemonic,
+            "--password-stdin",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Some(mut stdin) = recover_child.stdin.take() {
+        writeln!(stdin, "vault_pass_333").unwrap();
+    }
+    let recover_out = recover_child.wait_with_output().unwrap();
+    assert_eq!(recover_out.status.code(), Some(0));
+    let recover_stdout = String::from_utf8_lossy(&recover_out.stdout);
+    let recover_lines: Vec<&str> = recover_stdout.lines().collect();
+    assert_eq!(recover_lines.len(), 2, "stdout: {recover_stdout}");
+    assert!(recover_lines[0].starts_with("☀️ Vault recovery done. (id: "));
+    assert!(recover_lines[1].starts_with("🔑 New recovery mnemonic: "));
+
+    // 5. update --check (non-JSON): no raw JSON, no emoji
+    let out_update = sandbox.cmd().args(["update", "--check"]).output().unwrap();
+    assert_eq!(out_update.status.code(), Some(0));
+    let update_stdout = String::from_utf8_lossy(&out_update.stdout);
+    assert!(
+        update_stdout
+            .trim()
+            .starts_with("Update check done. (v"),
+        "unexpected update stdout: {update_stdout}"
+    );
+    assert!(update_stdout.trim().ends_with(", up to date)"));
+    assert!(!update_stdout.contains("☀️"));
+
+    // 6. import/export/tidy completion lines vs 0-update & --dry-run suppression
+    let toml_content = r#"[shell]
+os-nux = "~"
+os-mac = "~"
+os-win = "~"
+files = "hello.txt"
+"#;
+    fs::write(sandbox.repo_dir.join("dotler.toml"), toml_content).unwrap();
+    fs::write(sandbox.home_dir.join("hello.txt"), "hello world\n").unwrap();
+
+    // --dry-run must NOT emit `☀️ Import done.`
+    let dry_imp = sandbox
+        .cmd()
+        .args(["import", "--dry-run"])
+        .output()
+        .unwrap();
+    assert_eq!(dry_imp.status.code(), Some(0));
+    let dry_imp_stdout = String::from_utf8_lossy(&dry_imp.stdout);
+    assert!(
+        !dry_imp_stdout.contains("Import done."),
+        "dry-run must not emit completion summary: {dry_imp_stdout}"
+    );
+
+    // Real import emits `☀️ Import done. (1 imported, 0 skipped)`
+    let imp_out = sandbox.cmd().args(["import", "-y"]).output().unwrap();
+    assert_eq!(imp_out.status.code(), Some(0));
+    let imp_stdout = String::from_utf8_lossy(&imp_out.stdout);
+    assert!(
+        imp_stdout.contains("☀️ Import done. (1 imported, 0 skipped)"),
+        "expected Import done summary, got: {imp_stdout}"
+    );
+
+    // Second import with 0 updates emits only `☀️ All files are ok.` and NOT `☀️ Import done.`
+    let imp_noop = sandbox.cmd().args(["import", "-y"]).output().unwrap();
+    assert_eq!(imp_noop.status.code(), Some(0));
+    let imp_noop_stdout = String::from_utf8_lossy(&imp_noop.stdout);
+    assert!(imp_noop_stdout.contains("☀️ All files are ok."));
+    assert!(!imp_noop_stdout.contains("Import done."));
+
+    // Modify repo file and run export -> emits `☀️ Export done. (1 exported, 0 skipped)`
+    fs::write(
+        sandbox.repo_dir.join("shell").join("hello.txt"),
+        "updated from repo\n",
+    )
+    .unwrap();
+    let exp_out = sandbox.cmd().args(["export", "-y"]).output().unwrap();
+    assert_eq!(exp_out.status.code(), Some(0));
+    let exp_stdout = String::from_utf8_lossy(&exp_out.stdout);
+    assert!(
+        exp_stdout.contains("☀️ Export done. (1 exported, 0 skipped)"),
+        "expected Export done summary, got: {exp_stdout}"
+    );
+
+    // Error output in non-JSON mode colors `Error:` (Red 9 + Bold) and `Hint:` (Blue 12 + Bold)
+    let err_out = sandbox
+        .cmd()
+        .args(["check", "--group", "nonexistent"])
+        .output()
+        .unwrap();
+    assert_eq!(err_out.status.code(), Some(2));
+    let err_stderr = String::from_utf8_lossy(&err_out.stderr);
+    assert!(
+        err_stderr.contains("\x1b[38;5;9m\x1b[1mError:\x1b[0m"),
+        "stderr must contain styled Error: label: {err_stderr:?}"
+    );
+    assert!(
+        err_stderr.contains("\x1b[38;5;12m\x1b[1mHint:\x1b[0m"),
+        "stderr must contain styled Hint: label: {err_stderr:?}"
+    );
+}
+

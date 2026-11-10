@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde_json::json;
+use serde::{Deserialize, Serialize};
 
 use crate::config::local::{LocalConfig, WalkDir, expand_tilde, find_ancestor_repo_dir};
 use crate::config::repo::{
@@ -22,6 +22,19 @@ pub enum VaultUnlockPolicy {
     Optional,
     RequiredIfEncrypted,
     RequiredAlways,
+}
+
+/// Summary report returned by [`rotate_vault_passphrases`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultPasswdReport {
+    pub status: String,
+    pub rotated_repos: Vec<String>,
+    pub skipped_repos: Vec<String>,
+    pub keyring_updated: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub already_synced_repos: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_id: Option<String>,
 }
 
 /// Returns `true` if any group in `repo_cfg` has an effective `encrypt` selection rule.
@@ -133,7 +146,7 @@ pub fn rotate_vault_passphrases(
     password_stdin: bool,
     new_hint: Option<&str>,
     is_interactive: bool,
-) -> Result<serde_json::Value, EngineError> {
+) -> Result<VaultPasswdReport, EngineError> {
     let mut candidates: Vec<(String, PathBuf)> = Vec::new();
     let explicit_repo = requested_label.is_some();
 
@@ -287,19 +300,14 @@ pub fn rotate_vault_passphrases(
     let keyring_updated = local_cfg.use_keyring && OsKeyring::set(&new_pass).is_ok();
     skipped_repos.sort();
 
-    let mut data = json!({
-        "status": "password_rotated",
-        "rotated_repos": rotated_repos,
-        "skipped_repos": skipped_repos,
-        "keyring_updated": keyring_updated,
-    });
-    if !already_synced_repos.is_empty() {
-        data["already_synced_repos"] = json!(already_synced_repos);
-    }
-    if let Some(vid) = primary_vault_id {
-        data["vault_id"] = json!(vid);
-    }
-    Ok(data)
+    Ok(VaultPasswdReport {
+        status: "password_rotated".to_string(),
+        rotated_repos,
+        skipped_repos,
+        keyring_updated,
+        already_synced_repos,
+        vault_id: primary_vault_id,
+    })
 }
 
 /// Resolves the current passphrase matching at least one target vault.

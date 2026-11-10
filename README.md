@@ -25,10 +25,17 @@ curl -fsSL https://msisdev.github.io/dotler/install.sh | sh
 irm https://msisdev.github.io/dotler/install.ps1 | iex
 ```
 
-**Cargo (from source)**:
+**Cargo**:
 
 ```sh
+# Install from crates.io
 cargo install dotler
+
+# Or install prebuilt binary via cargo-binstall
+cargo binstall dotler
+
+# Or build latest main branch from GitHub
+cargo install --git https://github.com/msisdev/dotler --locked
 ```
 
 ## Quick Overview

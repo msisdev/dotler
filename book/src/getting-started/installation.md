@@ -27,7 +27,14 @@ Optional environment variables for `install.sh` / `install.ps1`:
 Requires Rust `1.89+` and `git`:
 
 ```sh
+# Install from crates.io
 cargo install dotler
+
+# Or install prebuilt binary via cargo-binstall
+cargo binstall dotler
+
+# Or build latest main branch directly from GitHub
+cargo install --git https://github.com/msisdev/dotler --locked
 ```
 
 Check the installed version:

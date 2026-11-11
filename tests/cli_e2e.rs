@@ -1202,3 +1202,150 @@ files = "hello.txt"
         "stderr must contain styled Hint: label: {err_stderr:?}"
     );
 }
+
+#[test]
+fn test_e2e_self_update_and_package_manager_delegation() {
+    use sha2::{Digest, Sha256};
+
+    let sandbox = E2eSandbox::new();
+    let release_root = sandbox.home_dir.join("mock_releases");
+    let v9_dir = release_root.join("v9.9.9");
+    let staging_dir = sandbox.home_dir.join("staging_v9");
+    fs::create_dir_all(&v9_dir).unwrap();
+    fs::create_dir_all(&staging_dir).unwrap();
+
+    fs::write(release_root.join("latest-version"), "v9.9.9\n").unwrap();
+
+    let new_binary_payload = b"#!/bin/sh\necho dotler 9.9.9\n";
+    fs::write(staging_dir.join("dotler"), new_binary_payload).unwrap();
+
+    let target_info = dotler::cli::update::detect_release_target(
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        Some("musl"),
+    )
+    .unwrap();
+
+    let archive_path = v9_dir.join(&target_info.archive_name);
+    let tar_status = Command::new("tar")
+        .args([
+            "-C",
+            &staging_dir.to_string_lossy(),
+            "-czf",
+            &archive_path.to_string_lossy(),
+            "dotler",
+        ])
+        .status()
+        .unwrap();
+    assert!(tar_status.success());
+
+    let archive_bytes = fs::read(&archive_path).unwrap();
+    let mut hasher = Sha256::new();
+    hasher.update(&archive_bytes);
+    let sha_hex: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let checksum_path = v9_dir.join(&target_info.checksum_name);
+    fs::write(
+        &checksum_path,
+        format!("{sha_hex}  {}\n", target_info.archive_name),
+    )
+    .unwrap();
+
+    let release_base_url = format!("file://{}", release_root.display());
+
+    // 1. Package-manager path (Homebrew) delegates update without overwriting binary
+    let brew_exe = sandbox
+        .home_dir
+        .join("opt/homebrew/Cellar/dotler/0.2.0/bin/dotler");
+    fs::create_dir_all(brew_exe.parent().unwrap()).unwrap();
+    fs::write(&brew_exe, b"original-homebrew-binary").unwrap();
+
+    let brew_out = sandbox
+        .cmd()
+        .env("DOTLER_RELEASE_BASE_URL", &release_base_url)
+        .env("DOTLER_UPDATE_EXE_PATH", &brew_exe)
+        .args(["update", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(brew_out.status.code(), Some(0));
+    let brew_json: Value = serde_json::from_slice(&brew_out.stdout).unwrap();
+    assert_eq!(
+        brew_json["data"]["status"],
+        Value::String("managed_by_package_manager".to_string())
+    );
+    assert_eq!(
+        brew_json["data"]["install_method"],
+        Value::String("homebrew".to_string())
+    );
+    assert_eq!(
+        brew_json["data"]["upgrade_command"],
+        Value::String("brew upgrade msisdev/tap/dotler".to_string())
+    );
+    assert_eq!(fs::read(&brew_exe).unwrap(), b"original-homebrew-binary");
+
+    // 2. Standalone binary path updates in-place after SHA-256 verification
+    let standalone_exe = sandbox.home_dir.join(".local/bin/dotler");
+    fs::create_dir_all(standalone_exe.parent().unwrap()).unwrap();
+    fs::write(&standalone_exe, b"old-standalone-binary").unwrap();
+
+    let check_out = sandbox
+        .cmd()
+        .env("DOTLER_RELEASE_BASE_URL", &release_base_url)
+        .env("DOTLER_UPDATE_EXE_PATH", &standalone_exe)
+        .args(["update", "--check"])
+        .output()
+        .unwrap();
+    assert_eq!(check_out.status.code(), Some(0));
+    let check_stdout = String::from_utf8_lossy(&check_out.stdout);
+    assert!(
+        check_stdout.contains("-> v9.9.9 available)"),
+        "stdout: {check_stdout}"
+    );
+    assert_eq!(fs::read(&standalone_exe).unwrap(), b"old-standalone-binary");
+
+    let update_out = sandbox
+        .cmd()
+        .env("DOTLER_RELEASE_BASE_URL", &release_base_url)
+        .env("DOTLER_UPDATE_EXE_PATH", &standalone_exe)
+        .env("DOTLER_LIBC", "musl")
+        .args(["update", "-y"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        update_out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&update_out.stderr)
+    );
+    let update_stdout = String::from_utf8_lossy(&update_out.stdout);
+    assert!(
+        update_stdout.contains("☀️ Update done. (v"),
+        "stdout: {update_stdout}"
+    );
+    assert_eq!(fs::read(&standalone_exe).unwrap(), new_binary_payload);
+
+    // 3. Tampered checksum is rejected and preserves existing binary
+    fs::write(&standalone_exe, b"protected-binary").unwrap();
+    fs::write(
+        &checksum_path,
+        format!(
+            "0000000000000000000000000000000000000000000000000000000000000000  {}\n",
+            target_info.archive_name
+        ),
+    )
+    .unwrap();
+
+    let tampered_out = sandbox
+        .cmd()
+        .env("DOTLER_RELEASE_BASE_URL", &release_base_url)
+        .env("DOTLER_UPDATE_EXE_PATH", &standalone_exe)
+        .env("DOTLER_LIBC", "musl")
+        .args(["update", "-y"])
+        .output()
+        .unwrap();
+    assert_eq!(tampered_out.status.code(), Some(2));
+    assert_eq!(fs::read(&standalone_exe).unwrap(), b"protected-binary");
+}

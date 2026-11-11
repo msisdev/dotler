@@ -340,6 +340,12 @@ pub struct UpdateReport {
     pub status: String,
     pub check_only: bool,
     pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upgrade_command: Option<String>,
 }
 
 /// Wrapper around [`crate::engine::sync::SyncReport`] for `export` inline formatting.
@@ -557,7 +563,40 @@ impl InlineRender for KeyReport {
 
 impl InlineRender for UpdateReport {
     fn render_inline(&self) -> String {
-        format!("Update check done. (v{}, up to date)", self.version)
+        let target = self
+            .target_version
+            .as_deref()
+            .unwrap_or(self.version.as_str());
+        match self.status.as_str() {
+            "updated" => format!("☀️ Update done. (v{} -> v{})", self.version, target),
+            "managed_by_package_manager" => {
+                let method = self.install_method.as_deref().unwrap_or("package-manager");
+                let cmd = self
+                    .upgrade_command
+                    .as_deref()
+                    .unwrap_or("your package manager upgrade command");
+                format!(
+                    "Update delegated to {method}. (v{} -> v{})\n{} Run '{cmd}' to update, or 'dotler update --force' to replace the binary directly.",
+                    self.version,
+                    target,
+                    styled_hint_label()
+                )
+            }
+            "update_available" => match &self.upgrade_command {
+                Some(cmd) => format!(
+                    "Update check done. (v{} -> v{} available)\n{} Run '{cmd}' to update.",
+                    self.version,
+                    target,
+                    styled_hint_label()
+                ),
+                None => format!(
+                    "Update check done. (v{} -> v{} available)",
+                    self.version, target
+                ),
+            },
+            "cancelled" => String::new(),
+            _ => format!("Update check done. (v{}, up to date)", self.version),
+        }
     }
 }
 
@@ -873,10 +912,39 @@ mod tests {
             status: "up_to_date".to_string(),
             check_only: true,
             version: "0.1.0".to_string(),
+            target_version: Some("0.1.0".to_string()),
+            install_method: Some("standalone".to_string()),
+            upgrade_command: None,
         };
         assert_eq!(
             update_rep.render_inline(),
             "Update check done. (v0.1.0, up to date)"
+        );
+
+        let updated_rep = UpdateReport {
+            status: "updated".to_string(),
+            check_only: false,
+            version: "0.1.0".to_string(),
+            target_version: Some("0.2.0".to_string()),
+            install_method: Some("standalone".to_string()),
+            upgrade_command: None,
+        };
+        assert_eq!(
+            updated_rep.render_inline(),
+            "☀️ Update done. (v0.1.0 -> v0.2.0)"
+        );
+
+        let managed_rep = UpdateReport {
+            status: "managed_by_package_manager".to_string(),
+            check_only: false,
+            version: "0.1.0".to_string(),
+            target_version: Some("0.2.0".to_string()),
+            install_method: Some("homebrew".to_string()),
+            upgrade_command: Some("brew upgrade msisdev/tap/dotler".to_string()),
+        };
+        assert_eq!(
+            strip_ansi(&managed_rep.render_inline()),
+            "Update delegated to homebrew. (v0.1.0 -> v0.2.0)\nHint: Run 'brew upgrade msisdev/tap/dotler' to update, or 'dotler update --force' to replace the binary directly."
         );
     }
 

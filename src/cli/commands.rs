@@ -7,8 +7,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::agent::briefing::render_briefing;
 use crate::cli::output::{
-    EXIT_SUCCESS, ExportReport, KeyReport, UpdateReport, VaultInitReport, VaultRecoverReport,
-    render_success_to,
+    EXIT_SUCCESS, ExportReport, KeyReport, VaultInitReport, VaultRecoverReport, render_success_to,
 };
 use crate::config::local::{
     LOCAL_CONFIG_FILE, LocalConfig, expand_tilde, get_local_config, resolve_repo_path_with_cwd,
@@ -452,8 +451,21 @@ pub struct McpArgs {}
 
 #[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
 pub struct UpdateArgs {
-    #[arg(long, help = "Check for updates without modifying repository")]
+    #[arg(long, help = "Check for updates without replacing the executable")]
     pub check: bool,
+
+    #[arg(long, help = "Target release version or tag (e.g. v0.2.0)")]
+    pub version: Option<String>,
+
+    #[arg(
+        short = 'f',
+        long = "force",
+        help = "Force binary replacement even if up-to-date or managed by a package manager"
+    )]
+    pub force: bool,
+
+    #[arg(short = 'y', long = "yes", help = "Skip confirmation prompt")]
+    pub yes: bool,
 }
 
 /// Interactive terminal observer bridging `engine::observer::CommandObserver` with `tui::*`.
@@ -619,7 +631,7 @@ pub fn dispatch<W1: Write, W2: Write>(
         }
         Command::Key { command } => handle_key(command, cli, is_interactive, stdout, lock_guard),
         Command::Ai(_) => handle_ai(cli, stdout, lock_guard),
-        Command::Update(args) => handle_update(args, cli, stdout, lock_guard),
+        Command::Update(args) => handle_update(args, cli, is_interactive, stdout, lock_guard),
         Command::Mcp(_) => unreachable!(),
     }
 }
@@ -1199,14 +1211,11 @@ fn handle_ai<W: Write>(
 fn handle_update<W: Write>(
     args: &UpdateArgs,
     cli: &Cli,
+    is_interactive: bool,
     stdout: &mut W,
     _lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
-    let data = UpdateReport {
-        status: "up_to_date".to_string(),
-        check_only: args.check,
-        version: env!("CARGO_PKG_VERSION").to_string(),
-    };
+    let data = crate::cli::update::run_update(args, is_interactive, cli.json)?;
     Ok(render_success_to(stdout, "update", &data, cli.json))
 }
 
@@ -1316,6 +1325,26 @@ mod tests {
         assert!(Cli::try_parse_from(["dotler", "ai"]).is_ok());
         assert!(Cli::try_parse_from(["dotler", "mcp"]).is_ok());
         assert!(Cli::try_parse_from(["dotler", "update"]).is_ok());
+
+        let parsed_update = Cli::try_parse_from([
+            "dotler",
+            "update",
+            "--check",
+            "--version",
+            "v0.3.0",
+            "--force",
+            "-y",
+        ])
+        .expect("dotler update flags must parse");
+        match parsed_update.command {
+            Command::Update(u) => {
+                assert!(u.check);
+                assert_eq!(u.version.as_deref(), Some("v0.3.0"));
+                assert!(u.force);
+                assert!(u.yes);
+            }
+            other => panic!("Unexpected command: {other:?}"),
+        }
     }
 
     #[test]

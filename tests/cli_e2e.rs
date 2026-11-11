@@ -874,7 +874,11 @@ fn test_e2e_vault_hint_and_use_keyring_optout() {
 
     let config_toml_path = sandbox.dotler_dir.join("config.toml");
     let config_raw = fs::read_to_string(&config_toml_path).unwrap();
-    let updated_config = format!("use_keyring = false\n{config_raw}");
+    assert!(config_raw.contains("default_devices = [\"default\"]"));
+    assert!(config_raw.contains("default_repo = "));
+    assert!(config_raw.contains("use_keyring = true"));
+    assert!(config_raw.contains("[repos]"));
+    let updated_config = config_raw.replace("use_keyring = true", "use_keyring = false");
     fs::write(&config_toml_path, updated_config).unwrap();
 
     // 2. Initialize vault with `--hint`

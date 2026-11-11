@@ -147,10 +147,6 @@ fn default_use_keyring() -> bool {
     true
 }
 
-fn is_true(val: &bool) -> bool {
-    *val
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalConfig {
@@ -158,7 +154,7 @@ pub struct LocalConfig {
     pub default_devices: Vec<String>,
     #[serde(default)]
     pub default_repo: Option<String>,
-    #[serde(default = "default_use_keyring", skip_serializing_if = "is_true")]
+    #[serde(default = "default_use_keyring")]
     pub use_keyring: bool,
     #[serde(default)]
     pub repos: BTreeMap<String, String>,
@@ -691,6 +687,12 @@ devices = ["laptop"]
             .save_atomic(&config_path)
             .expect("atomic save must succeed");
         assert!(config_path.exists());
+
+        let raw_saved = fs::read_to_string(&config_path).expect("read saved config");
+        assert!(raw_saved.contains("default_devices = [\"laptop\"]"));
+        assert!(raw_saved.contains("default_repo = \"dotfiles\""));
+        assert!(raw_saved.contains("use_keyring = true"));
+        assert!(raw_saved.contains("[repos]"));
 
         let loaded = LocalConfig::load(&config_path).expect("loaded config must succeed");
         assert_eq!(loaded, config);

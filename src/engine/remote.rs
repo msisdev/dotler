@@ -1377,6 +1377,12 @@ pub fn clone_repo_with_observer(
                     .unwrap_or_default()
             )
         };
+        if local_config.default_repo.is_none() {
+            local_config.default_repo = Some(label.clone());
+        }
+        if local_config.default_devices.is_empty() {
+            local_config.default_devices.push("default".to_string());
+        }
         local_config.repos.insert(label, repo_path_entry);
         local_config.save_atomic(cfg_path)?;
     }

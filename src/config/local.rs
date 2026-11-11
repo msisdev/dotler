@@ -327,10 +327,40 @@ impl LocalConfig {
         Self::parse(&content)
     }
 
+    pub fn to_toml_string(&self) -> String {
+        let devices_val = toml::Value::Array(
+            self.default_devices
+                .iter()
+                .cloned()
+                .map(toml::Value::String)
+                .collect(),
+        )
+        .to_string();
+
+        let default_repo_line = match &self.default_repo {
+            Some(repo) => format!(
+                "default_repo = {}",
+                toml::Value::String(repo.clone())
+            ),
+            None => "# default_repo = \"default\"".to_string(),
+        };
+
+        let mut out = format!(
+            "# Priority-ordered device profile names for path matching\ndefault_devices = {devices_val}\n\n# Default repository label used when --repo is omitted\n{default_repo_line}\n\n# Store and retrieve vault passphrases via OS keyring\nuse_keyring = {}\n\n# Registered dotfile repositories (<label> = \"~/path\")\n[repos]\n",
+            self.use_keyring
+        );
+
+        for (label, repo_path) in &self.repos {
+            let escaped_path = toml::Value::String(repo_path.clone()).to_string();
+            out.push_str(&format!("{label} = {escaped_path}\n"));
+        }
+
+        out
+    }
+
     pub fn save_atomic(&self, path: &Path) -> Result<(), ConfigError> {
         self.validate()?;
-        let serialized = toml::to_string_pretty(self)
-            .map_err(|e| ConfigError::TomlSyntaxError(e.to_string()))?;
+        let serialized = self.to_toml_string();
 
         write_file_safe(path, serialized.as_bytes()).map_err(|e| match e {
             StateError::Io(io) => ConfigError::IoError(io),
@@ -689,10 +719,10 @@ devices = ["laptop"]
         assert!(config_path.exists());
 
         let raw_saved = fs::read_to_string(&config_path).expect("read saved config");
-        assert!(raw_saved.contains("default_devices = [\"laptop\"]"));
-        assert!(raw_saved.contains("default_repo = \"dotfiles\""));
-        assert!(raw_saved.contains("use_keyring = true"));
-        assert!(raw_saved.contains("[repos]"));
+        assert!(raw_saved.contains("# Priority-ordered device profile names for path matching\ndefault_devices = [\"laptop\"]"));
+        assert!(raw_saved.contains("# Default repository label used when --repo is omitted\ndefault_repo = \"dotfiles\""));
+        assert!(raw_saved.contains("# Store and retrieve vault passphrases via OS keyring\nuse_keyring = true"));
+        assert!(raw_saved.contains("# Registered dotfile repositories (<label> = \"~/path\")\n[repos]"));
 
         let loaded = LocalConfig::load(&config_path).expect("loaded config must succeed");
         assert_eq!(loaded, config);

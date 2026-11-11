@@ -15,11 +15,15 @@ use crate::tui::confirm::{ConfirmPrompt, confirm_proceed_to};
 /// Default GitHub repository `owner/name` for official releases.
 pub const DEFAULT_GITHUB_REPO: &str = "msisdev/dotler";
 
+/// Release notes marker indicating that `dotler` has graduated to official `homebrew-core`.
+pub const HOMEBREW_CORE_RELEASE_MARKER: &str = "<!-- dotler:homebrew-core -->";
+
 /// Classification of how the current `dotler` executable was installed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallMethod {
     Standalone,
-    Homebrew,
+    HomebrewTap,
+    HomebrewCore,
     Scoop,
     Winget,
     Nix,
@@ -36,7 +40,8 @@ impl InstallMethod {
     pub fn as_str(&self) -> &'static str {
         match self {
             InstallMethod::Standalone => "standalone",
-            InstallMethod::Homebrew => "homebrew",
+            InstallMethod::HomebrewTap => "homebrew-tap",
+            InstallMethod::HomebrewCore => "homebrew",
             InstallMethod::Scoop => "scoop",
             InstallMethod::Winget => "winget",
             InstallMethod::Nix => "nix",
@@ -54,11 +59,20 @@ impl InstallMethod {
         !matches!(self, InstallMethod::Standalone)
     }
 
-    /// Returns the recommended package manager upgrade command, if applicable.
-    pub fn upgrade_command(&self) -> Option<&'static str> {
+    /// Returns the recommended package manager upgrade command, accounting for `homebrew-core` migration.
+    pub fn upgrade_command_for(&self, homebrew_core_available: bool) -> Option<&'static str> {
         match self {
             InstallMethod::Standalone => None,
-            InstallMethod::Homebrew => Some("brew upgrade msisdev/tap/dotler"),
+            InstallMethod::HomebrewTap => {
+                if homebrew_core_available {
+                    Some(
+                        "brew uninstall msisdev/tap/dotler && brew untap msisdev/tap && brew install dotler",
+                    )
+                } else {
+                    Some("brew upgrade msisdev/tap/dotler")
+                }
+            }
+            InstallMethod::HomebrewCore => Some("brew upgrade dotler"),
             InstallMethod::Scoop => Some("scoop update dotler"),
             InstallMethod::Winget => Some("winget upgrade msisdev.dotler"),
             InstallMethod::Nix => Some("nix profile upgrade dotler"),
@@ -78,6 +92,18 @@ impl InstallMethod {
             }
         }
     }
+
+    /// Returns the default upgrade command when `homebrew-core` migration is not active.
+    pub fn upgrade_command(&self) -> Option<&'static str> {
+        self.upgrade_command_for(false)
+    }
+}
+
+/// Resolved target release metadata from GitHub Releases or a custom mirror.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseMetadata {
+    pub version: String,
+    pub homebrew_core_available: bool,
 }
 
 /// Platform release archive descriptor.
@@ -117,6 +143,29 @@ impl Drop for UpdateTempDir {
     }
 }
 
+/// Checks Homebrew's `INSTALL_RECEIPT.json` in the keg root (`<Cellar>/dotler/<version>/INSTALL_RECEIPT.json`)
+/// to determine whether the formula was installed from official `homebrew/core` or a custom tap.
+fn is_homebrew_core_receipt(exe_path: &Path) -> bool {
+    let resolved = fs::canonicalize(exe_path).unwrap_or_else(|_| exe_path.to_path_buf());
+    for candidate in [exe_path, resolved.as_path()] {
+        if let Some(bin_dir) = candidate.parent()
+            && let Some(keg_dir) = bin_dir.parent()
+        {
+            let receipt_path = keg_dir.join("INSTALL_RECEIPT.json");
+            if let Ok(raw) = fs::read_to_string(&receipt_path)
+                && let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw)
+                && let Some(tap) = json
+                    .get("source")
+                    .and_then(|s| s.get("tap"))
+                    .and_then(|t| t.as_str())
+            {
+                return tap == "homebrew/core";
+            }
+        }
+    }
+    false
+}
+
 /// Detects the installation channel from the executable path and OS distribution metadata.
 pub fn detect_install_method(exe_path: &Path, os_info: &OsInfo) -> InstallMethod {
     let raw_norm = exe_path.to_string_lossy().replace('\\', "/");
@@ -132,7 +181,10 @@ pub fn detect_install_method(exe_path: &Path, os_info: &OsInfo) -> InstallMethod
             || candidate.contains("/home/linuxbrew/.linuxbrew/")
             || candidate.contains("/usr/local/Cellar/")
         {
-            return InstallMethod::Homebrew;
+            if is_homebrew_core_receipt(exe_path) {
+                return InstallMethod::HomebrewCore;
+            }
+            return InstallMethod::HomebrewTap;
         }
         if lower.contains("/scoop/apps/dotler/") || lower.contains("/scoop/shims/") {
             return InstallMethod::Scoop;
@@ -276,16 +328,38 @@ pub fn verify_sha256_checksum(archive_bytes: &[u8], sha256_text: &str) -> Result
 #[derive(Deserialize)]
 struct GithubReleasePayload {
     tag_name: String,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    homebrew_core: Option<bool>,
 }
 
-fn parse_version_response(body: &str) -> Result<String, EngineError> {
+pub fn parse_release_metadata(body: &str) -> Result<ReleaseMetadata, EngineError> {
+    let env_core = std::env::var("DOTLER_HOMEBREW_CORE").ok().as_deref() == Some("1");
     let trimmed = body.trim();
     if trimmed.starts_with('{') {
         let parsed: GithubReleasePayload = serde_json::from_str(trimmed)
             .map_err(|e| update_err(format!("Failed to parse release metadata JSON: {e}")))?;
-        normalize_version(&parsed.tag_name)
+        let version = normalize_version(&parsed.tag_name)?;
+        let body_has_marker = parsed
+            .body
+            .as_deref()
+            .map(|b| b.contains(HOMEBREW_CORE_RELEASE_MARKER))
+            .unwrap_or(false);
+        let homebrew_core_available =
+            env_core || parsed.homebrew_core.unwrap_or(false) || body_has_marker;
+        Ok(ReleaseMetadata {
+            version,
+            homebrew_core_available,
+        })
     } else {
-        normalize_version(trimmed)
+        let first_line = trimmed.lines().next().unwrap_or("");
+        let version = normalize_version(first_line)?;
+        let homebrew_core_available = env_core || trimmed.contains(HOMEBREW_CORE_RELEASE_MARKER);
+        Ok(ReleaseMetadata {
+            version,
+            homebrew_core_available,
+        })
     }
 }
 
@@ -323,25 +397,29 @@ fn fetch_bytes_from_source(source: &str) -> Result<Vec<u8>, EngineError> {
     Ok(buf)
 }
 
-/// Resolves the target release version (either from `--version` or by querying the release source).
-pub fn resolve_target_version(
+/// Resolves the target release metadata (version and `homebrew-core` availability).
+pub fn resolve_target_release(
     requested_version: Option<&str>,
     base_url_override: Option<&str>,
     repo: &str,
-) -> Result<String, EngineError> {
+) -> Result<ReleaseMetadata, EngineError> {
+    let env_core = std::env::var("DOTLER_HOMEBREW_CORE").ok().as_deref() == Some("1");
     if let Some(v) = requested_version {
-        return normalize_version(v);
+        return Ok(ReleaseMetadata {
+            version: normalize_version(v)?,
+            homebrew_core_available: env_core,
+        });
     }
 
     if let Some(base) = base_url_override {
         let trimmed_base = base.trim_end_matches('/');
-        for suffix in ["latest-version", "latest.json", "latest"] {
+        for suffix in ["latest.json", "latest-version", "latest"] {
             let candidate = format!("{trimmed_base}/{suffix}");
             if let Ok(bytes) = fetch_bytes_from_source(&candidate)
                 && let Ok(text) = String::from_utf8(bytes)
-                && let Ok(ver) = parse_version_response(&text)
+                && let Ok(meta) = parse_release_metadata(&text)
             {
-                return Ok(ver);
+                return Ok(meta);
             }
         }
         return Err(update_err(format!(
@@ -352,7 +430,10 @@ pub fn resolve_target_version(
     // In hermetic test sandboxes without an explicit release base URL override,
     // return the compiled package version without external network calls.
     if std::env::var("DOTLER_MOCK_KEYRING").ok().as_deref() == Some("1") {
-        return Ok(env!("CARGO_PKG_VERSION").to_string());
+        return Ok(ReleaseMetadata {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            homebrew_core_available: env_core,
+        });
     }
 
     let api_url = format!("https://api.github.com/repos/{repo}/releases/latest");
@@ -374,7 +455,7 @@ pub fn resolve_target_version(
         .read_to_string()
         .map_err(|e| update_err(format!("Failed to read GitHub API response: {e}")))?;
 
-    parse_version_response(&body)
+    parse_release_metadata(&body)
 }
 
 fn fetch_release_asset(
@@ -545,13 +626,19 @@ pub fn run_update(
         .ok()
         .filter(|s| !s.trim().is_empty());
 
-    let target_version =
-        resolve_target_version(args.version.as_deref(), base_url_override.as_deref(), &repo)?;
+    let release_meta =
+        resolve_target_release(args.version.as_deref(), base_url_override.as_deref(), &repo)?;
+    let target_version = release_meta.version;
+    let upgrade_cmd = install_method
+        .upgrade_command_for(release_meta.homebrew_core_available)
+        .map(str::to_string);
 
     let is_same_version = current_version == target_version;
+    let needs_brew_core_migration = matches!(install_method, InstallMethod::HomebrewTap)
+        && release_meta.homebrew_core_available;
 
     if args.check {
-        let status = if is_same_version {
+        let status = if is_same_version && !needs_brew_core_migration {
             "up_to_date".to_string()
         } else {
             "update_available".to_string()
@@ -562,18 +649,18 @@ pub fn run_update(
             version: current_version,
             target_version: Some(target_version),
             install_method: Some(install_method.as_str().to_string()),
-            upgrade_command: install_method.upgrade_command().map(str::to_string),
+            upgrade_command: upgrade_cmd,
         });
     }
 
-    if is_same_version && !args.force {
+    if is_same_version && !needs_brew_core_migration && !args.force {
         return Ok(UpdateReport {
             status: "up_to_date".to_string(),
             check_only: false,
             version: current_version,
             target_version: Some(target_version),
             install_method: Some(install_method.as_str().to_string()),
-            upgrade_command: install_method.upgrade_command().map(str::to_string),
+            upgrade_command: upgrade_cmd,
         });
     }
 
@@ -584,7 +671,7 @@ pub fn run_update(
             version: current_version,
             target_version: Some(target_version),
             install_method: Some(install_method.as_str().to_string()),
-            upgrade_command: install_method.upgrade_command().map(str::to_string),
+            upgrade_command: upgrade_cmd,
         });
     }
 
@@ -656,7 +743,7 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_install_method_across_package_managers() {
+    fn test_detect_install_method_across_package_managers_and_homebrew_receipt() {
         let os = dummy_os("ubuntu");
 
         assert_eq!(
@@ -664,12 +751,51 @@ mod tests {
                 Path::new("/opt/homebrew/Cellar/dotler/0.2.0/bin/dotler"),
                 &os
             ),
-            InstallMethod::Homebrew
+            InstallMethod::HomebrewTap
         );
         assert_eq!(
             detect_install_method(Path::new("/home/linuxbrew/.linuxbrew/bin/dotler"), &os),
-            InstallMethod::Homebrew
+            InstallMethod::HomebrewTap
         );
+
+        // Verify INSTALL_RECEIPT.json distinction between msisdev/tap and homebrew/core
+        let tmp = tempfile::tempdir().unwrap();
+        let keg_dir = tmp.path().join("opt/homebrew/Cellar/dotler/1.0.0");
+        let bin_dir = keg_dir.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let brew_exe = bin_dir.join("dotler");
+        fs::write(&brew_exe, b"bin").unwrap();
+
+        fs::write(
+            keg_dir.join("INSTALL_RECEIPT.json"),
+            r#"{"source":{"tap":"msisdev/tap"}}"#,
+        )
+        .unwrap();
+        let method_tap = detect_install_method(&brew_exe, &os);
+        assert_eq!(method_tap, InstallMethod::HomebrewTap);
+        assert_eq!(
+            method_tap.upgrade_command_for(false),
+            Some("brew upgrade msisdev/tap/dotler")
+        );
+        assert_eq!(
+            method_tap.upgrade_command_for(true),
+            Some(
+                "brew uninstall msisdev/tap/dotler && brew untap msisdev/tap && brew install dotler"
+            )
+        );
+
+        fs::write(
+            keg_dir.join("INSTALL_RECEIPT.json"),
+            r#"{"source":{"tap":"homebrew/core"}}"#,
+        )
+        .unwrap();
+        let method_core = detect_install_method(&brew_exe, &os);
+        assert_eq!(method_core, InstallMethod::HomebrewCore);
+        assert_eq!(
+            method_core.upgrade_command_for(true),
+            Some("brew upgrade dotler")
+        );
+
         assert_eq!(
             detect_install_method(
                 Path::new("C:\\Users\\alice\\scoop\\apps\\dotler\\current\\dotler.exe"),
@@ -714,6 +840,27 @@ mod tests {
             detect_install_method(Path::new("/home/alice/.local/bin/dotler"), &os),
             InstallMethod::Standalone
         );
+    }
+
+    #[test]
+    fn test_parse_release_metadata_detects_homebrew_core_marker() {
+        let meta_tap =
+            parse_release_metadata(r#"{"tag_name":"v0.2.1","body":"Normal release notes"}"#)
+                .unwrap();
+        assert_eq!(meta_tap.version, "0.2.1");
+        assert!(!meta_tap.homebrew_core_available);
+
+        let meta_core_marker = parse_release_metadata(
+            r#"{"tag_name":"v1.0.0","body":"Release notes\n<!-- dotler:homebrew-core -->"}"#,
+        )
+        .unwrap();
+        assert_eq!(meta_core_marker.version, "1.0.0");
+        assert!(meta_core_marker.homebrew_core_available);
+
+        let meta_core_field =
+            parse_release_metadata(r#"{"tag_name":"v1.0.0","homebrew_core":true}"#).unwrap();
+        assert_eq!(meta_core_field.version, "1.0.0");
+        assert!(meta_core_field.homebrew_core_available);
     }
 
     #[test]

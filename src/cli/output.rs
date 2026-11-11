@@ -575,14 +575,29 @@ impl InlineRender for UpdateReport {
                     .upgrade_command
                     .as_deref()
                     .unwrap_or("your package manager upgrade command");
-                format!(
-                    "Update delegated to {method}. (v{} -> v{})\n{} Run '{cmd}' to update, or 'dotler update --force' to replace the binary directly.",
+                if method == "homebrew-tap" && cmd.contains("brew untap msisdev/tap") {
+                    format!(
+                        "Update delegated to {method}. (v{} -> v{})\n{} 'dotler' is now in official homebrew-core! Migrate with '{cmd}', or run 'dotler update --force' to replace the binary directly.",
+                        self.version,
+                        target,
+                        styled_hint_label()
+                    )
+                } else {
+                    format!(
+                        "Update delegated to {method}. (v{} -> v{})\n{} Run '{cmd}' to update, or 'dotler update --force' to replace the binary directly.",
+                        self.version,
+                        target,
+                        styled_hint_label()
+                    )
+                }
+            }
+            "update_available" => match &self.upgrade_command {
+                Some(cmd) if cmd.contains("brew untap msisdev/tap") => format!(
+                    "Update check done. (v{} -> v{} available)\n{} 'dotler' is now in official homebrew-core! Migrate with '{cmd}'.",
                     self.version,
                     target,
                     styled_hint_label()
-                )
-            }
-            "update_available" => match &self.upgrade_command {
+                ),
                 Some(cmd) => format!(
                     "Update check done. (v{} -> v{} available)\n{} Run '{cmd}' to update.",
                     self.version,
@@ -939,12 +954,28 @@ mod tests {
             check_only: false,
             version: "0.1.0".to_string(),
             target_version: Some("0.2.0".to_string()),
-            install_method: Some("homebrew".to_string()),
+            install_method: Some("homebrew-tap".to_string()),
             upgrade_command: Some("brew upgrade msisdev/tap/dotler".to_string()),
         };
         assert_eq!(
             strip_ansi(&managed_rep.render_inline()),
-            "Update delegated to homebrew. (v0.1.0 -> v0.2.0)\nHint: Run 'brew upgrade msisdev/tap/dotler' to update, or 'dotler update --force' to replace the binary directly."
+            "Update delegated to homebrew-tap. (v0.1.0 -> v0.2.0)\nHint: Run 'brew upgrade msisdev/tap/dotler' to update, or 'dotler update --force' to replace the binary directly."
+        );
+
+        let migrate_core_rep = UpdateReport {
+            status: "managed_by_package_manager".to_string(),
+            check_only: false,
+            version: "0.2.0".to_string(),
+            target_version: Some("1.0.0".to_string()),
+            install_method: Some("homebrew-tap".to_string()),
+            upgrade_command: Some(
+                "brew uninstall msisdev/tap/dotler && brew untap msisdev/tap && brew install dotler"
+                    .to_string(),
+            ),
+        };
+        assert_eq!(
+            strip_ansi(&migrate_core_rep.render_inline()),
+            "Update delegated to homebrew-tap. (v0.2.0 -> v1.0.0)\nHint: 'dotler' is now in official homebrew-core! Migrate with 'brew uninstall msisdev/tap/dotler && brew untap msisdev/tap && brew install dotler', or run 'dotler update --force' to replace the binary directly."
         );
     }
 

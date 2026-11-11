@@ -1278,13 +1278,40 @@ fn test_e2e_self_update_and_package_manager_delegation() {
     );
     assert_eq!(
         brew_json["data"]["install_method"],
-        Value::String("homebrew".to_string())
+        Value::String("homebrew-tap".to_string())
     );
     assert_eq!(
         brew_json["data"]["upgrade_command"],
         Value::String("brew upgrade msisdev/tap/dotler".to_string())
     );
     assert_eq!(fs::read(&brew_exe).unwrap(), b"original-homebrew-binary");
+
+    // 1b. When release metadata includes the homebrew-core marker, homebrew-tap users are guided to migrate to official homebrew-core
+    fs::write(
+        release_root.join("latest.json"),
+        r#"{"tag_name":"v9.9.9","body":"Release notes\n<!-- dotler:homebrew-core -->"}"#,
+    )
+    .unwrap();
+    let brew_migrate_out = sandbox
+        .cmd()
+        .env("DOTLER_RELEASE_BASE_URL", &release_base_url)
+        .env("DOTLER_UPDATE_EXE_PATH", &brew_exe)
+        .args(["update"])
+        .output()
+        .unwrap();
+    assert_eq!(brew_migrate_out.status.code(), Some(0));
+    let brew_migrate_stdout = String::from_utf8_lossy(&brew_migrate_out.stdout);
+    assert!(
+        brew_migrate_stdout.contains(
+            "brew uninstall msisdev/tap/dotler && brew untap msisdev/tap && brew install dotler"
+        ),
+        "stdout: {brew_migrate_stdout}"
+    );
+    assert!(
+        brew_migrate_stdout.contains("official homebrew-core"),
+        "stdout: {brew_migrate_stdout}"
+    );
+    let _ = fs::remove_file(release_root.join("latest.json"));
 
     // 2. Standalone binary path updates in-place after SHA-256 verification
     let standalone_exe = sandbox.home_dir.join(".local/bin/dotler");

@@ -494,6 +494,10 @@ jobs:
               echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${CURRENT_TAG}"
               echo ""
             fi
+            if [ "${{ vars.HOMEBREW_CORE_AVAILABLE }}" = "true" ]; then
+              echo "<!-- dotler:homebrew-core -->"
+              echo ""
+            fi
             cat << EOF
           ### Quick Install & Upgrade
 

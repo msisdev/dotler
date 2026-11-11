@@ -43,7 +43,8 @@ dotler status
 dotler import
 dotler export
 dotler tidy [--purge]
-dotler vault <init | passwd | recover>
+dotler vault init [--git <url> | --url <url> | --from <repo_or_path>]
+dotler vault <passwd | recover>
 dotler key <set | del>
 dotler git <ls | clone | install | uninstall>
 dotler ai

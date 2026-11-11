@@ -39,20 +39,21 @@ os-nux = "~/.config/gh"
 os-mac = "~/.config/gh"
 os-win = "~/AppData/Roaming/GitHub CLI"
 files = """
-!*
 hosts.yml encrypt
 """
 ```
-- Protect your files with passphrase.
-- Mark files with `encrypt` attribute in `./dotler.toml`.
-- `dotler import`/`dotler export` will encrypt/decrypt them automatically.
+- Protect your files with a passphrase (`dotler vault init`).
+- Share the same vault across multiple repositories or devices via `dotler vault init --git`, `--url` (TOML or JSON), or `--from`.
+- Mark files with the `encrypt` attribute in `./dotler.toml`.
+- `dotler import` and `dotler export` encrypt and decrypt them automatically.
 
 
-**Git Sharing**
-- Publish your dotler repository to Git.
-- `dotler git clone` will copy dotfiles from remote to current dotler directory.
-- `dotler git install` will copy dotfiles from remote to your OS dotfile.
-- dotler recognizes `dotler.toml` in any depth of the repository.
+**Git Sharing (No `git` Binary Required)**
+- Publish your dotler repository to Git (`gh:`/`github:`, `gl:`/`gitlab:`, `cb:`/`codeberg:`, `srht:`/`sourcehut:`, `bb:`/`bitbucket:`, or full HTTPS URLs).
+- `dotler git clone` copies dotfiles from a remote repository into your local dotler directory.
+- `dotler git install` deploys dotfiles from a remote repository directly to your OS paths (with automatic backup & `dotler git uninstall` rollback).
+- Built-in pure-Rust Git & HTTP engine works even when `git` is not installed on your system.
+- Recognizes `dotler.toml` at any depth of the repository.
 
 
 **AI-Ready**

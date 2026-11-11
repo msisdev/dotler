@@ -25,10 +25,31 @@ Windows (PowerShell)
 irm https://msisdev.github.io/dotler/install.ps1 | iex
 ```
 
+### With Package Managers
+
+```sh
+# Homebrew (macOS & Linux)
+brew install msisdev/tap/dotler
+
+# Scoop (Windows)
+scoop bucket add msisdev https://github.com/msisdev/scoop-bucket
+scoop install dotler
+
+# WinGet (Windows)
+winget install msisdev.dotler
+
+# Arch Linux (AUR)
+yay -S dotler-bin
+
+# Nix Flakes
+nix profile install github:msisdev/dotler
+```
+
 ### With Cargo
 ```sh
-# Build latest version
+# Install from crates.io (or prebuilt via cargo-binstall)
 cargo install dotler
+cargo binstall dotler
 
 # Or build latest main branch from GitHub
 cargo install --git https://github.com/msisdev/dotler --locked
@@ -49,6 +70,7 @@ dotler key <set | del>
 dotler git <ls | clone | install | uninstall>
 dotler ai
 dotler mcp
+dotler update [--check] [--version <tag>] [--force] [-y]
 ```
 
 ---

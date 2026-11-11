@@ -12,7 +12,7 @@ documentation = "https://msisdev.github.io/dotler/"
 readme = "README.md"
 keywords = ["dotfiles", "cli", "encryption", "configuration", "mcp"]
 categories = ["command-line-utilities", "config", "cryptography"]
-exclude = [".github/", "book/"]
+exclude = [".github/", "book/", "flake.nix"]
 
 [[bin]]
 name = "dotler"

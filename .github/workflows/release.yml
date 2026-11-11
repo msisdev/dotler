@@ -160,7 +160,7 @@ jobs:
           if-no-files-found: error
 
   github-release:
-    name: Publish GitHub Release
+    name: Package & Publish GitHub Release
     needs:
       - build-binaries
     runs-on: ubuntu-latest
@@ -172,9 +172,251 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Install nfpm for Linux package generation (.deb, .rpm, .apk)
+        run: |
+          NFPM_VERSION="2.41.1"
+          curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" | sudo tar -xzf - -C /usr/local/bin nfpm
+          nfpm --version
+
+      - name: Build Linux packages (.deb, .rpm, .apk) from static musl binaries
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p pkg_staging
+
+          for entry in "x86_64-unknown-linux-musl:amd64:x86_64:x86_64" "aarch64-unknown-linux-musl:arm64:aarch64:aarch64"; do
+            IFS=":" read -r TRIPLE DEB_ARCH RPM_ARCH APK_ARCH <<< "${entry}"
+            rm -rf "pkg_staging/${TRIPLE}"
+            mkdir -p "pkg_staging/${TRIPLE}"
+            tar -xzf "artifacts/dotler-${TRIPLE}.tar.gz" -C "pkg_staging/${TRIPLE}"
+
+            cat > "pkg_staging/${TRIPLE}/nfpm.yaml" << EOF
+          name: "dotler"
+          arch: "${DEB_ARCH}"
+          platform: "linux"
+          version: "${VERSION}"
+          release: 1
+          section: "utils"
+          priority: "optional"
+          maintainer: "Minseob Kim <https://github.com/msisdev>"
+          description: "Deterministic dotfile manager with selective encryption, Git sharing, and AI/MCP support."
+          vendor: "msisdev"
+          homepage: "https://msisdev.github.io/dotler/"
+          license: "MIT"
+          contents:
+            - src: "pkg_staging/${TRIPLE}/dotler"
+              dst: "/usr/bin/dotler"
+              file_info:
+                mode: 0755
+            - src: "LICENSE"
+              dst: "/usr/share/licenses/dotler/LICENSE"
+          EOF
+
+            nfpm package --config "pkg_staging/${TRIPLE}/nfpm.yaml" --packager deb --target "artifacts/dotler_${VERSION}_${DEB_ARCH}.deb"
+            nfpm package --config "pkg_staging/${TRIPLE}/nfpm.yaml" --packager rpm --target "artifacts/dotler-${VERSION}-1.${RPM_ARCH}.rpm"
+            nfpm package --config "pkg_staging/${TRIPLE}/nfpm.yaml" --packager apk --target "artifacts/dotler_${VERSION}_${APK_ARCH}.apk"
+          done
+
+          cd artifacts
+          for pkg in *.deb *.rpm *.apk; do
+            sha256sum "${pkg}" > "${pkg}.sha256"
+          done
+
+      - name: Generate Homebrew, Scoop, AUR, and WinGet manifests
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          REPO="${GITHUB_REPOSITORY}"
+          mkdir -p artifacts/packaging
+
+          sha_of() {
+            awk '{print $1}' "artifacts/$1.sha256"
+          }
+
+          SHA_MAC_ARM="$(sha_of dotler-aarch64-apple-darwin.tar.gz)"
+          SHA_MAC_X64="$(sha_of dotler-x86_64-apple-darwin.tar.gz)"
+          SHA_LINUX_ARM="$(sha_of dotler-aarch64-unknown-linux-musl.tar.gz)"
+          SHA_LINUX_X64="$(sha_of dotler-x86_64-unknown-linux-musl.tar.gz)"
+          SHA_WIN_X64="$(sha_of dotler-x86_64-pc-windows-msvc.zip)"
+          SHA_WIN_ARM="$(sha_of dotler-aarch64-pc-windows-msvc.zip)"
+          SHA_WIN_X64_UPPER="$(echo "${SHA_WIN_X64}" | tr 'a-z' 'A-Z')"
+          SHA_WIN_ARM_UPPER="$(echo "${SHA_WIN_ARM}" | tr 'a-z' 'A-Z')"
+
+          # 1. Homebrew Formula (dotler.rb) for macOS & Linux
+          cat > artifacts/packaging/dotler.rb << EOF
+          class Dotler < Formula
+            desc "Deterministic dotfile manager with selective encryption, Git sharing, and AI/MCP support"
+            homepage "https://msisdev.github.io/dotler/"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/${REPO}/releases/download/v${VERSION}/dotler-aarch64-apple-darwin.tar.gz"
+                sha256 "${SHA_MAC_ARM}"
+              else
+                url "https://github.com/${REPO}/releases/download/v${VERSION}/dotler-x86_64-apple-darwin.tar.gz"
+                sha256 "${SHA_MAC_X64}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/${REPO}/releases/download/v${VERSION}/dotler-aarch64-unknown-linux-musl.tar.gz"
+                sha256 "${SHA_LINUX_ARM}"
+              else
+                url "https://github.com/${REPO}/releases/download/v${VERSION}/dotler-x86_64-unknown-linux-musl.tar.gz"
+                sha256 "${SHA_LINUX_X64}"
+              end
+            end
+
+            def install
+              bin.install "dotler"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/dotler --version")
+            end
+          end
+          EOF
+
+          # 2. Scoop Manifest (dotler.json) for Windows x64 & ARM64
+          cat > artifacts/packaging/dotler.json << EOF
+          {
+            "version": "${VERSION}",
+            "description": "Deterministic dotfile manager with selective encryption, Git sharing, and AI/MCP support.",
+            "homepage": "https://msisdev.github.io/dotler/",
+            "license": "MIT",
+            "architecture": {
+              "64bit": {
+                "url": "https://github.com/${REPO}/releases/download/v${VERSION}/dotler-x86_64-pc-windows-msvc.zip",
+                "hash": "${SHA_WIN_X64}"
+              },
+              "arm64": {
+                "url": "https://github.com/${REPO}/releases/download/v${VERSION}/dotler-aarch64-pc-windows-msvc.zip",
+                "hash": "${SHA_WIN_ARM}"
+              }
+            },
+            "bin": "dotler.exe",
+            "checkver": {
+              "github": "https://github.com/${REPO}"
+            },
+            "autoupdate": {
+              "architecture": {
+                "64bit": {
+                  "url": "https://github.com/${REPO}/releases/download/v\$version/dotler-x86_64-pc-windows-msvc.zip"
+                },
+                "arm64": {
+                  "url": "https://github.com/${REPO}/releases/download/v\$version/dotler-aarch64-pc-windows-msvc.zip"
+                }
+              }
+            }
+          }
+          EOF
+
+          # 3. Arch Linux AUR (PKGBUILD and .SRCINFO for dotler-bin)
+          cat > artifacts/packaging/PKGBUILD << EOF
+          # Maintainer: Minseob Kim <https://github.com/msisdev>
+          pkgname=dotler-bin
+          pkgver=${VERSION}
+          pkgrel=1
+          pkgdesc="Deterministic dotfile manager with selective encryption, Git sharing, and AI/MCP support"
+          arch=('x86_64' 'aarch64')
+          url="https://github.com/${REPO}"
+          license=('MIT')
+          provides=('dotler')
+          conflicts=('dotler')
+          source_x86_64=("dotler-\${pkgver}-x86_64.tar.gz::https://github.com/${REPO}/releases/download/v\${pkgver}/dotler-x86_64-unknown-linux-musl.tar.gz")
+          source_aarch64=("dotler-\${pkgver}-aarch64.tar.gz::https://github.com/${REPO}/releases/download/v\${pkgver}/dotler-aarch64-unknown-linux-musl.tar.gz")
+          sha256sums_x86_64=('${SHA_LINUX_X64}')
+          sha256sums_aarch64=('${SHA_LINUX_ARM}')
+
+          package() {
+            install -Dm755 "\${srcdir}/dotler" "\${pkgdir}/usr/bin/dotler"
+            install -Dm644 "\${srcdir}/LICENSE" "\${pkgdir}/usr/share/licenses/\${pkgname}/LICENSE"
+          }
+          EOF
+
+          cat > artifacts/packaging/.SRCINFO << EOF
+          pkgbase = dotler-bin
+          	pkgdesc = Deterministic dotfile manager with selective encryption, Git sharing, and AI/MCP support
+          	pkgver = ${VERSION}
+          	pkgrel = 1
+          	url = https://github.com/${REPO}
+          	arch = x86_64
+          	arch = aarch64
+          	license = MIT
+          	provides = dotler
+          	conflicts = dotler
+          	source_x86_64 = dotler-${VERSION}-x86_64.tar.gz::https://github.com/${REPO}/releases/download/v${VERSION}/dotler-x86_64-unknown-linux-musl.tar.gz
+          	sha256sums_x86_64 = ${SHA_LINUX_X64}
+          	source_aarch64 = dotler-${VERSION}-aarch64.tar.gz::https://github.com/${REPO}/releases/download/v${VERSION}/dotler-aarch64-unknown-linux-musl.tar.gz
+          	sha256sums_aarch64 = ${SHA_LINUX_ARM}
+
+          pkgname = dotler-bin
+          EOF
+
+          # 4. WinGet Multi-File Manifests (msisdev.dotler)
+          cat > artifacts/packaging/msisdev.dotler.yaml << EOF
+          # yaml-language-server: \$schema=https://aka.ms/winget-manifest.version.1.6.0.schema.json
+          PackageIdentifier: msisdev.dotler
+          PackageVersion: ${VERSION}
+          DefaultLocale: en-US
+          ManifestType: version
+          ManifestVersion: 1.6.0
+          EOF
+
+          cat > artifacts/packaging/msisdev.dotler.locale.en-US.yaml << EOF
+          # yaml-language-server: \$schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+          PackageIdentifier: msisdev.dotler
+          PackageVersion: ${VERSION}
+          PackageLocale: en-US
+          Publisher: Minseob Kim
+          PublisherUrl: https://github.com/msisdev
+          PackageName: dotler
+          PackageUrl: https://msisdev.github.io/dotler/
+          License: MIT
+          LicenseUrl: https://github.com/${REPO}/blob/main/LICENSE
+          ShortDescription: Deterministic dotfile manager with selective encryption, Git sharing, and AI/MCP support.
+          Moniker: dotler
+          Tags:
+            - dotfiles
+            - cli
+            - encryption
+            - configuration
+            - mcp
+          ManifestType: defaultLocale
+          ManifestVersion: 1.6.0
+          EOF
+
+          cat > artifacts/packaging/msisdev.dotler.installer.yaml << EOF
+          # yaml-language-server: \$schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+          PackageIdentifier: msisdev.dotler
+          PackageVersion: ${VERSION}
+          InstallerType: zip
+          NestedInstallerType: portable
+          NestedInstallerFiles:
+            - RelativeFilePath: dotler.exe
+              PortableCommandAlias: dotler
+          Installers:
+            - Architecture: x64
+              InstallerUrl: https://github.com/${REPO}/releases/download/v${VERSION}/dotler-x86_64-pc-windows-msvc.zip
+              InstallerSha256: ${SHA_WIN_X64_UPPER}
+            - Architecture: arm64
+              InstallerUrl: https://github.com/${REPO}/releases/download/v${VERSION}/dotler-aarch64-pc-windows-msvc.zip
+              InstallerSha256: ${SHA_WIN_ARM_UPPER}
+          ManifestType: installer
+          ManifestVersion: 1.6.0
+          EOF
+
       - name: Generate structured release notes from commit history
         run: |
           CURRENT_TAG="${GITHUB_REF_NAME}"
+          VERSION="${CURRENT_TAG#v}"
           PREV_TAG="$(git tag --list 'v*.*.*' --sort=-v:refname | grep -Fxv "${CURRENT_TAG}" | head -n 1 || true)"
 
           if [ -n "${PREV_TAG}" ]; then
@@ -252,47 +494,77 @@ jobs:
               echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${CURRENT_TAG}"
               echo ""
             fi
-            cat << 'EOF'
-          ### Quick Install (One-Liner)
+            cat << EOF
+          ### Quick Install & Upgrade
 
-          **Linux / macOS**:
+          **Self-Update (existing installation)**:
 
-          ```sh
+          \`\`\`sh
+          dotler update
+          \`\`\`
+
+          **One-Liner Install (Linux / macOS / Windows)**:
+
+          \`\`\`sh
+          # Linux / macOS
           curl -fsSL https://msisdev.github.io/dotler/install.sh | sh
-          ```
 
-          **Windows (PowerShell)**:
-
-          ```powershell
+          # Windows (PowerShell)
           irm https://msisdev.github.io/dotler/install.ps1 | iex
-          ```
+          \`\`\`
 
-          ### Prebuilt Binary Download Guide
+          **Package Managers**:
 
-          | OS | Architecture | C Library / Linkage | Archive File |
+          \`\`\`sh
+          # Homebrew (macOS & Linux)
+          brew install msisdev/tap/dotler
+
+          # Scoop (Windows)
+          scoop bucket add msisdev https://github.com/msisdev/scoop-bucket
+          scoop install dotler
+
+          # WinGet (Windows)
+          winget install msisdev.dotler
+
+          # Arch Linux (AUR)
+          yay -S dotler-bin
+
+          # Nix Flakes
+          nix profile install github:msisdev/dotler
+
+          # Debian / Ubuntu (.deb)
+          curl -fsSLO https://github.com/${GITHUB_REPOSITORY}/releases/download/${CURRENT_TAG}/dotler_${VERSION}_amd64.deb
+          sudo apt install ./dotler_${VERSION}_amd64.deb
+
+          # Fedora / RHEL (.rpm)
+          sudo dnf install https://github.com/${GITHUB_REPOSITORY}/releases/download/${CURRENT_TAG}/dotler-${VERSION}-1.x86_64.rpm
+
+          # Cargo / cargo-binstall
+          cargo binstall dotler
+          \`\`\`
+
+          ### Prebuilt Binary & Package Assets
+
+          | OS | Architecture | Format / Linkage | Asset File |
           | :--- | :--- | :--- | :--- |
-          | **Linux** | `x86_64` (64-bit Intel/AMD) | `musl` (Static, Portable) | `dotler-x86_64-unknown-linux-musl.tar.gz` |
-          | **Linux** | `x86_64` (64-bit Intel/AMD) | `glibc 2.39+` (Dynamic) | `dotler-x86_64-unknown-linux-gnu.tar.gz` |
-          | **Linux** | `aarch64` (`ARM64`) | `musl` (Static, Portable) | `dotler-aarch64-unknown-linux-musl.tar.gz` |
-          | **Linux** | `aarch64` (`ARM64`) | `glibc 2.39+` (Dynamic) | `dotler-aarch64-unknown-linux-gnu.tar.gz` |
-          | **macOS** | `aarch64` (Apple Silicon) | System | `dotler-aarch64-apple-darwin.tar.gz` |
-          | **macOS** | `x86_64` (Intel Mac) | System | `dotler-x86_64-apple-darwin.tar.gz` |
-          | **Windows** | `x86_64` (64-bit Intel/AMD) | MSVC | `dotler-x86_64-pc-windows-msvc.zip` |
-          | **Windows** | `aarch64` (`ARM64`) | MSVC | `dotler-aarch64-pc-windows-msvc.zip` |
-
-          > **Linux (`glibc` vs. `musl`)**:
-          > - **`-linux-musl` (Recommended for broad compatibility)**: Statically linked with zero host `glibc` dependency. Use this on Alpine Linux, older distributions (`glibc < 2.39` such as Ubuntu 22.04 or Debian 12), or if you encounter a `GLIBC_2.39 not found` warning.
-          > - **`-linux-gnu`**: Dynamically linked against `glibc 2.39+` (built on Ubuntu 24.04). Use this on modern `glibc` systems (Ubuntu 24.04+, Arch Linux, Fedora 40+).
+          | **Linux** | \`x86_64\` | \`musl\` (Static Tarball) | \`dotler-x86_64-unknown-linux-musl.tar.gz\` |
+          | **Linux** | \`x86_64\` | \`glibc 2.39+\` (Dynamic Tarball) | \`dotler-x86_64-unknown-linux-gnu.tar.gz\` |
+          | **Linux** | \`x86_64\` | Debian / Ubuntu (\`.deb\`) | \`dotler_${VERSION}_amd64.deb\` |
+          | **Linux** | \`x86_64\` | Fedora / RHEL (\`.rpm\`) | \`dotler-${VERSION}-1.x86_64.rpm\` |
+          | **Linux** | \`x86_64\` | Alpine (\`.apk\`) | \`dotler_${VERSION}_x86_64.apk\` |
+          | **Linux** | \`aarch64\` | \`musl\` (Static Tarball) | \`dotler-aarch64-unknown-linux-musl.tar.gz\` |
+          | **Linux** | \`aarch64\` | \`glibc 2.39+\` (Dynamic Tarball) | \`dotler-aarch64-unknown-linux-gnu.tar.gz\` |
+          | **Linux** | \`aarch64\` | Debian / Ubuntu (\`.deb\`) | \`dotler_${VERSION}_arm64.deb\` |
+          | **Linux** | \`aarch64\` | Fedora / RHEL (\`.rpm\`) | \`dotler-${VERSION}-1.aarch64.rpm\` |
+          | **Linux** | \`aarch64\` | Alpine (\`.apk\`) | \`dotler_${VERSION}_aarch64.apk\` |
+          | **macOS** | \`aarch64\` (Apple Silicon) | System | \`dotler-aarch64-apple-darwin.tar.gz\` |
+          | **macOS** | \`x86_64\` (Intel Mac) | System | \`dotler-x86_64-apple-darwin.tar.gz\` |
+          | **Windows** | \`x86_64\` | MSVC | \`dotler-x86_64-pc-windows-msvc.zip\` |
+          | **Windows** | \`aarch64\` | MSVC | \`dotler-aarch64-pc-windows-msvc.zip\` |
           EOF
           } > RELEASE_NOTES.md
 
           cat RELEASE_NOTES.md
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
 
       - name: Generate combined SHA256SUMS.txt
         run: |
@@ -300,16 +572,166 @@ jobs:
           cat *.sha256 > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
+      - name: Upload packaging manifests artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: packaging-manifests
+          path: artifacts/packaging/*
+          include-hidden-files: true
+          if-no-files-found: error
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/*.tar.gz
             artifacts/*.zip
+            artifacts/*.deb
+            artifacts/*.rpm
+            artifacts/*.apk
             artifacts/*.sha256
             artifacts/SHA256SUMS.txt
+            artifacts/packaging/dotler.rb
+            artifacts/packaging/dotler.json
+            artifacts/packaging/PKGBUILD
+            artifacts/packaging/msisdev.dotler*.yaml
             book/src/install.sh
             book/src/install.ps1
           body_path: RELEASE_NOTES.md
           generate_release_notes: false
           fail_on_unmatched_files: true
+
+  publish-homebrew:
+    name: Update Homebrew Tap (macOS & Linux)
+    needs: github-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download packaging manifests
+        uses: actions/download-artifact@v4
+        with:
+          name: packaging-manifests
+          path: packaging
+
+      - name: Push Formula to Homebrew Tap repository
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN || secrets.PACKAGE_MANAGER_TOKEN }}
+          TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO || 'msisdev/homebrew-tap' }}
+        run: |
+          if [ -z "${TAP_TOKEN}" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN (or PACKAGE_MANAGER_TOKEN) secret is not set; skipping Homebrew Tap push. Formula is attached to GitHub Release as dotler.rb."
+            exit 0
+          fi
+          VERSION="${GITHUB_REF_NAME#v}"
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPO}.git" tap_repo
+          mkdir -p tap_repo/Formula
+          cp packaging/dotler.rb tap_repo/Formula/dotler.rb
+          cd tap_repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/dotler.rb
+          if git diff --cached --quiet; then
+            echo "Homebrew Formula is already up to date."
+          else
+            git commit -m "dotler ${VERSION}"
+            git push origin HEAD:main
+          fi
+
+  publish-scoop:
+    name: Update Scoop Bucket (Windows)
+    needs: github-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download packaging manifests
+        uses: actions/download-artifact@v4
+        with:
+          name: packaging-manifests
+          path: packaging
+
+      - name: Push manifest to Scoop Bucket repository
+        env:
+          BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN || secrets.PACKAGE_MANAGER_TOKEN }}
+          BUCKET_REPO: ${{ vars.SCOOP_BUCKET_REPO || 'msisdev/scoop-bucket' }}
+        run: |
+          if [ -z "${BUCKET_TOKEN}" ]; then
+            echo "::warning::SCOOP_BUCKET_TOKEN (or PACKAGE_MANAGER_TOKEN) secret is not set; skipping Scoop Bucket push. Manifest is attached to GitHub Release as dotler.json."
+            exit 0
+          fi
+          VERSION="${GITHUB_REF_NAME#v}"
+          git clone "https://x-access-token:${BUCKET_TOKEN}@github.com/${BUCKET_REPO}.git" bucket_repo
+          mkdir -p bucket_repo/bucket
+          cp packaging/dotler.json bucket_repo/bucket/dotler.json
+          cd bucket_repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bucket/dotler.json
+          if git diff --cached --quiet; then
+            echo "Scoop manifest is already up to date."
+          else
+            git commit -m "dotler: Update to version ${VERSION}"
+            git push origin HEAD:main
+          fi
+
+  publish-aur:
+    name: Publish to Arch Linux AUR (dotler-bin)
+    needs: github-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download packaging manifests
+        uses: actions/download-artifact@v4
+        with:
+          name: packaging-manifests
+          path: packaging
+
+      - name: Push PKGBUILD and .SRCINFO to AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          if [ -z "${AUR_SSH_PRIVATE_KEY}" ]; then
+            echo "::warning::AUR_SSH_PRIVATE_KEY secret is not set; skipping AUR push. PKGBUILD is attached to GitHub Release."
+            exit 0
+          fi
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf "%s\n" "${AUR_SSH_PRIVATE_KEY}" > ~/.ssh/aur_key
+          chmod 600 ~/.ssh/aur_key
+          ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key -o StrictHostKeyChecking=accept-new"
+
+          git clone ssh://aur@aur.archlinux.org/dotler-bin.git aur_repo
+          cp packaging/PKGBUILD packaging/.SRCINFO aur_repo/
+          cd aur_repo
+          git config user.name "${{ vars.AUR_USERNAME || 'msisdev' }}"
+          git config user.email "${{ vars.AUR_EMAIL || '41898282+github-actions[bot]@users.noreply.github.com' }}"
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "AUR dotler-bin is already up to date."
+          else
+            git commit -m "Update to ${VERSION}"
+            git push origin master
+          fi
+
+  publish-winget:
+    name: Submit WinGet Package PR (microsoft/winget-pkgs)
+    needs: github-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check WINGET_TOKEN availability
+        id: check_token
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if [ -z "${WINGET_TOKEN}" ]; then
+            echo "::warning::WINGET_TOKEN secret is not set; skipping automated WinGet PR submission. WinGet manifests are attached to GitHub Release."
+            echo "enabled=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "enabled=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Submit PR to microsoft/winget-pkgs
+        if: steps.check_token.outputs.enabled == 'true'
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: msisdev.dotler
+          installers-regex: '\.zip$'
+          token: ${{ secrets.WINGET_TOKEN }}

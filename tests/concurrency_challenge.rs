@@ -51,7 +51,6 @@ fn helper_sqlite_writer_process() {
         let iterations: usize = args[pos + 3].parse().expect("iterations parse");
 
         let db = StateDb::open(&db_path).expect("open db in child");
-        fs::write(&ready_path, b"READY").expect("write ready file");
 
         for i in 0..iterations {
             let record = SyncedFileRecord {
@@ -64,6 +63,9 @@ fn helper_sqlite_writer_process() {
             };
             if let Err(e) = db.upsert_synced_file(&record) {
                 eprintln!("Child upsert failed at iteration {i}: {e:?}");
+            }
+            if i == 0 {
+                fs::write(&ready_path, b"READY").expect("write ready file");
             }
             thread::sleep(Duration::from_millis(1));
         }

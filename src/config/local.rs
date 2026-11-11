@@ -338,10 +338,7 @@ impl LocalConfig {
         .to_string();
 
         let default_repo_line = match &self.default_repo {
-            Some(repo) => format!(
-                "default_repo = {}",
-                toml::Value::String(repo.clone())
-            ),
+            Some(repo) => format!("default_repo = {}", toml::Value::String(repo.clone())),
             None => "# default_repo = \"default\"".to_string(),
         };
 
@@ -720,9 +717,17 @@ devices = ["laptop"]
 
         let raw_saved = fs::read_to_string(&config_path).expect("read saved config");
         assert!(raw_saved.contains("# Priority-ordered device profile names for path matching\ndefault_devices = [\"laptop\"]"));
-        assert!(raw_saved.contains("# Default repository label used when --repo is omitted\ndefault_repo = \"dotfiles\""));
-        assert!(raw_saved.contains("# Store and retrieve vault passphrases via OS keyring\nuse_keyring = true"));
-        assert!(raw_saved.contains("# Registered dotfile repositories (<label> = \"~/path\")\n[repos]"));
+        assert!(raw_saved.contains(
+            "# Default repository label used when --repo is omitted\ndefault_repo = \"dotfiles\""
+        ));
+        assert!(
+            raw_saved.contains(
+                "# Store and retrieve vault passphrases via OS keyring\nuse_keyring = true"
+            )
+        );
+        assert!(
+            raw_saved.contains("# Registered dotfile repositories (<label> = \"~/path\")\n[repos]")
+        );
 
         let loaded = LocalConfig::load(&config_path).expect("loaded config must succeed");
         assert_eq!(loaded, config);

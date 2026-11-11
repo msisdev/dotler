@@ -874,10 +874,20 @@ fn test_e2e_vault_hint_and_use_keyring_optout() {
 
     let config_toml_path = sandbox.dotler_dir.join("config.toml");
     let config_raw = fs::read_to_string(&config_toml_path).unwrap();
-    assert!(config_raw.contains("# Priority-ordered device profile names for path matching\ndefault_devices = [\"default\"]"));
-    assert!(config_raw.contains("# Default repository label used when --repo is omitted\ndefault_repo = "));
-    assert!(config_raw.contains("# Store and retrieve vault passphrases via OS keyring\nuse_keyring = true"));
-    assert!(config_raw.contains("# Registered dotfile repositories (<label> = \"~/path\")\n[repos]"));
+    assert!(config_raw.contains(
+        "# Priority-ordered device profile names for path matching\ndefault_devices = [\"default\"]"
+    ));
+    assert!(
+        config_raw
+            .contains("# Default repository label used when --repo is omitted\ndefault_repo = ")
+    );
+    assert!(
+        config_raw
+            .contains("# Store and retrieve vault passphrases via OS keyring\nuse_keyring = true")
+    );
+    assert!(
+        config_raw.contains("# Registered dotfile repositories (<label> = \"~/path\")\n[repos]")
+    );
     let updated_config = config_raw.replace("use_keyring = true", "use_keyring = false");
     fs::write(&config_toml_path, updated_config).unwrap();
 

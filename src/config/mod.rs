@@ -14,8 +14,9 @@ pub use resource::Resource;
 pub use state::{
     ATOMIC_REPLACE_RETRIES, BACKUPS_DIR_PATH, DOTLER_LOCK_PATH, DOTLER_LOCK_POLL_INTERVAL_MS,
     DOTLER_LOCK_TIMEOUT_MS, DotlerLock, DotlerLockGuard, InstalledFileRecord,
-    SQLITE_BUSY_TIMEOUT_MS, SQLITE_JOURNAL_MODE, SQLITE_SYNCHRONOUS, STATE_DB_PATH, StateDb,
-    SyncedFileRecord, TMP_FILE_PREFIX, get_lock, get_state_db, write_file_safe,
+    SQLITE_BUSY_TIMEOUT_MS, SQLITE_JOURNAL_MODE, SQLITE_SYNCHRONOUS, STATE_DB_PATH,
+    STATE_DB_SCHEMA_VERSION, StateDb, SyncedFileRecord, TMP_FILE_PREFIX, get_lock, get_state_db,
+    write_file_safe,
 };
 
 #[derive(Debug)]
@@ -148,6 +149,7 @@ pub enum StateError {
     Lock(LockError),
     Transaction(String),
     AtomicReplaceFailed(String),
+    UnsupportedSchemaVersion { found: u32, max_supported: u32 },
 }
 
 impl std::fmt::Display for StateError {
@@ -158,6 +160,13 @@ impl std::fmt::Display for StateError {
             Self::Lock(e) => write!(f, "Lock error: {e}"),
             Self::Transaction(m) => write!(f, "Transaction error: {m}"),
             Self::AtomicReplaceFailed(m) => write!(f, "Atomic file replacement failed: {m}"),
+            Self::UnsupportedSchemaVersion {
+                found,
+                max_supported,
+            } => write!(
+                f,
+                "Unsupported state.db schema version {found} (maximum supported version is {max_supported})"
+            ),
         }
     }
 }

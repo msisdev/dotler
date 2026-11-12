@@ -284,6 +284,9 @@ impl EngineError {
                 "Run 'dotler vault init' to initialize vault encryption before syncing encrypted files.".to_string()
             }
             EngineError::Config(e) => format!("Fix configuration error: {e}"),
+            EngineError::State(crate::config::StateError::UnsupportedSchemaVersion { .. }) => {
+                "Run 'dotler update' to upgrade dotler to a version that supports this state.db schema.".to_string()
+            }
             EngineError::State(e) => format!("Database operation failed: {e}"),
             EngineError::Crypto(e) => format!("Cryptographic operation failed: {e}"),
             EngineError::Vault(e) => format!("Vault operation failed: {e}"),

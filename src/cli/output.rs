@@ -260,6 +260,9 @@ impl CliError {
                 "Run 'dotler vault init' to initialize vault encryption before syncing encrypted files.".to_string()
             }
             CliError::Config(e) => format!("Fix configuration error: {e}"),
+            CliError::State(crate::config::StateError::UnsupportedSchemaVersion { .. }) => {
+                "Run 'dotler update' to upgrade dotler to a version that supports this state.db schema.".to_string()
+            }
             CliError::Lock(crate::config::LockError::Timeout { .. }) => {
                 "Another dotler process holds ~/.config/dotler/dotler.lock. Wait for it to complete or terminate stale processes.".to_string()
             }

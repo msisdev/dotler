@@ -9,6 +9,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::config::{LockError, StateError};
 
 pub const STATE_DB_PATH: &str = "~/.config/dotler/state.db";
+pub const STATE_DB_SCHEMA_VERSION: u32 = 1;
 pub const DOTLER_LOCK_PATH: &str = "~/.config/dotler/dotler.lock";
 pub const BACKUPS_DIR_PATH: &str = "~/.config/dotler/backups";
 pub const SQLITE_JOURNAL_MODE: &str = "WAL";
@@ -79,8 +80,15 @@ impl StateDb {
              PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};"
         ))?;
 
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS synced_files (
+        let current_version: u32 = conn.query_row("PRAGMA user_version;", [], |row| row.get(0))?;
+        if current_version > STATE_DB_SCHEMA_VERSION {
+            return Err(StateError::UnsupportedSchemaVersion {
+                found: current_version,
+                max_supported: STATE_DB_SCHEMA_VERSION,
+            });
+        }
+
+        const SCHEMA_V1_DDL: &str = "CREATE TABLE IF NOT EXISTS synced_files (
                 target_path   TEXT PRIMARY KEY NOT NULL,
                 repo_label    TEXT NOT NULL,
                 group_name    TEXT NOT NULL,
@@ -99,8 +107,18 @@ impl StateDb {
                 updated_at    INTEGER NOT NULL,
                 backup_path   TEXT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_installed_files_group ON installed_files (repo_url, group_name);",
-        )?;
+            CREATE INDEX IF NOT EXISTS idx_installed_files_group ON installed_files (repo_url, group_name);";
+
+        if current_version == 0 {
+            conn.execute_batch(&format!(
+                "BEGIN IMMEDIATE;\n\
+                 {SCHEMA_V1_DDL}\n\
+                 PRAGMA user_version = {STATE_DB_SCHEMA_VERSION};\n\
+                 COMMIT;"
+            ))?;
+        } else {
+            conn.execute_batch(SCHEMA_V1_DDL)?;
+        }
 
         Ok(conn)
     }
@@ -125,6 +143,15 @@ impl StateDb {
 
     pub fn path(&self) -> &Path {
         &self.db_path
+    }
+
+    pub fn schema_version(&self) -> Result<u32, StateError> {
+        let guard = self.open_existing_conn()?;
+        let Some(conn) = guard.as_ref() else {
+            return Ok(STATE_DB_SCHEMA_VERSION);
+        };
+        let version: u32 = conn.query_row("PRAGMA user_version;", [], |row| row.get(0))?;
+        Ok(version)
     }
 }
 
@@ -555,13 +582,88 @@ mod tests {
         db.upsert_synced_file(&record).expect("upsert");
         assert!(db_path.exists());
 
-        // Verify journal mode is WAL
-        let guard = db.conn.lock().unwrap();
-        let conn = guard.as_ref().expect("connection initialized");
-        let mode: String = conn
-            .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
-            .expect("pragma journal_mode");
-        assert_eq!(mode.to_uppercase(), "WAL");
+        // Verify journal mode is WAL and schema user_version is set
+        {
+            let guard = db.conn.lock().unwrap();
+            let conn = guard.as_ref().expect("connection initialized");
+            let mode: String = conn
+                .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
+                .expect("pragma journal_mode");
+            assert_eq!(mode.to_uppercase(), "WAL");
+            let user_version: u32 = conn
+                .query_row("PRAGMA user_version;", [], |row| row.get(0))
+                .expect("pragma user_version");
+            assert_eq!(user_version, STATE_DB_SCHEMA_VERSION);
+        }
+        assert_eq!(
+            db.schema_version().expect("schema_version"),
+            STATE_DB_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn test_state_db_upgrades_legacy_zero_version_and_preserves_records() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("state.db");
+
+        {
+            let raw_conn = Connection::open(&db_path).expect("open raw sqlite");
+            raw_conn
+                .execute_batch(
+                    "CREATE TABLE synced_files (
+                        target_path   TEXT PRIMARY KEY NOT NULL,
+                        repo_label    TEXT NOT NULL,
+                        group_name    TEXT NOT NULL,
+                        relative_path TEXT NOT NULL,
+                        file_hash     TEXT NOT NULL,
+                        updated_at    INTEGER NOT NULL
+                    );
+                    INSERT INTO synced_files (target_path, repo_label, group_name, relative_path, file_hash, updated_at)
+                    VALUES ('/home/user/.gitconfig', 'main', 'git', '.gitconfig', 'legacy_hash', 1700000000);
+                    PRAGMA user_version = 0;",
+                )
+                .expect("seed legacy v0 db");
+        }
+
+        let db = StateDb::open(&db_path).expect("open legacy v0 db");
+        assert_eq!(
+            db.schema_version().expect("schema_version"),
+            STATE_DB_SCHEMA_VERSION
+        );
+        let record = db
+            .get_synced_file("/home/user/.gitconfig")
+            .expect("query")
+            .expect("legacy record preserved");
+        assert_eq!(record.file_hash, "legacy_hash");
+    }
+
+    #[test]
+    fn test_state_db_rejects_future_unsupported_schema_version() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("state.db");
+
+        {
+            let raw_conn = Connection::open(&db_path).expect("open raw sqlite");
+            raw_conn
+                .execute_batch("PRAGMA user_version = 2;")
+                .expect("set future user_version");
+        }
+
+        let err = match StateDb::open(&db_path) {
+            Err(e) => e,
+            Ok(_) => panic!("opening state.db with future user_version must fail"),
+        };
+        match err {
+            StateError::UnsupportedSchemaVersion {
+                found,
+                max_supported,
+            } => {
+                assert_eq!(found, 2);
+                assert_eq!(max_supported, STATE_DB_SCHEMA_VERSION);
+                assert_eq!(err.exit_code(), 2);
+            }
+            other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
+        }
     }
 
     #[test]

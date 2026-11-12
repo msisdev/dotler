@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::local::{WalkDir, expand_tilde};
 use crate::config::repo::{
-    SelectionMode, evaluate_selection, is_symlink, parse_selection_rules,
-    resolve_group_target_path, validate_dir_no_symlinks,
+    evaluate_selection, is_symlink, parse_selection_rules, resolve_group_target_path,
+    validate_dir_no_symlinks,
 };
 use crate::config::state::{DotlerLockGuard, TMP_FILE_PREFIX, write_file_safe};
 use crate::core::context::CoreContext;

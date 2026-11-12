@@ -225,7 +225,7 @@ recovery_slot = "{}"
 
 [secrets]
 os-nux = "~"
-files = "credentials.env encrypt"
+files = "credentials.env enc"
 "#,
         vault_cfg.vault_id, vault_cfg.password_slot, vault_cfg.recovery_slot
     );
@@ -318,7 +318,7 @@ recovery_slot = "{}"
 
 [secrets]
 os-nux = "~"
-files = "token.txt encrypt"
+files = "token.txt enc"
 "#,
         vault_cfg.vault_id, vault_cfg.password_slot, vault_cfg.recovery_slot
     );
@@ -849,7 +849,7 @@ recovery_slot = "{}"
 os-nux = "~"
 files = """
 empty_plain.txt
-empty_enc.sec encrypt
+empty_enc.sec enc
 """
 "#,
         vault_cfg.vault_id, vault_cfg.password_slot, vault_cfg.recovery_slot

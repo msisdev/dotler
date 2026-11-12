@@ -28,10 +28,12 @@
 # # Unmatched files are ignored by default.
 # # Syntax per line (Last-Match-Wins):
 # #   <pattern>          -> include as plaintext
-# #   <pattern> encrypt  -> include encrypted (.enc)
+# #   <pattern> enc      -> include encrypted (.enc)
+# #   <pattern> tmpl     -> include as template ({{ $HOME }} <-> home dir)
+# #   <pattern> enc tmpl -> include encrypted + template (.enc)
 # #   !<pattern>         -> exclude (override a broader include rule)
 # files = """
 # .bashrc
-# .bash_profile
-# .netrc encrypt
+# .bash_profile tmpl
+# .netrc enc
 # """

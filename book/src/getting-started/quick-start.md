@@ -21,9 +21,16 @@ os-nux = "~"
 os-mac = "~"
 files = """
 .zshrc
-.gitconfig
+.gitconfig tmpl
+.netrc enc
 """
 ```
+
+- `<pattern>`: Include matching file or directory as plaintext.
+- `<pattern> enc`: Include matching file or directory encrypted (`.enc`).
+- `<pattern> tmpl`: Include matching UTF-8 text file or directory with reversible `{{ $HOME }}` <-> OS home directory substitution (`import` replaces your home path with `{{ $HOME }}`; `export` and `git install` render `{{ $HOME }}` to the target machine's home path).
+- `<pattern> enc tmpl`: Combine `.enc` encryption and `{{ $HOME }}` template substitution.
+- `!<pattern>`: Exclude matching file or directory.
 
 ## 3. Import from Your System
 

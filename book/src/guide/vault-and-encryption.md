@@ -72,7 +72,7 @@ In all three modes (`--git`, `--url`, `--from`), any `[<group>]` sections in the
 
 ## 3. Encrypting & Decrypting Files
 
-Add the `encrypt` attribute to selection rules in `dotler.toml`:
+Add the `enc` attribute (or `enc tmpl` when combining with `{{ $HOME }}` template substitution) to selection rules in `dotler.toml`:
 
 ```toml
 [gh]
@@ -80,13 +80,13 @@ os-nux = "~/.config/gh"
 os-mac = "~/.config/gh"
 files = """
 config.yml
-hosts.yml encrypt
+hosts.yml enc
 """
 ```
 
 - `dotler import`: Encrypts `hosts.yml` from your system and stores it as `gh/hosts.yml.enc` in the repository.
 - `dotler export`: Decrypts `gh/hosts.yml.enc` from the repository and writes plaintext `hosts.yml` to `~/.config/gh/hosts.yml`.
-- `dotler tidy`: If you add or remove the `encrypt` attribute on a file that is already in the repository, run `dotler tidy` to convert existing repository files between plaintext and `.enc` in place.
+- `dotler tidy`: If you add or remove the `enc` attribute on a file that is already in the repository, run `dotler tidy` to convert existing repository files between plaintext and `.enc` in place.
 
 ## 4. OS Keyring Integration
 

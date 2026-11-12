@@ -59,10 +59,12 @@ pub const INIT_AI_HINT: &str = "Run 'dotler ai' for AI context.";
 pub const SHARED_OPERATIONAL_GUIDE: &str = r#"## 2. Group Layout & Selection Rules (dotler.toml)
 - Official Documentation: https://msisdev.github.io/dotler/
 - Single Home Path Rule: All dotfile target paths MUST start with `~` or `~/` (e.g. `~`, `~/.config/nvim`). Directory traversal (`..`), backslashes, and shell variables (`$HOME`, `%VAR%`) are strictly prohibited.
-- 3-State Selection Rules (Allowlist by Default, Last-Match-Wins):
+- Selection Rules (Allowlist by Default, Last-Match-Wins):
   - Unmatched files are ignored by default. Do NOT prepend `!*` when picking specific files, and NEVER use `*` on `~`.
   - `<pattern>`: Include matching file or directory as plaintext.
-  - `<pattern> encrypt`: Include matching file or directory encrypted with XChaCha20-Poly1305 (`.enc`).
+  - `<pattern> enc`: Include matching file or directory encrypted with XChaCha20-Poly1305 (`.enc`).
+  - `<pattern> tmpl`: Include matching UTF-8 text file or directory with bidirectional `{{ $HOME }}` <-> OS home directory substitution (`import` replaces home path with `{{ $HOME }}`; `export` and `git install` render `{{ $HOME }}` to the target home path).
+  - `<pattern> enc tmpl` (or `<pattern> tmpl enc`): Include matching UTF-8 text file or directory with both `{{ $HOME }}` template substitution and `.enc` encryption.
   - `!<pattern>`: Exclude matching file or directory (used to carve out exceptions after a broader rule like `*` or a directory name).
   - Sequential line-by-line evaluation: rules appearing later override earlier declarations.
 - Manifest Examples:
@@ -74,8 +76,8 @@ os-nux = "~"
 os-mac = "~"
 files = """
 .zshrc
-.gitconfig
-.netrc encrypt
+.gitconfig tmpl
+.netrc enc
 """
 
 # Pattern B: Track an entire app directory, then override specific files
@@ -84,7 +86,7 @@ os-nux = "~/.config/gh"
 os-mac = "~/.config/gh"
 files = """
 *
-hosts.yml encrypt
+hosts.yml enc
 !*.log
 """
 ```

@@ -37,7 +37,7 @@ pub struct VaultPasswdReport {
     pub vault_id: Option<String>,
 }
 
-/// Returns `true` if any group in `repo_cfg` has an effective `encrypt` selection rule.
+/// Returns `true` if any group in `repo_cfg` has an effective `enc` selection rule.
 pub fn has_encrypted_rules(repo_cfg: &RepoConfig) -> bool {
     for g in repo_cfg.groups.values() {
         if let Ok(rules) = parse_selection_rules(&g.files)

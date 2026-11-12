@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::local::expand_tilde;
 use crate::config::repo::{
-    OsInfo, RepoConfig, is_symlink, resolve_group_target_path, validate_os_target_path,
+    OsInfo, RepoConfig, is_symlink, render_home_template, resolve_group_target_path,
+    unrender_home_template, validate_os_target_path,
 };
 pub use crate::config::state::{ATOMIC_REPLACE_RETRIES, TMP_FILE_PREFIX, write_file_safe};
 use crate::config::state::{DotlerLockGuard, StateDb, SyncedFileRecord};
@@ -135,8 +136,9 @@ impl<'a> SyncEngine<'a> {
 
         struct PreparedImport<'p> {
             plan: &'p FileActionPlan,
-            os_bytes: Vec<u8>,
+            repo_payload_bytes: Vec<u8>,
             os_hash: String,
+            file_size: u64,
             can_skip: bool,
         }
 
@@ -164,7 +166,14 @@ impl<'a> SyncEngine<'a> {
             }
 
             let os_bytes = fs::read(&plan.target_os_path)?;
+            let file_size = os_bytes.len() as u64;
             let os_hash = blake3::hash(&os_bytes).to_hex().to_string();
+            let repo_payload_bytes = if plan.is_template {
+                unrender_home_template(&os_bytes, &home_dir, &plan.relative_path)?
+            } else {
+                os_bytes
+            };
+            let repo_payload_hash = blake3::hash(&repo_payload_bytes).to_hex().to_string();
 
             let direction = if plan.is_encrypted {
                 PlanDirection::EncryptToRepo
@@ -184,7 +193,8 @@ impl<'a> SyncEngine<'a> {
                         && let Ok(enc_file) = EncryptedFile::from_bytes(&enc_bytes)
                         && let Ok(decrypted) = vault_key.decrypt_file(&enc_file)
                     {
-                        blake3::hash(decrypted.expose_secret()).to_hex().to_string() == os_hash
+                        blake3::hash(decrypted.expose_secret()).to_hex().to_string()
+                            == repo_payload_hash
                     } else {
                         false
                     }
@@ -194,7 +204,7 @@ impl<'a> SyncEngine<'a> {
             } else if plan.repo_file_path.is_file()
                 && let Ok(existing_bytes) = fs::read(&plan.repo_file_path)
             {
-                blake3::hash(&existing_bytes).to_hex().to_string() == os_hash
+                blake3::hash(&existing_bytes).to_hex().to_string() == repo_payload_hash
             } else {
                 false
             };
@@ -221,8 +231,9 @@ impl<'a> SyncEngine<'a> {
 
             prepared.push(PreparedImport {
                 plan,
-                os_bytes,
+                repo_payload_bytes,
                 os_hash,
+                file_size,
                 can_skip,
             });
         }
@@ -266,12 +277,12 @@ impl<'a> SyncEngine<'a> {
                 continue;
             }
 
-            let file_size = item.os_bytes.len() as u64;
+            let file_size = item.file_size;
             if plan.is_encrypted {
                 let vault_key = self.vault_key.ok_or_else(|| EngineError::VaultLocked {
                     reason: "encrypted files detected but no vault key was provided".into(),
                 })?;
-                let enc = vault_key.encrypt_file(&item.os_bytes)?;
+                let enc = vault_key.encrypt_file(&item.repo_payload_bytes)?;
                 write_file_safe(&plan.repo_file_path, &enc.to_bytes())?;
 
                 let plain_counterpart = plan.repo_file_path.with_extension("");
@@ -279,7 +290,7 @@ impl<'a> SyncEngine<'a> {
                     let _ = fs::remove_file(plain_counterpart);
                 }
             } else {
-                write_file_safe(&plan.repo_file_path, &item.os_bytes)?;
+                write_file_safe(&plan.repo_file_path, &item.repo_payload_bytes)?;
 
                 let enc_counterpart =
                     PathBuf::from(format!("{}.enc", plan.repo_file_path.display()));
@@ -375,7 +386,7 @@ impl<'a> SyncEngine<'a> {
 
             validate_os_target_path(&plan.target_os_path, &home_dir)?;
 
-            let plaintext_bytes = if plan.is_encrypted {
+            let raw_plain_bytes = if plan.is_encrypted {
                 let vault_key = self.vault_key.ok_or_else(|| EngineError::VaultLocked {
                     reason: "encrypted files detected but no vault key was provided".into(),
                 })?;
@@ -385,6 +396,12 @@ impl<'a> SyncEngine<'a> {
                 decrypted.expose_secret().clone()
             } else {
                 fs::read(&plan.repo_file_path)?
+            };
+
+            let plaintext_bytes = if plan.is_template {
+                render_home_template(&raw_plain_bytes, &home_dir, &plan.relative_path)?
+            } else {
+                raw_plain_bytes
             };
 
             let repo_hash = blake3::hash(&plaintext_bytes).to_hex().to_string();

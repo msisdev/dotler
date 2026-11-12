@@ -1445,7 +1445,7 @@ mod tests {
 
         let write_vault_manifest = |dir: &Path, vcfg: &crate::config::repo::VaultConfig| {
             let content = format!(
-                "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[shell]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nfiles = \"* encrypt\"\n",
+                "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[shell]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nfiles = \"* enc\"\n",
                 vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
             );
             write_file_safe(&dir.join("dotler.toml"), content.as_bytes()).unwrap();

@@ -182,7 +182,7 @@ pub fn tidy_groups_with_observer(
             let os_path = group_base.join(clean_rel);
             let mode = evaluate_selection(&rules, clean_rel);
             match mode {
-                Some(SelectionMode::EncryptedInclude) => {
+                Some(m) if m.is_encrypted() => {
                     if !is_enc_ext {
                         if engine.vault_key.is_none() {
                             return Err(EngineError::VaultLocked {
@@ -216,7 +216,7 @@ pub fn tidy_groups_with_observer(
                         });
                     }
                 }
-                Some(SelectionMode::PlaintextInclude) => {
+                Some(m) if m.is_included() => {
                     if is_enc_ext {
                         if engine.vault_key.is_none() {
                             return Err(EngineError::VaultLocked {
@@ -250,7 +250,7 @@ pub fn tidy_groups_with_observer(
                         });
                     }
                 }
-                Some(SelectionMode::Exclude) | None => {
+                _ => {
                     preview_entries.push(PlanPreviewEntry {
                         group_name: group_name.clone(),
                         os_path,
@@ -478,10 +478,10 @@ mod tests {
         let pass = SecretString::new("tidy-vault-pass".to_string());
         let (vcfg, vkey, _) = init_vault(&pass).unwrap();
 
-        // Plain file in repo when rule requires encrypt
+        // Plain file in repo when rule requires enc
         fs::write(repo_dir.join("sec/secret.txt"), b"top-secret").unwrap();
         let toml = format!(
-            "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[sec]\nos-nux = \"~\"\nos-mac = \"~\"\nfiles = \"secret.txt encrypt\"\n",
+            "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[sec]\nos-nux = \"~\"\nos-mac = \"~\"\nfiles = \"secret.txt enc\"\n",
             vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
         );
         let repo_cfg = RepoConfig::parse(&toml).unwrap();

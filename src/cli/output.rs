@@ -422,16 +422,15 @@ impl InlineRender for crate::engine::check::CheckReport {
 
 impl InlineRender for crate::engine::sync::FileActionPlan {
     fn render_inline(&self) -> String {
+        let mode_label = match (self.is_encrypted, self.is_template) {
+            (true, true) => "encrypted+template",
+            (true, false) => "encrypted",
+            (false, true) => "template",
+            (false, false) => "plain",
+        };
         format!(
             "[{}] {} -> {:?} ({})",
-            self.group_name,
-            self.relative_path,
-            self.status,
-            if self.is_encrypted {
-                "encrypted"
-            } else {
-                "plain"
-            }
+            self.group_name, self.relative_path, self.status, mode_label
         )
     }
 }

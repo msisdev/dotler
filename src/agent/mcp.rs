@@ -80,7 +80,7 @@ pub fn list_tools() -> Vec<McpToolDefinition> {
     vec![
         McpToolDefinition {
             name: "dotler_briefing".to_string(),
-            description: "Retrieve comprehensive agent briefing including dotler.toml syntax, 3-state rules, device profile, and security guardrails.".to_string(),
+            description: "Retrieve comprehensive agent briefing including dotler.toml syntax, selection rules (enc, tmpl), device profile, and security guardrails.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {},

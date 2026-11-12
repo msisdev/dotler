@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use crate::config::local::{LocalConfig, WalkDir, expand_tilde};
 use crate::config::repo::{
     OsInfo, RepoConfig, SelectionMode, evaluate_selection, is_symlink, parse_selection_rules,
-    resolve_group_target_path, validate_dir_no_symlinks, validate_os_dir_path,
-    validate_os_target_path, validate_path_security,
+    render_home_template, resolve_group_target_path, validate_dir_no_symlinks,
+    validate_os_dir_path, validate_os_target_path, validate_path_security,
 };
 use crate::config::state::{
     BACKUPS_DIR_PATH, DotlerLockGuard, InstalledFileRecord, StateDb, write_file_safe,
@@ -1432,6 +1432,7 @@ struct PlannedInstallFile {
     source_path: PathBuf,
     clean_rel: String,
     target_file_path: PathBuf,
+    file_content: Vec<u8>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1544,18 +1545,22 @@ pub fn install_remote_with_observer(
                 rel_path_str.clone()
             };
 
-            if !rules.is_empty()
-                && matches!(
-                    evaluate_selection(&rules, &clean_rel)
-                        .or_else(|| evaluate_selection(&rules, &rel_path_str)),
-                    None | Some(SelectionMode::Exclude)
-                )
-            {
+            let mode = evaluate_selection(&rules, &clean_rel)
+                .or_else(|| evaluate_selection(&rules, &rel_path_str));
+            if !rules.is_empty() && matches!(mode, None | Some(SelectionMode::Exclude)) {
                 continue;
             }
 
             let target_file_path = target_base.join(&clean_rel);
             validate_os_target_path(&target_file_path, &home)?;
+
+            let raw_content = fs::read(entry.path())?;
+            let is_template = mode.is_some_and(|m| m.is_template());
+            let file_content = if is_template && !is_enc {
+                render_home_template(&raw_content, &home, &clean_rel)?
+            } else {
+                raw_content
+            };
 
             let os_action = if target_file_path.is_file() {
                 PlanActionKind::Overwrite
@@ -1582,6 +1587,7 @@ pub fn install_remote_with_observer(
                 source_path: entry.path().to_path_buf(),
                 clean_rel,
                 target_file_path,
+                file_content,
             });
         }
     }
@@ -1609,6 +1615,7 @@ pub fn install_remote_with_observer(
     let total = planned.len();
 
     for item in planned {
+        let _ = &item.source_path;
         let target_str = item.target_file_path.to_string_lossy().to_string();
 
         // 1. Check existing installed_files record to preserve original backup
@@ -1623,8 +1630,8 @@ pub fn install_remote_with_observer(
             None
         };
 
-        // 2. Read source payload
-        let file_content = fs::read(&item.source_path)?;
+        // 2. Hash prepared payload
+        let file_content = item.file_content;
         let hash = blake3::hash(&file_content).to_hex().to_string();
 
         // 3. Sequential Write-Ahead commit to SQLite

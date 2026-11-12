@@ -493,7 +493,7 @@ fn test_e2e_encryption_mismatch_export_and_check_exit_code_1() {
     let toml_content = r#"[sec]
 os-nux = "~"
 os-mac = "~"
-files = "sec.txt encrypt"
+files = "sec.txt enc"
 "#;
     let mut manifest = fs::read_to_string(sandbox.repo_dir.join("dotler.toml")).unwrap();
     manifest.push_str(&format!("\n{toml_content}"));
@@ -792,13 +792,13 @@ fn test_e2e_ancestor_dotler_toml_detection_and_vault_init_with_encrypt_rule() {
     let init_out = sandbox.cmd().args(["init", "--json"]).output().unwrap();
     assert_eq!(init_out.status.code(), Some(0));
 
-    // 2. Write dotler.toml with `encrypt` BEFORE `dotler vault init`
+    // 2. Write dotler.toml with `enc` BEFORE `dotler vault init`
     let toml_with_enc = r#"[shell]
 os-nux = "~"
 os-mac = "~"
 os-win = "~"
 files = """
-secret.txt encrypt
+secret.txt enc
 """
 "#;
     fs::write(sandbox.repo_dir.join("dotler.toml"), toml_with_enc).unwrap();

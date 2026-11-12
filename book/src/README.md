@@ -26,7 +26,7 @@ files = """
 - `dotler export` to export dotfiles from dotler directory to file system.
 
 
-**Encryption**
+**Encryption & Home Path Templates**
 ```toml
 # dotler.toml
 
@@ -39,13 +39,14 @@ os-nux = "~/.config/gh"
 os-mac = "~/.config/gh"
 os-win = "~/AppData/Roaming/GitHub CLI"
 files = """
-hosts.yml encrypt
+config.yml tmpl
+hosts.yml enc
 """
 ```
 - Protect your files with a passphrase (`dotler vault init`).
 - Share the same vault across multiple repositories or devices via `dotler vault init --git`, `--url` (TOML or JSON), or `--from`.
-- Mark files with the `encrypt` attribute in `./dotler.toml`.
-- `dotler import` and `dotler export` encrypt and decrypt them automatically.
+- Mark files with the `enc` attribute in `./dotler.toml` so `dotler import` and `dotler export` encrypt and decrypt them automatically.
+- Mark UTF-8 text files with the `tmpl` attribute (or `enc tmpl`) for reversible `{{ $HOME }}` <-> OS home directory substitution across machines.
 
 
 **Git Sharing (No `git` Binary Required)**

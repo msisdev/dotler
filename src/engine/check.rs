@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 use crate::agent::briefing::{DEFAULT_DOTLER_TOML, INIT_AI_HINT};
 use crate::config::local::{WalkDir, expand_tilde};
 use crate::config::repo::{
-    SelectionMode, evaluate_selection, parse_selection_rules, resolve_group_target_path,
-    validate_dir_no_symlinks, validate_os_dir_path, validate_os_target_path,
-    validate_path_security,
+    SelectionMode, evaluate_selection, parse_selection_rules, render_home_template,
+    resolve_group_target_path, unrender_home_template, validate_dir_no_symlinks,
+    validate_os_dir_path, validate_os_target_path, validate_path_security,
 };
 use crate::config::state::{DotlerLockGuard, TMP_FILE_PREFIX, write_file_safe};
 use crate::core::context::CoreContext;
@@ -46,6 +46,8 @@ pub struct FileActionPlan {
     pub repo_file_path: PathBuf,
     pub status: FileSyncStatus,
     pub is_encrypted: bool,
+    #[serde(default)]
+    pub is_template: bool,
     pub os_hash: Option<String>,
     pub repo_hash: Option<String>,
     pub db_hash: Option<String>,
@@ -224,26 +226,25 @@ pub fn run_check(
                             (rel_str.to_string(), false)
                         };
                     if let Some(mode) = evaluate_selection(&rules, &clean_rel) {
-                        match mode {
-                            SelectionMode::EncryptedInclude if !is_enc_file => {
-                                return Err(EngineError::EncryptionMismatch {
-                                    path: entry.path().to_path_buf(),
-                                    reason: format!(
-                                        "Repository file '{}' format conflicts with encryption rule in dotler.toml. Run 'dotler tidy' to reconcile format.",
-                                        clean_rel
-                                    ),
-                                });
-                            }
-                            SelectionMode::PlaintextInclude if is_enc_file => {
-                                return Err(EngineError::EncryptionMismatch {
-                                    path: entry.path().to_path_buf(),
-                                    reason: format!(
-                                        "Repository file '{}' format conflicts with encryption rule in dotler.toml. Run 'dotler tidy' to reconcile format.",
-                                        clean_rel
-                                    ),
-                                });
-                            }
-                            _ => {}
+                        if mode.is_encrypted() && !is_enc_file {
+                            return Err(EngineError::EncryptionMismatch {
+                                path: entry.path().to_path_buf(),
+                                reason: format!(
+                                    "Repository file '{}' format conflicts with encryption rule in dotler.toml. Run 'dotler tidy' to reconcile format.",
+                                    clean_rel
+                                ),
+                            });
+                        } else if mode.is_included() && !mode.is_encrypted() && is_enc_file {
+                            return Err(EngineError::EncryptionMismatch {
+                                path: entry.path().to_path_buf(),
+                                reason: format!(
+                                    "Repository file '{}' format conflicts with encryption rule in dotler.toml. Run 'dotler tidy' to reconcile format.",
+                                    clean_rel
+                                ),
+                            });
+                        } else if mode == SelectionMode::TemplateInclude && !is_enc_file {
+                            let bytes = fs::read(entry.path())?;
+                            render_home_template(&bytes, &home_dir, &clean_rel)?;
                         }
                     }
                 }
@@ -474,6 +475,7 @@ pub fn plan(
                         repo_file_path: group_repo_dir.join(&rel_path),
                         status: FileSyncStatus::Orphaned,
                         is_encrypted: false,
+                        is_template: false,
                         os_hash: None,
                         repo_hash: None,
                         db_hash,
@@ -484,11 +486,17 @@ pub fn plan(
 
             validate_os_target_path(&target_os_path, &home_dir)?;
 
-            let is_encrypted = mode == Some(SelectionMode::EncryptedInclude);
+            let is_encrypted = mode.is_some_and(|m| m.is_encrypted());
+            let is_template = mode.is_some_and(|m| m.is_template());
             let plain_repo_path = group_repo_dir.join(&rel_path);
             let enc_repo_path = group_repo_dir.join(format!("{}.enc", rel_path));
 
             let os_bytes = fs::read(&target_os_path).ok();
+            if is_template
+                && let Some(ref bytes) = os_bytes
+            {
+                unrender_home_template(bytes, &home_dir, &rel_path)?;
+            }
             let os_hash = os_bytes
                 .as_ref()
                 .map(|b| blake3::hash(b).to_hex().to_string());
@@ -505,14 +513,24 @@ pub fn plan(
                     && let Some(key) = engine.vault_key
                     && let Ok(plain) = key.decrypt_file(&enc_file)
                 {
-                    repo_hash = Some(blake3::hash(plain.expose_secret()).to_hex().to_string());
+                    let hash_bytes = if is_template {
+                        render_home_template(plain.expose_secret(), &home_dir, &rel_path)?
+                    } else {
+                        plain.expose_secret().to_vec()
+                    };
+                    repo_hash = Some(blake3::hash(&hash_bytes).to_hex().to_string());
                 }
             } else if enc_repo_path.is_file() && !plain_repo_path.is_file() {
                 encryption_mismatch = true;
             } else if plain_repo_path.is_file()
                 && let Ok(bytes) = fs::read(&plain_repo_path)
             {
-                repo_hash = Some(blake3::hash(&bytes).to_hex().to_string());
+                let hash_bytes = if is_template {
+                    render_home_template(&bytes, &home_dir, &rel_path)?
+                } else {
+                    bytes
+                };
+                repo_hash = Some(blake3::hash(&hash_bytes).to_hex().to_string());
             }
 
             let chosen_repo_path = if is_encrypted {
@@ -553,6 +571,7 @@ pub fn plan(
                 repo_file_path: chosen_repo_path,
                 status,
                 is_encrypted,
+                is_template,
                 os_hash,
                 repo_hash,
                 db_hash,

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent::briefing::{DOTLER_TOML_AI_HINT, INIT_AI_HINT};
+use crate::agent::briefing::{DEFAULT_DOTLER_TOML, INIT_AI_HINT};
 use crate::config::local::{WalkDir, expand_tilde};
 use crate::config::repo::{
     SelectionMode, evaluate_selection, parse_selection_rules, resolve_group_target_path,
@@ -90,42 +90,7 @@ pub fn run_init(
 
     let dotler_toml_path = repo_dir.join("dotler.toml");
     if !dotler_toml_path.exists() {
-        let initial_toml = format!(
-            "{}\n\n{}",
-            DOTLER_TOML_AI_HINT.trim_end(),
-            r#"# [bash]
-# # Priority 1: Custom device names (configured in ~/.config/dotler/config.toml `default_devices`)
-# default = "~"
-#
-# # Priority 2: Specific OS / Linux distribution
-# os-arch = "~"
-# os-debian = "~"
-# os-ubuntu = "~"
-# os-fedora = "~"
-# os-nixos = "~"
-# os-alpine = "~"
-# os-freebsd = "~"
-# os-openbsd = "~"
-#
-# # Priority 3: OS family fallback
-# os-nux = "~"
-# os-mac = "~"
-# os-win = "~"
-# os-bsd = "~"
-#
-# # Unmatched files are ignored by default.
-# # Syntax per line (Last-Match-Wins):
-# #   <pattern>          -> include as plaintext
-# #   <pattern> encrypt  -> include encrypted (.enc)
-# #   !<pattern>         -> exclude (override a broader include rule)
-# files = """
-# .bashrc
-# .bash_profile
-# .netrc encrypt
-# """
-"#
-        );
-        write_file_safe(&dotler_toml_path, initial_toml.as_bytes())?;
+        write_file_safe(&dotler_toml_path, DEFAULT_DOTLER_TOML.as_bytes())?;
     }
 
     let mut local_cfg = ctx.local_config.get().cloned().unwrap_or_default();

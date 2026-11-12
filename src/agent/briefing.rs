@@ -48,6 +48,10 @@ pub const DOTLER_TOML_AI_HINT: &str = r#"#       _       _   _
 # ──────────────────────────────────────────────────────────────────
 "#;
 
+/// Default `dotler.toml` scaffold embedded at compile time from the repository root template.
+pub const DEFAULT_DOTLER_TOML: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/dotler.example.toml"));
+
 /// Onboarding hint returned by `dotler init` (both inline terminal output and `--json` `hint` field).
 pub const INIT_AI_HINT: &str = "Run 'dotler ai' for AI context.";
 
@@ -170,6 +174,13 @@ mod tests {
     fn test_onboarding_ai_hints() {
         assert!(DOTLER_TOML_AI_HINT.starts_with("# "));
         assert!(DOTLER_TOML_AI_HINT.contains("dotler ai"));
+        assert!(DEFAULT_DOTLER_TOML.starts_with(DOTLER_TOML_AI_HINT));
+        for key in crate::config::repo::RECOGNIZED_OS_KEYS {
+            assert!(
+                DEFAULT_DOTLER_TOML.contains(key),
+                "DEFAULT_DOTLER_TOML should document reserved OS key `{key}`"
+            );
+        }
         assert!(INIT_AI_HINT.contains("dotler ai"));
     }
 

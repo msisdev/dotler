@@ -6,7 +6,9 @@
 pub mod briefing;
 pub mod mcp;
 
-pub use briefing::{DOTLER_TOML_AI_HINT, EnvironmentSnapshot, INIT_AI_HINT, render_briefing};
+pub use briefing::{
+    DEFAULT_DOTLER_TOML, DOTLER_TOML_AI_HINT, EnvironmentSnapshot, INIT_AI_HINT, render_briefing,
+};
 pub use mcp::{
     McpErrorObject, McpRequest, McpResponse, McpToolDefinition, ToolCallResult, ToolContent,
     list_tools, run_mcp_server,

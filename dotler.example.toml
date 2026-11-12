@@ -1,0 +1,37 @@
+#       _       _   _
+#    __| | ___ | |_| | ___ _ __
+#   / _` |/ _ \| __| |/ _ \ '__|   https://msisdev.github.io/dotler/
+#  | (_| | (_) | |_| |  __/ |      AI Hint: Run 'dotler ai'
+#   \__,_|\___/ \__|_|\___|_|
+# ──────────────────────────────────────────────────────────────────
+
+# [bash]
+# # Priority 1: Custom device names (configured in ~/.config/dotler/config.toml `default_devices`)
+# default = "~"
+#
+# # Priority 2: Specific OS / Linux distribution
+# os-arch = "~"
+# os-debian = "~"
+# os-ubuntu = "~"
+# os-fedora = "~"
+# os-nixos = "~"
+# os-alpine = "~"
+# os-freebsd = "~"
+# os-openbsd = "~"
+#
+# # Priority 3: OS family fallback
+# os-nux = "~"
+# os-mac = "~"
+# os-win = "~"
+# os-bsd = "~"
+#
+# # Unmatched files are ignored by default.
+# # Syntax per line (Last-Match-Wins):
+# #   <pattern>          -> include as plaintext
+# #   <pattern> encrypt  -> include encrypted (.enc)
+# #   !<pattern>         -> exclude (override a broader include rule)
+# files = """
+# .bashrc
+# .bash_profile
+# .netrc encrypt
+# """

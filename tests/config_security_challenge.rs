@@ -22,8 +22,8 @@ fn test_selection_rule_typo_encrpyt_reports_exact_line() {
             assert_eq!(attribute, "encrpyt");
             assert_eq!(line_no, 4);
             assert!(
-                hint.contains("encrypt"),
-                "hint should suggest the correct attribute 'encrypt'"
+                hint.contains("enc") && hint.contains("tmpl"),
+                "hint should suggest the correct attributes 'enc' and 'tmpl'"
             );
         }
         other => panic!("expected InvalidSelectionAttribute, got: {other:?}"),
@@ -32,7 +32,7 @@ fn test_selection_rule_typo_encrpyt_reports_exact_line() {
 
 #[test]
 fn test_selection_rule_multiple_trailing_tokens_reports_error_and_line() {
-    let content = "\n\nconfig.toml encrypt unexpected_token";
+    let content = "\n\nconfig.toml enc unexpected_token";
     let err = parse_selection_rules(content).expect_err("multiple tokens must fail");
     match err {
         ConfigError::InvalidSelectionAttribute { line_no, .. } => {
@@ -54,7 +54,7 @@ fn test_selection_rule_rejects_typos_in_attribute() {
         } => {
             assert_eq!(attribute, "encrpyt");
             assert_eq!(line_no, 1);
-            assert!(hint.contains("encrypt"));
+            assert!(hint.contains("enc") && hint.contains("tmpl"));
         }
         other => panic!("expected InvalidSelectionAttribute, got: {other:?}"),
     }
@@ -606,14 +606,14 @@ os-nux = "~/.config/app"
 fn test_empirical_path_traversal_and_malicious_patterns_with_prefixes() {
     let malicious_cases = [
         ("!../../../../etc/shadow", 3),
-        ("$HOME/.bashrc encrypt", 3),
+        ("$HOME/.bashrc enc", 3),
         ("folder\\traversal", 3),
         ("!/etc/shadow", 3),
-        (".config/dotler encrypt", 3),
-        (".config/dotler/state.db encrypt", 3),
+        (".config/dotler enc", 3),
+        (".config/dotler/state.db enc", 3),
         ("!.git", 3),
         ("../relative_escape", 3),
-        ("~/.secret encrypt", 3),
+        ("~/.secret enc", 3),
         ("!%APPDATA%/secret", 3),
     ];
 
@@ -648,13 +648,22 @@ fn test_empirical_selection_rule_typos_and_malformed_tokens() {
     let typo_cases = [
         ("!config.toml typo", "typo", 1, None),
         (
+            "!file.txt enc",
+            "enc",
+            1,
+            Some("already specifies selection mode"),
+        ),
+        (
             "!file.txt encrypt",
             "encrypt",
             1,
             Some("already specifies selection mode"),
         ),
-        ("!secret.key encrpyt", "encrpyt", 1, Some("encrypt")),
-        ("regular_file.txt encrpyt", "encrpyt", 1, Some("encrypt")),
+        ("!secret.key encrpyt", "encrpyt", 1, Some("enc")),
+        ("regular_file.txt encrpyt", "encrpyt", 1, Some("enc")),
+        ("regular_file.txt encrypt", "encrypt", 1, Some("enc")),
+        ("regular_file.txt template", "template", 1, Some("tmpl")),
+        ("regular_file.txt tmp", "tmp", 1, Some("tmpl")),
         (
             "regular_file.txt extra attribute tokens",
             "extra attribute tokens",

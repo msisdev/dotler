@@ -9,6 +9,7 @@ pub use local::{
 };
 pub use repo::{
     GroupConfig, OsInfo, RepoConfig, SelectionMode, SelectionRule, VaultConfig, get_repo_config,
+    render_home_template, unrender_home_template,
 };
 pub use resource::Resource;
 pub use state::{
@@ -54,6 +55,10 @@ pub enum ConfigError {
         attribute: String,
         line_no: usize,
         hint: String,
+    },
+    InvalidTemplateContent {
+        path: String,
+        reason: String,
     },
     UnknownOsKey {
         key: String,
@@ -105,6 +110,10 @@ impl std::fmt::Display for ConfigError {
             } => write!(
                 f,
                 "Invalid selection attribute '{attribute}' at line {line_no}. {hint}"
+            ),
+            Self::InvalidTemplateContent { path, reason } => write!(
+                f,
+                "Invalid template content in '{path}': {reason}"
             ),
             Self::UnknownOsKey { key, hint } => write!(f, "Unknown OS key '{key}'. {hint}"),
             Self::MissingVaultConfig => write!(

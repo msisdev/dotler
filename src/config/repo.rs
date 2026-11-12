@@ -217,7 +217,23 @@ pub struct GroupConfig {
 pub enum SelectionMode {
     PlaintextInclude,
     EncryptedInclude,
+    TemplateInclude,
+    EncryptedTemplateInclude,
     Exclude,
+}
+
+impl SelectionMode {
+    pub fn is_encrypted(self) -> bool {
+        matches!(self, Self::EncryptedInclude | Self::EncryptedTemplateInclude)
+    }
+
+    pub fn is_template(self) -> bool {
+        matches!(self, Self::TemplateInclude | Self::EncryptedTemplateInclude)
+    }
+
+    pub fn is_included(self) -> bool {
+        !matches!(self, Self::Exclude)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -628,11 +644,15 @@ pub fn parse_selection_rules(files_content: &str) -> Result<Vec<SelectionRule>, 
                 }
                 _ => {
                     let trailing = tokens[1..].join(" ");
-                    let hint = if tokens[1] == "encrypt" {
+                    let hint = if matches!(
+                        tokens[1],
+                        "enc" | "tmpl" | "encrypt" | "template" | "tmp" | "tpl"
+                    ) {
                         "Exclusion prefix '!' already specifies selection mode; trailing attribute is redundant."
                             .to_string()
                     } else if tokens[1] == "encrpyt" || tokens[1].contains("encr") {
-                        "Supported selection attribute is 'encrypt'. Check for typos.".to_string()
+                        "Supported selection attributes are 'enc' and 'tmpl'. Check for typos."
+                            .to_string()
                     } else {
                         "Expected single pattern after prefix '!' with no trailing attributes."
                             .to_string()
@@ -656,30 +676,79 @@ pub fn parse_selection_rules(files_content: &str) -> Result<Vec<SelectionRule>, 
                         line_no,
                     });
                 }
-                2 => {
+                2 | 3 => {
                     let pattern = tokens[0].to_string();
                     validate_rule_pattern(&pattern)?;
-                    let attribute = tokens[1];
-                    if attribute == "encrypt" {
-                        rules.push(SelectionRule {
-                            pattern,
-                            mode: SelectionMode::EncryptedInclude,
-                            line_no,
-                        });
-                    } else {
-                        return Err(ConfigError::InvalidSelectionAttribute {
-                            attribute: attribute.to_string(),
-                            line_no,
-                            hint: "Supported selection attribute is 'encrypt'. Check for typos."
-                                .to_string(),
-                        });
+                    let mut has_enc = false;
+                    let mut has_tmpl = false;
+                    for &attr in &tokens[1..] {
+                        match attr {
+                            "enc" => {
+                                if has_enc {
+                                    return Err(ConfigError::InvalidSelectionAttribute {
+                                        attribute: tokens[1..].join(" "),
+                                        line_no,
+                                        hint: "Duplicate 'enc' attribute on the same rule."
+                                            .to_string(),
+                                    });
+                                }
+                                has_enc = true;
+                            }
+                            "tmpl" => {
+                                if has_tmpl {
+                                    return Err(ConfigError::InvalidSelectionAttribute {
+                                        attribute: tokens[1..].join(" "),
+                                        line_no,
+                                        hint: "Duplicate 'tmpl' attribute on the same rule."
+                                            .to_string(),
+                                    });
+                                }
+                                has_tmpl = true;
+                            }
+                            "encrypt" => {
+                                return Err(ConfigError::InvalidSelectionAttribute {
+                                    attribute: attr.to_string(),
+                                    line_no,
+                                    hint: "Use 'enc' instead of 'encrypt'. Supported selection attributes are 'enc' and 'tmpl'."
+                                        .to_string(),
+                                });
+                            }
+                            "template" | "tmp" | "tpl" => {
+                                return Err(ConfigError::InvalidSelectionAttribute {
+                                    attribute: attr.to_string(),
+                                    line_no,
+                                    hint: format!(
+                                        "Use 'tmpl' instead of '{attr}'. Supported selection attributes are 'enc' and 'tmpl'."
+                                    ),
+                                });
+                            }
+                            _ => {
+                                return Err(ConfigError::InvalidSelectionAttribute {
+                                    attribute: attr.to_string(),
+                                    line_no,
+                                    hint: "Supported selection attributes are 'enc' and 'tmpl'. Check for typos."
+                                        .to_string(),
+                                });
+                            }
+                        }
                     }
+                    let mode = match (has_enc, has_tmpl) {
+                        (true, false) => SelectionMode::EncryptedInclude,
+                        (false, true) => SelectionMode::TemplateInclude,
+                        (true, true) => SelectionMode::EncryptedTemplateInclude,
+                        (false, false) => SelectionMode::PlaintextInclude,
+                    };
+                    rules.push(SelectionRule {
+                        pattern,
+                        mode,
+                        line_no,
+                    });
                 }
                 _ => {
                     return Err(ConfigError::InvalidSelectionAttribute {
                         attribute: tokens[1..].join(" "),
                         line_no,
-                        hint: "Expected format: '<pattern>', '<pattern> encrypt', or '!<pattern>'."
+                        hint: "Expected format: '<pattern>', '<pattern> enc', '<pattern> tmpl', '<pattern> enc tmpl', or '!<pattern>'."
                             .to_string(),
                     });
                 }
@@ -704,7 +773,7 @@ pub fn evaluate_selection(rules: &[SelectionRule], relative_path: &str) -> Optio
 
 pub fn rules_have_effective_encryption(rules: &[SelectionRule]) -> bool {
     rules.iter().any(|rule| {
-        if rule.mode != SelectionMode::EncryptedInclude {
+        if !rule.mode.is_encrypted() {
             return false;
         }
         let trimmed = rule.pattern.trim_start_matches("./").trim_end_matches('/');
@@ -719,8 +788,91 @@ pub fn rules_have_effective_encryption(rules: &[SelectionRule]) -> bool {
         } else {
             rule.pattern.clone()
         };
-        evaluate_selection(rules, &probe) == Some(SelectionMode::EncryptedInclude)
+        evaluate_selection(rules, &probe).is_some_and(|m| m.is_encrypted())
     })
+}
+
+fn normalize_home_dir_str(home_dir: &Path) -> String {
+    let s = home_dir.to_string_lossy().replace('\\', "/");
+    if s == "/" {
+        s
+    } else {
+        s.trim_end_matches('/').to_string()
+    }
+}
+
+fn validate_template_text<'a>(content: &'a [u8], path_label: &str) -> Result<&'a str, ConfigError> {
+    if content.contains(&0) {
+        return Err(ConfigError::InvalidTemplateContent {
+            path: path_label.to_string(),
+            reason: "binary file (contains NUL byte) cannot use the 'tmpl' template attribute"
+                .to_string(),
+        });
+    }
+    std::str::from_utf8(content).map_err(|_| ConfigError::InvalidTemplateContent {
+        path: path_label.to_string(),
+        reason: "non-UTF-8 file cannot use the 'tmpl' template attribute".to_string(),
+    })
+}
+
+fn replace_home_template_tokens(text: &str, replacement: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open_idx) = rest.find("{{") {
+        out.push_str(&rest[..open_idx]);
+        let after_open = &rest[open_idx + 2..];
+        if let Some(close_idx) = after_open.find("}}") {
+            let inside = &after_open[..close_idx];
+            if !inside.contains('\n') && !inside.contains('\r') && inside.trim() == "$HOME" {
+                out.push_str(replacement);
+                rest = &after_open[close_idx + 2..];
+                continue;
+            }
+        }
+        out.push_str("{{");
+        rest = after_open;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Renders `{{ $HOME }}` (and `{{$HOME}}`) tokens in a UTF-8 template payload into the
+/// normalized OS home directory path. Rejects binary or non-UTF-8 content.
+pub fn render_home_template(
+    content: &[u8],
+    home_dir: &Path,
+    path_label: &str,
+) -> Result<Vec<u8>, ConfigError> {
+    let text = validate_template_text(content, path_label)?;
+    let normalized_home = normalize_home_dir_str(home_dir);
+    Ok(replace_home_template_tokens(text, &normalized_home).into_bytes())
+}
+
+/// Reverse-substitutes occurrences of the OS home directory path into canonical `{{ $HOME }}`
+/// tokens for repository storage. Rejects binary or non-UTF-8 content.
+pub fn unrender_home_template(
+    content: &[u8],
+    home_dir: &Path,
+    path_label: &str,
+) -> Result<Vec<u8>, ConfigError> {
+    let text = validate_template_text(content, path_label)?;
+    let mut normalized_text = replace_home_template_tokens(text, "{{ $HOME }}");
+    let normalized_home = normalize_home_dir_str(home_dir);
+
+    if !normalized_home.is_empty() && normalized_home != "/" {
+        let raw_home = home_dir
+            .to_string_lossy()
+            .trim_end_matches(['/', '\\'])
+            .to_string();
+        if raw_home.contains('\\') {
+            let escaped_backslash_home = raw_home.replace('\\', "\\\\");
+            normalized_text = normalized_text.replace(&escaped_backslash_home, "{{ $HOME }}");
+            normalized_text = normalized_text.replace(&raw_home, "{{ $HOME }}");
+        }
+        normalized_text = normalized_text.replace(&normalized_home, "{{ $HOME }}");
+    }
+
+    Ok(normalized_text.into_bytes())
 }
 
 fn matches_pattern(pattern: &str, path: &str) -> bool {
@@ -1524,12 +1676,17 @@ extra_field = "unexpected"
 # Plaintext include
 config.json
 # Encrypted include
-id_ed25519 encrypt
+id_ed25519 enc
+# Template include
+.gitconfig tmpl
+# Encrypted template include (both attribute orders)
+credentials.toml enc tmpl
+secrets.toml tmpl enc
 # Exclusion
 !temp*
 "#;
         let rules = parse_selection_rules(content).expect("rules should parse cleanly");
-        assert_eq!(rules.len(), 3);
+        assert_eq!(rules.len(), 6);
         assert_eq!(
             rules[0],
             SelectionRule {
@@ -1549,9 +1706,33 @@ id_ed25519 encrypt
         assert_eq!(
             rules[2],
             SelectionRule {
+                pattern: ".gitconfig".to_string(),
+                mode: SelectionMode::TemplateInclude,
+                line_no: 7,
+            }
+        );
+        assert_eq!(
+            rules[3],
+            SelectionRule {
+                pattern: "credentials.toml".to_string(),
+                mode: SelectionMode::EncryptedTemplateInclude,
+                line_no: 9,
+            }
+        );
+        assert_eq!(
+            rules[4],
+            SelectionRule {
+                pattern: "secrets.toml".to_string(),
+                mode: SelectionMode::EncryptedTemplateInclude,
+                line_no: 10,
+            }
+        );
+        assert_eq!(
+            rules[5],
+            SelectionRule {
                 pattern: "temp*".to_string(),
                 mode: SelectionMode::Exclude,
-                line_no: 7,
+                line_no: 12,
             }
         );
     }
@@ -1566,12 +1747,12 @@ os-win = "~"
 os-bsd = "~"
 files = """
 !*
-.bashrc encrypt
+.bashrc enc
 .bashrc
 """
 "#;
         let config = RepoConfig::parse(content)
-            .expect("overridden encrypt rule must not require [vault] section");
+            .expect("overridden enc rule must not require [vault] section");
         let rules = parse_selection_rules(&config.groups["bash"].files).unwrap();
         assert!(!rules_have_effective_encryption(&rules));
         assert_eq!(
@@ -1592,16 +1773,31 @@ files = """
             } => {
                 assert_eq!(attribute, "encrpyt");
                 assert_eq!(line_no, 3);
-                assert!(hint.contains("encrypt"));
+                assert!(hint.contains("enc"));
+                assert!(hint.contains("tmpl"));
             }
             other => panic!("expected InvalidSelectionAttribute, got {other:?}"),
+        }
+
+        for legacy in ["encrypt", "template", "tmp", "tpl"] {
+            let line = format!("secret.txt {legacy}");
+            let err = parse_selection_rules(&line).expect_err("legacy/alias attribute must fail");
+            match err {
+                ConfigError::InvalidSelectionAttribute {
+                    attribute, hint, ..
+                } => {
+                    assert_eq!(attribute, legacy);
+                    assert!(hint.contains("enc") && hint.contains("tmpl"));
+                }
+                other => panic!("expected InvalidSelectionAttribute, got {other:?}"),
+            }
         }
     }
 
     #[test]
     fn test_selection_rules_last_match_wins_precedence() {
         let content = r#"
-* encrypt
+* enc
 *.pub
 !known_hosts*
 "#;
@@ -1740,11 +1936,20 @@ os-ubntu = "~/.zshrc"
     fn test_vault_required_when_encrypted_rule_present() {
         let content = r#"
 [secrets]
-files = "id_rsa encrypt"
+files = "id_rsa enc"
 os-nux = "~/.ssh"
 "#;
-        let err = RepoConfig::parse(content).expect_err("encrypt rule without vault must fail");
+        let err = RepoConfig::parse(content).expect_err("enc rule without vault must fail");
         assert!(matches!(err, ConfigError::MissingVaultConfig));
+
+        let content_enc_tmpl = r#"
+[secrets]
+files = "credentials.toml enc tmpl"
+os-nux = "~/.config/app"
+"#;
+        let err_tmpl =
+            RepoConfig::parse(content_enc_tmpl).expect_err("enc tmpl rule without vault must fail");
+        assert!(matches!(err_tmpl, ConfigError::MissingVaultConfig));
     }
 
     #[test]
@@ -1880,7 +2085,7 @@ os-nux = "~/.config/app"
         let manifest_path = dir.path().join("dotler.toml");
         fs::write(
             &manifest_path,
-            "[shell]\nos-nux = \"~\"\nfiles = \"secret.txt encrypt\"\n",
+            "[shell]\nos-nux = \"~\"\nfiles = \"secret.txt enc\"\n",
         )
         .unwrap();
 
@@ -1900,8 +2105,8 @@ os-nux = "~/.config/app"
 *
 !cache
 !logs/
-secrets encrypt
-plugins/ encrypt
+secrets enc
+plugins/ enc
 !plugins/disabled
 "#;
         let rules = parse_selection_rules(content).expect("rules should parse");
@@ -1937,7 +2142,7 @@ plugins/ encrypt
             Some(SelectionMode::Exclude)
         );
 
-        // `secrets encrypt` and `plugins/ encrypt` match descendant paths
+        // `secrets enc` and `plugins/ enc` match descendant paths
         assert_eq!(
             evaluate_selection(&rules, "secrets/api_key.txt"),
             Some(SelectionMode::EncryptedInclude)
@@ -2039,9 +2244,50 @@ files = "lua/"
             "g1 excluding !lua/* and g2 claiming lua/ must not collide"
         );
 
-        // Overridden encrypted directory rule (`secrets encrypt` -> `!secrets/*`) must not require vault
-        let overridden_dir_enc = parse_selection_rules("secrets encrypt\n!secrets/*").unwrap();
+        // Overridden encrypted directory rule (`secrets enc` -> `!secrets/*`) must not require vault
+        let overridden_dir_enc = parse_selection_rules("secrets enc\n!secrets/*").unwrap();
         assert!(!rules_have_effective_encryption(&overridden_dir_enc));
+    }
+
+    #[test]
+    fn test_home_template_render_and_unrender_roundtrip() {
+        let home = Path::new("/home/alice");
+        let repo_template = b"excludesfile = {{ $HOME }}/.gitignore_global\ncompact = {{$HOME}}/bin\nliteral = {{ OTHER }}\n";
+        let rendered = render_home_template(repo_template, home, ".gitconfig").unwrap();
+        assert_eq!(
+            std::str::from_utf8(&rendered).unwrap(),
+            "excludesfile = /home/alice/.gitignore_global\ncompact = /home/alice/bin\nliteral = {{ OTHER }}\n"
+        );
+
+        let unrendered = unrender_home_template(&rendered, home, ".gitconfig").unwrap();
+        assert_eq!(
+            std::str::from_utf8(&unrendered).unwrap(),
+            "excludesfile = {{ $HOME }}/.gitignore_global\ncompact = {{ $HOME }}/bin\nliteral = {{ OTHER }}\n"
+        );
+
+        // Windows backslash normalization
+        let win_home = Path::new(r"C:\Users\alice");
+        let win_rendered = render_home_template(repo_template, win_home, ".gitconfig").unwrap();
+        assert_eq!(
+            std::str::from_utf8(&win_rendered).unwrap(),
+            "excludesfile = C:/Users/alice/.gitignore_global\ncompact = C:/Users/alice/bin\nliteral = {{ OTHER }}\n"
+        );
+        let win_os_mixed = b"a = C:/Users/alice/.cfg\nb = C:\\Users\\alice\\.cfg\nc = C:\\\\Users\\\\alice\\\\.cfg\n";
+        let win_unrendered = unrender_home_template(win_os_mixed, win_home, ".gitconfig").unwrap();
+        assert_eq!(
+            std::str::from_utf8(&win_unrendered).unwrap(),
+            "a = {{ $HOME }}/.cfg\nb = {{ $HOME }}\\.cfg\nc = {{ $HOME }}\\\\.cfg\n"
+        );
+
+        // Binary (NUL) or invalid UTF-8 rejected
+        assert!(matches!(
+            render_home_template(b"hello\0world", home, "bin.dat"),
+            Err(ConfigError::InvalidTemplateContent { .. })
+        ));
+        assert!(matches!(
+            unrender_home_template(&[0xff, 0xfe, 0xfd], home, "bad.utf8"),
+            Err(ConfigError::InvalidTemplateContent { .. })
+        ));
     }
 
     #[test]

@@ -438,13 +438,17 @@ impl gix_transport::client::blocking_io::http::Http for UreqGitHttp {
             )));
         }
 
-        let (mut headers_tx, headers_rx) = pipe::unidirectional(0);
+        let (mut headers_tx, headers_rx) = pipe::unidirectional(1);
         let (mut body_tx, body_rx) = pipe::unidirectional(0);
 
+        let mut header_bytes = Vec::new();
         for (name, val) in res.headers() {
             if let Ok(v_str) = val.to_str() {
-                let _ = writeln!(headers_tx, "{}:{v_str}", name.as_str());
+                let _ = writeln!(header_bytes, "{}:{v_str}", name.as_str());
             }
+        }
+        if !header_bytes.is_empty() {
+            let _ = headers_tx.write_all(&header_bytes);
         }
         drop(headers_tx);
 
@@ -489,7 +493,7 @@ impl gix_transport::client::blocking_io::http::Http for UreqGitHttp {
             .collect();
 
         let (post_body_tx, mut post_body_rx) = pipe::unidirectional(0);
-        let (mut headers_tx, headers_rx) = pipe::unidirectional(0);
+        let (mut headers_tx, headers_rx) = pipe::unidirectional(1);
         let (mut body_tx, body_rx) = pipe::unidirectional(0);
 
         std::thread::spawn(move || {
@@ -527,10 +531,14 @@ impl gix_transport::client::blocking_io::http::Http for UreqGitHttp {
                 )));
                 return;
             }
+            let mut header_bytes = Vec::new();
             for (name, val) in res.headers() {
                 if let Ok(v_str) = val.to_str() {
-                    let _ = writeln!(headers_tx, "{}:{v_str}", name.as_str());
+                    let _ = writeln!(header_bytes, "{}:{v_str}", name.as_str());
                 }
+            }
+            if !header_bytes.is_empty() {
+                let _ = headers_tx.write_all(&header_bytes);
             }
             drop(headers_tx);
 
@@ -1929,5 +1937,67 @@ mod tests {
 
         assert!(parse_url("").is_err());
         assert!(parse_url("invalid:scheme").is_err());
+    }
+
+    #[test]
+    fn test_ureq_git_http_get_and_post_headers_do_not_deadlock() {
+        use gix_transport::client::blocking_io::http::{Http, PostBodyDataKind};
+        use std::io::BufRead;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let response = concat!(
+                    "HTTP/1.1 200 OK\r\n",
+                    "Content-Type: application/x-git-upload-pack-advertisement\r\n",
+                    "Cache-Control: no-cache\r\n",
+                    "X-Custom-Header: value\r\n",
+                    "Content-Length: 4\r\n",
+                    "Connection: close\r\n",
+                    "\r\n",
+                    "0000"
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        let base_url = format!("http://{addr}/repo.git");
+        let get_url = format!("{base_url}/info/refs?service=git-upload-pack");
+        let post_url = format!("{base_url}/git-upload-pack");
+
+        let mut http = UreqGitHttp::default();
+        let mut get_res = http
+            .get(&get_url, &base_url, ["User-Agent: dotler-test"])
+            .unwrap();
+        let get_headers: Vec<String> = get_res.headers.lines().map(|l| l.unwrap()).collect();
+        assert!(get_headers.iter().any(|h| h.contains("application/x-git-upload-pack-advertisement")));
+        let mut get_body = String::new();
+        get_res.body.read_to_string(&mut get_body).unwrap();
+        assert_eq!(get_body, "0000");
+
+        let mut post_res = http
+            .post(
+                &post_url,
+                &base_url,
+                ["Content-Type: application/x-git-upload-pack-request"],
+                PostBodyDataKind::BoundedAndFitsIntoMemory,
+            )
+            .unwrap();
+        post_res.post_body.write_all(b"0000").unwrap();
+        drop(post_res.post_body);
+        let post_headers: Vec<String> = post_res.headers.lines().map(|l| l.unwrap()).collect();
+        assert!(post_headers.iter().any(|h| h.contains("application/x-git-upload-pack-advertisement")));
+        let mut post_body = String::new();
+        post_res.body.read_to_string(&mut post_body).unwrap();
+        assert_eq!(post_body, "0000");
+
+        server.join().unwrap();
     }
 }

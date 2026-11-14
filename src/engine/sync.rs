@@ -1,4 +1,4 @@
-//! Local dotfile collection (`import`) and deployment (`export`) engine.
+//! Local dotfile collection (`import`) and synchronization engine facade.
 
 use std::fs;
 use std::path::PathBuf;
@@ -8,19 +8,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::local::expand_tilde;
 use crate::config::repo::{
-    OsInfo, RepoConfig, is_symlink, render_home_template, resolve_group_target_path,
-    unrender_home_template, validate_os_target_path,
+    OsInfo, RepoConfig, is_symlink, resolve_group_target_path, unrender_home_template,
+    validate_os_target_path,
 };
 pub use crate::config::state::{ATOMIC_REPLACE_RETRIES, TMP_FILE_PREFIX, write_file_safe};
 use crate::config::state::{DotlerLockGuard, StateDb, SyncedFileRecord};
 use crate::core::context::CoreContext;
-use crate::core::vault_loader::{
-    has_encrypted_repo_files, has_encrypted_rules, unlock_vault_if_needed,
-};
+use crate::core::vault_loader::{has_encrypted_rules, unlock_vault_if_needed};
 use crate::crypto::ExposeSecret;
 use crate::crypto::vault::{EncryptedFile, VaultKey};
 use crate::engine::EngineError;
 pub use crate::engine::check::{FileActionPlan, FileSyncStatus, plan};
+pub use crate::engine::export::{export_files, run_export};
 use crate::engine::observer::{
     CommandObserver, NoopObserver, PlanActionKind, PlanDirection, PlanPreviewEntry,
 };
@@ -44,6 +43,14 @@ pub struct SyncEngine<'a> {
     pub os_info: OsInfo,
     pub vault_key: Option<&'a VaultKey>,
     pub home_dir: Option<PathBuf>,
+}
+
+struct PreparedImport<'p> {
+    plan: &'p FileActionPlan,
+    repo_payload_bytes: Vec<u8>,
+    os_hash: String,
+    file_size: u64,
+    can_skip: bool,
 }
 
 impl<'a> SyncEngine<'a> {
@@ -104,6 +111,26 @@ impl<'a> SyncEngine<'a> {
             .unwrap_or_else(|| self.effective_home_dir())
     }
 
+    pub(crate) fn record_synced_file(
+        &self,
+        plan: &FileActionPlan,
+        file_hash: String,
+    ) -> Result<(), EngineError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        self.state_db.upsert_synced_file(&SyncedFileRecord {
+            target_path: plan.target_os_path.to_string_lossy().to_string(),
+            repo_label: self.repo_label.clone(),
+            group_name: plan.group_name.clone(),
+            relative_path: plan.relative_path.clone(),
+            file_hash,
+            updated_at: now,
+        })?;
+        Ok(())
+    }
+
     /// 3-Way Hash Reconciliation (`plan`).
     pub fn plan(
         &self,
@@ -133,15 +160,6 @@ impl<'a> SyncEngine<'a> {
         observer: &mut dyn CommandObserver,
     ) -> Result<SyncReport, EngineError> {
         let home_dir = self.effective_home_dir();
-
-        struct PreparedImport<'p> {
-            plan: &'p FileActionPlan,
-            repo_payload_bytes: Vec<u8>,
-            os_hash: String,
-            file_size: u64,
-            can_skip: bool,
-        }
-
         let mut prepared: Vec<PreparedImport> = Vec::new();
         let mut preview_entries: Vec<PlanPreviewEntry> = Vec::new();
 
@@ -153,14 +171,12 @@ impl<'a> SyncEngine<'a> {
                 });
             }
             validate_os_target_path(&plan.target_os_path, &home_dir)?;
-
             if is_symlink(&plan.target_os_path) && !plan.target_os_path.is_file() {
                 return Err(EngineError::HardBlockedPath {
                     path: plan.target_os_path.clone(),
                     reason: "broken symbolic link at OS target path cannot be imported".to_string(),
                 });
             }
-
             if !plan.target_os_path.is_file() {
                 continue;
             }
@@ -174,40 +190,7 @@ impl<'a> SyncEngine<'a> {
                 os_bytes
             };
             let repo_payload_hash = blake3::hash(&repo_payload_bytes).to_hex().to_string();
-
-            let direction = if plan.is_encrypted {
-                PlanDirection::EncryptToRepo
-            } else {
-                PlanDirection::PlainToRepo
-            };
-
-            let can_skip = if plan.is_encrypted {
-                let vault_key = self.vault_key.ok_or_else(|| EngineError::VaultLocked {
-                    reason: "encrypted files detected but no vault key was provided".into(),
-                })?;
-
-                if plan.repo_file_path.is_file() {
-                    if plan.db_hash.as_deref() == Some(&os_hash) {
-                        true
-                    } else if let Ok(enc_bytes) = fs::read(&plan.repo_file_path)
-                        && let Ok(enc_file) = EncryptedFile::from_bytes(&enc_bytes)
-                        && let Ok(decrypted) = vault_key.decrypt_file(&enc_file)
-                    {
-                        blake3::hash(decrypted.expose_secret()).to_hex().to_string()
-                            == repo_payload_hash
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else if plan.repo_file_path.is_file()
-                && let Ok(existing_bytes) = fs::read(&plan.repo_file_path)
-            {
-                blake3::hash(&existing_bytes).to_hex().to_string() == repo_payload_hash
-            } else {
-                false
-            };
+            let can_skip = can_skip_import(self, plan, &os_hash, &repo_payload_hash)?;
 
             let repo_action = if can_skip {
                 PlanActionKind::Okay
@@ -219,6 +202,11 @@ impl<'a> SyncEngine<'a> {
             } else {
                 PlanActionKind::Create
             };
+            let direction = if plan.is_encrypted {
+                PlanDirection::EncryptToRepo
+            } else {
+                PlanDirection::PlainToRepo
+            };
 
             preview_entries.push(PlanPreviewEntry {
                 group_name: plan.group_name.clone(),
@@ -228,7 +216,6 @@ impl<'a> SyncEngine<'a> {
                 repo_action,
                 direction,
             });
-
             prepared.push(PreparedImport {
                 plan,
                 repo_payload_bytes,
@@ -240,7 +227,6 @@ impl<'a> SyncEngine<'a> {
 
         let has_updates = preview_entries.iter().any(|e| e.is_update());
         let approved = observer.confirm_plan(&preview_entries, dry_run)?;
-
         if dry_run {
             let mut sim = SyncReport::default();
             for item in &prepared {
@@ -252,7 +238,6 @@ impl<'a> SyncEngine<'a> {
             }
             return Ok(sim);
         }
-
         if has_updates && !approved {
             return Ok(SyncReport::default());
         }
@@ -261,56 +246,12 @@ impl<'a> SyncEngine<'a> {
         for item in prepared {
             let plan = item.plan;
             if item.can_skip {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64;
-                self.state_db.upsert_synced_file(&SyncedFileRecord {
-                    target_path: plan.target_os_path.to_string_lossy().to_string(),
-                    repo_label: self.repo_label.clone(),
-                    group_name: plan.group_name.clone(),
-                    relative_path: plan.relative_path.clone(),
-                    file_hash: item.os_hash,
-                    updated_at: now,
-                })?;
+                self.record_synced_file(plan, item.os_hash)?;
                 report.skipped += 1;
                 continue;
             }
-
-            let file_size = item.file_size;
-            if plan.is_encrypted {
-                let vault_key = self.vault_key.ok_or_else(|| EngineError::VaultLocked {
-                    reason: "encrypted files detected but no vault key was provided".into(),
-                })?;
-                let enc = vault_key.encrypt_file(&item.repo_payload_bytes)?;
-                write_file_safe(&plan.repo_file_path, &enc.to_bytes())?;
-
-                let plain_counterpart = plan.repo_file_path.with_extension("");
-                if plain_counterpart.is_file() {
-                    let _ = fs::remove_file(plain_counterpart);
-                }
-            } else {
-                write_file_safe(&plan.repo_file_path, &item.repo_payload_bytes)?;
-
-                let enc_counterpart =
-                    PathBuf::from(format!("{}.enc", plan.repo_file_path.display()));
-                if enc_counterpart.is_file() {
-                    let _ = fs::remove_file(enc_counterpart);
-                }
-            }
-
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64;
-            self.state_db.upsert_synced_file(&SyncedFileRecord {
-                target_path: plan.target_os_path.to_string_lossy().to_string(),
-                repo_label: self.repo_label.clone(),
-                group_name: plan.group_name.clone(),
-                relative_path: plan.relative_path.clone(),
-                file_hash: item.os_hash,
-                updated_at: now,
-            })?;
+            write_import_payload(self, plan, &item.repo_payload_bytes)?;
+            self.record_synced_file(plan, item.os_hash)?;
 
             report.processed += 1;
             let group_base = self.group_base_for(&plan.group_name);
@@ -318,217 +259,13 @@ impl<'a> SyncEngine<'a> {
                 &plan.group_name,
                 &group_base,
                 &plan.relative_path,
-                Some(file_size),
+                Some(item.file_size),
             );
         }
 
         if has_updates {
             observer.finish_progress();
         }
-
-        Ok(report)
-    }
-
-    /// Deploys repository dotfiles to the OS filesystem using [`NoopObserver`].
-    pub fn export_files(
-        &self,
-        plans: &[FileActionPlan],
-        lock: &DotlerLockGuard,
-        force: bool,
-        dry_run: bool,
-    ) -> Result<SyncReport, EngineError> {
-        let mut obs = NoopObserver;
-        self.export_files_with_observer(plans, lock, force, dry_run, &mut obs)
-    }
-
-    /// Deploys repository dotfiles to the OS filesystem with a [`CommandObserver`].
-    pub fn export_files_with_observer(
-        &self,
-        plans: &[FileActionPlan],
-        _lock: &DotlerLockGuard,
-        force: bool,
-        dry_run: bool,
-        observer: &mut dyn CommandObserver,
-    ) -> Result<SyncReport, EngineError> {
-        let home_dir = self.effective_home_dir();
-
-        struct PreparedExport<'p> {
-            plan: &'p FileActionPlan,
-            plaintext_bytes: Vec<u8>,
-            repo_hash: String,
-            can_skip: bool,
-        }
-
-        let mut prepared: Vec<PreparedExport> = Vec::new();
-        let mut preview_entries: Vec<PlanPreviewEntry> = Vec::new();
-
-        for plan in plans {
-            if is_symlink(&plan.repo_file_path) {
-                return Err(EngineError::HardBlockedPath {
-                    path: plan.repo_file_path.clone(),
-                    reason: "symbolic links are prohibited inside a dotler repository".to_string(),
-                });
-            }
-
-            if plan.status == FileSyncStatus::EncryptionMismatch {
-                return Err(EngineError::EncryptionMismatch {
-                    path: plan.repo_file_path.clone(),
-                    reason: format!(
-                        "Repository file '{}' format conflicts with encryption rule in dotler.toml. Run 'dotler tidy' to reconcile format.",
-                        plan.relative_path
-                    ),
-                });
-            }
-
-            if !plan.repo_file_path.is_file() {
-                continue;
-            }
-
-            validate_os_target_path(&plan.target_os_path, &home_dir)?;
-
-            let raw_plain_bytes = if plan.is_encrypted {
-                let vault_key = self.vault_key.ok_or_else(|| EngineError::VaultLocked {
-                    reason: "encrypted files detected but no vault key was provided".into(),
-                })?;
-                let raw_enc = fs::read(&plan.repo_file_path)?;
-                let enc_file = EncryptedFile::from_bytes(&raw_enc)?;
-                let decrypted = vault_key.decrypt_file(&enc_file)?;
-                decrypted.expose_secret().clone()
-            } else {
-                fs::read(&plan.repo_file_path)?
-            };
-
-            let plaintext_bytes = if plan.is_template {
-                render_home_template(&raw_plain_bytes, &home_dir, &plan.relative_path)?
-            } else {
-                raw_plain_bytes
-            };
-
-            let repo_hash = blake3::hash(&plaintext_bytes).to_hex().to_string();
-
-            let target_is_symlink = is_symlink(&plan.target_os_path);
-            let mut can_skip = false;
-            if plan.target_os_path.is_file() {
-                let os_bytes = fs::read(&plan.target_os_path)?;
-                let os_hash = blake3::hash(&os_bytes).to_hex().to_string();
-
-                if os_hash == repo_hash && !target_is_symlink {
-                    can_skip = true;
-                } else if os_hash != repo_hash
-                    && !force
-                    && (plan.status == FileSyncStatus::ModifiedLocally
-                        || plan.status == FileSyncStatus::Conflict
-                        || (plan.db_hash.is_some() && plan.db_hash.as_deref() != Some(&os_hash)))
-                {
-                    return Err(EngineError::SyncConflict {
-                        path: plan.target_os_path.clone(),
-                        reason:
-                            "target file was modified locally and does not match repository. Use --force to overwrite."
-                                .to_string(),
-                    });
-                }
-            }
-
-            let os_action = if can_skip {
-                PlanActionKind::Okay
-            } else if plan.target_os_path.is_file() || target_is_symlink {
-                PlanActionKind::Overwrite
-            } else {
-                PlanActionKind::Create
-            };
-
-            let direction = if plan.is_encrypted {
-                PlanDirection::DecryptToOs
-            } else {
-                PlanDirection::PlainToOs
-            };
-
-            preview_entries.push(PlanPreviewEntry {
-                group_name: plan.group_name.clone(),
-                os_path: plan.target_os_path.clone(),
-                os_action,
-                repo_path: plan.repo_file_path.clone(),
-                repo_action: PlanActionKind::Okay,
-                direction,
-            });
-
-            prepared.push(PreparedExport {
-                plan,
-                plaintext_bytes,
-                repo_hash,
-                can_skip,
-            });
-        }
-
-        let has_updates = preview_entries.iter().any(|e| e.is_update());
-        let approved = observer.confirm_plan(&preview_entries, dry_run)?;
-
-        if dry_run {
-            let mut sim = SyncReport::default();
-            for item in &prepared {
-                if item.can_skip {
-                    sim.skipped += 1;
-                } else {
-                    sim.processed += 1;
-                }
-            }
-            return Ok(sim);
-        }
-
-        if has_updates && !approved {
-            return Ok(SyncReport::default());
-        }
-
-        let mut report = SyncReport::default();
-        for item in prepared {
-            let plan = item.plan;
-            if item.can_skip {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64;
-                self.state_db.upsert_synced_file(&SyncedFileRecord {
-                    target_path: plan.target_os_path.to_string_lossy().to_string(),
-                    repo_label: self.repo_label.clone(),
-                    group_name: plan.group_name.clone(),
-                    relative_path: plan.relative_path.clone(),
-                    file_hash: item.repo_hash,
-                    updated_at: now,
-                })?;
-                report.skipped += 1;
-                continue;
-            }
-
-            let file_size = item.plaintext_bytes.len() as u64;
-            write_file_safe(&plan.target_os_path, &item.plaintext_bytes)?;
-
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64;
-            self.state_db.upsert_synced_file(&SyncedFileRecord {
-                target_path: plan.target_os_path.to_string_lossy().to_string(),
-                repo_label: self.repo_label.clone(),
-                group_name: plan.group_name.clone(),
-                relative_path: plan.relative_path.clone(),
-                file_hash: item.repo_hash,
-                updated_at: now,
-            })?;
-
-            report.processed += 1;
-            let group_base = self.group_base_for(&plan.group_name);
-            observer.on_file_progress(
-                &plan.group_name,
-                &group_base,
-                &plan.relative_path,
-                Some(file_size),
-            );
-        }
-
-        if has_updates {
-            observer.finish_progress();
-        }
-
         Ok(report)
     }
 
@@ -553,6 +290,79 @@ impl<'a> SyncEngine<'a> {
     ) -> Result<TidyReport, EngineError> {
         crate::engine::tidy::tidy_groups(self, group_filters, lock, policy, dry_run)
     }
+}
+
+fn can_skip_import(
+    engine: &SyncEngine,
+    plan: &FileActionPlan,
+    os_hash: &str,
+    repo_payload_hash: &str,
+) -> Result<bool, EngineError> {
+    if plan.is_encrypted {
+        let vault_key = engine.vault_key.ok_or_else(|| EngineError::VaultLocked {
+            reason: "encrypted files detected but no vault key was provided".into(),
+        })?;
+        if !plan.repo_file_path.is_file() {
+            return Ok(false);
+        }
+        if plan.db_hash.as_deref() == Some(os_hash) {
+            return Ok(true);
+        }
+        if let Ok(enc_bytes) = fs::read(&plan.repo_file_path)
+            && let Ok(enc_file) = EncryptedFile::from_bytes(&enc_bytes)
+            && let Ok(decrypted) = vault_key.decrypt_file(&enc_file)
+        {
+            return Ok(blake3::hash(decrypted.expose_secret()).to_hex().to_string() == repo_payload_hash);
+        }
+        return Ok(false);
+    }
+
+    if plan.repo_file_path.is_file()
+        && let Ok(existing_bytes) = fs::read(&plan.repo_file_path)
+    {
+        return Ok(blake3::hash(&existing_bytes).to_hex().to_string() == repo_payload_hash);
+    }
+    Ok(false)
+}
+
+fn write_import_payload(
+    engine: &SyncEngine,
+    plan: &FileActionPlan,
+    repo_payload_bytes: &[u8],
+) -> Result<(), EngineError> {
+    if plan.is_encrypted {
+        let vault_key = engine.vault_key.ok_or_else(|| EngineError::VaultLocked {
+            reason: "encrypted files detected but no vault key was provided".into(),
+        })?;
+        let enc = vault_key.encrypt_file(repo_payload_bytes)?;
+        write_file_safe(&plan.repo_file_path, &enc.to_bytes())?;
+        let plain_counterpart = plan.repo_file_path.with_extension("");
+        if plain_counterpart.is_file() {
+            let _ = fs::remove_file(plain_counterpart);
+        }
+    } else {
+        write_file_safe(&plan.repo_file_path, repo_payload_bytes)?;
+        let enc_counterpart = PathBuf::from(format!("{}.enc", plan.repo_file_path.display()));
+        if enc_counterpart.is_file() {
+            let _ = fs::remove_file(enc_counterpart);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn collect_group_plans(
+    engine: &SyncEngine,
+    groups: &[String],
+    lock: &DotlerLockGuard,
+) -> Result<Vec<FileActionPlan>, EngineError> {
+    if groups.is_empty() {
+        return plan(engine, None, lock);
+    }
+    let mut plans = Vec::new();
+    for g in groups {
+        plans.append(&mut plan(engine, Some(g), lock)?);
+    }
+    Ok(plans)
 }
 
 /// Unified `import` command entry point shared by CLI (`dotler import`) and MCP (`dotler_import`).
@@ -586,74 +396,8 @@ pub fn run_import(
         vault_key.as_ref(),
     );
 
-    let mut plans = Vec::new();
-    if groups.is_empty() {
-        plans = plan(&sync_engine, None, lock)?;
-    } else {
-        for g in groups {
-            let mut p = plan(&sync_engine, Some(g), lock)?;
-            plans.append(&mut p);
-        }
-    }
-
+    let plans = collect_group_plans(&sync_engine, groups, lock)?;
     sync_engine.import_files_with_observer(&plans, lock, dry_run, observer)
-}
-
-/// Unified `export` command entry point shared by CLI (`dotler export`) and MCP (`dotler_export`).
-pub fn run_export(
-    ctx: &CoreContext,
-    groups: &[String],
-    force: bool,
-    dry_run: bool,
-    lock: &DotlerLockGuard,
-    observer: &mut dyn CommandObserver,
-) -> Result<SyncReport, EngineError> {
-    let local_cfg = ctx.local_config.get()?;
-    let resolved = ctx.resolve_repo()?;
-    let state_db = ctx.state_db.get()?;
-
-    let needs_vault = has_encrypted_rules(&resolved.repo_config)
-        || has_encrypted_repo_files(&resolved.repo_path, &resolved.repo_config);
-    let vault_key = unlock_vault_if_needed(
-        &resolved.repo_config,
-        local_cfg.use_keyring,
-        ctx.is_interactive,
-        needs_vault,
-    )?;
-
-    let sync_engine = SyncEngine::new(
-        &resolved.label,
-        &resolved.repo_path,
-        &resolved.repo_config,
-        state_db,
-        resolved.devices,
-        resolved.os_info,
-        vault_key.as_ref(),
-    );
-
-    let mut plans = Vec::new();
-    if groups.is_empty() {
-        plans = plan(&sync_engine, None, lock)?;
-    } else {
-        for g in groups {
-            let mut p = plan(&sync_engine, Some(g), lock)?;
-            plans.append(&mut p);
-        }
-    }
-
-    for p in &plans {
-        if p.status == FileSyncStatus::EncryptionMismatch {
-            return Err(EngineError::EncryptionMismatch {
-                path: p.repo_file_path.clone(),
-                reason: format!(
-                    "Repository file '{}' format conflicts with encryption rule in dotler.toml. Run 'dotler tidy' to reconcile format.",
-                    p.relative_path
-                ),
-            });
-        }
-    }
-
-    sync_engine.export_files_with_observer(&plans, lock, force, dry_run, observer)
 }
 
 pub fn import_files(
@@ -665,16 +409,6 @@ pub fn import_files(
     engine.import_files(plans, lock, dry_run)
 }
 
-pub fn export_files(
-    engine: &SyncEngine,
-    plans: &[FileActionPlan],
-    lock: &DotlerLockGuard,
-    force: bool,
-    dry_run: bool,
-) -> Result<SyncReport, EngineError> {
-    engine.export_files(plans, lock, force, dry_run)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -684,11 +418,7 @@ mod tests {
 
     struct RejectObserver;
     impl CommandObserver for RejectObserver {
-        fn confirm_plan(
-            &mut self,
-            _entries: &[PlanPreviewEntry],
-            _dry_run: bool,
-        ) -> Result<bool, EngineError> {
+        fn confirm_plan(&mut self, _: &[PlanPreviewEntry], _: bool) -> Result<bool, EngineError> {
             Ok(false)
         }
         fn on_file_progress(&mut self, _: &str, _: &Path, _: &str, _: Option<u64>) {}
@@ -731,18 +461,12 @@ mod tests {
             .import_files_with_observer(&plans, &lock, false, &mut obs)
             .unwrap();
         assert_eq!(imp_rep.processed, 0);
-        assert_eq!(
-            fs::read(repo_dir.join("shell/.bashrc")).unwrap(),
-            b"repo content\n"
-        );
+        assert_eq!(fs::read(repo_dir.join("shell/.bashrc")).unwrap(), b"repo content\n");
 
         let exp_rep = engine
             .export_files_with_observer(&plans, &lock, true, false, &mut obs)
             .unwrap();
         assert_eq!(exp_rep.processed, 0);
-        assert_eq!(
-            fs::read(home_dir.join(".bashrc")).unwrap(),
-            b"local content\n"
-        );
+        assert_eq!(fs::read(home_dir.join(".bashrc")).unwrap(), b"local content\n");
     }
 }

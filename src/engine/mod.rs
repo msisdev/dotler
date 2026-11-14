@@ -4,8 +4,13 @@
 //! in-place format tidying, observer callbacks, and remote Git operations.
 
 pub mod check;
+pub mod export;
+pub mod git_clone;
+pub mod git_install;
+pub mod git_transport;
 pub mod observer;
 pub mod remote;
+pub mod status;
 pub mod sync;
 pub mod tidy;
 

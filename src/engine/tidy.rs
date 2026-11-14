@@ -43,25 +43,23 @@ pub struct TidyReport {
     pub untracked_kept_orphans: Vec<PathBuf>,
 }
 
-enum PlannedRepoTidyOp {
+struct PlannedRepoTidyOp {
+    group_name: String,
+    group_base: PathBuf,
+    rel_path: String,
+    kind: RepoTidyKind,
+}
+
+enum RepoTidyKind {
     Encrypt {
-        group_name: String,
-        group_base: PathBuf,
-        rel_path: String,
         plain_path: PathBuf,
         enc_path: PathBuf,
     },
     Decrypt {
-        group_name: String,
-        group_base: PathBuf,
-        rel_path: String,
         enc_path: PathBuf,
         plain_path: PathBuf,
     },
     RemoveExcluded {
-        group_name: String,
-        group_base: PathBuf,
-        rel_path: String,
         repo_path: PathBuf,
     },
 }
@@ -184,86 +182,41 @@ pub fn tidy_groups_with_observer(
             match mode {
                 Some(m) if m.is_encrypted() => {
                     if !is_enc_ext {
-                        if engine.vault_key.is_none() {
-                            return Err(EngineError::VaultLocked {
-                                reason: "vault key required for tidy in-repo encryption".into(),
-                            });
-                        }
-                        let target_enc = group_repo_dir.join(format!("{clean_rel}.enc"));
-                        preview_entries.push(PlanPreviewEntry {
-                            group_name: group_name.clone(),
-                            os_path,
-                            os_action: PlanActionKind::Okay,
-                            repo_path: target_enc.clone(),
-                            repo_action: PlanActionKind::Overwrite,
-                            direction: PlanDirection::EncryptToRepo,
-                        });
-                        repo_ops.push(PlannedRepoTidyOp::Encrypt {
+                        require_vault(engine, "encryption")?;
+                        let enc_path = group_repo_dir.join(format!("{clean_rel}.enc"));
+                        push_repo_preview(&mut preview_entries, group_name, os_path, &enc_path, PlanActionKind::Overwrite, PlanDirection::EncryptToRepo);
+                        repo_ops.push(PlannedRepoTidyOp {
                             group_name: group_name.clone(),
                             group_base: group_base.clone(),
                             rel_path: clean_rel.to_string(),
-                            plain_path: path.to_path_buf(),
-                            enc_path: target_enc,
+                            kind: RepoTidyKind::Encrypt { plain_path: path.to_path_buf(), enc_path },
                         });
                     } else {
-                        preview_entries.push(PlanPreviewEntry {
-                            group_name: group_name.clone(),
-                            os_path,
-                            os_action: PlanActionKind::Okay,
-                            repo_path: path.to_path_buf(),
-                            repo_action: PlanActionKind::Okay,
-                            direction: PlanDirection::EncryptToRepo,
-                        });
+                        push_repo_preview(&mut preview_entries, group_name, os_path, path, PlanActionKind::Okay, PlanDirection::EncryptToRepo);
                     }
                 }
                 Some(m) if m.is_included() => {
                     if is_enc_ext {
-                        if engine.vault_key.is_none() {
-                            return Err(EngineError::VaultLocked {
-                                reason: "vault key required for tidy in-repo decryption".into(),
-                            });
-                        }
-                        let target_plain = group_repo_dir.join(clean_rel);
-                        preview_entries.push(PlanPreviewEntry {
-                            group_name: group_name.clone(),
-                            os_path,
-                            os_action: PlanActionKind::Okay,
-                            repo_path: target_plain.clone(),
-                            repo_action: PlanActionKind::Overwrite,
-                            direction: PlanDirection::DecryptInRepo,
-                        });
-                        repo_ops.push(PlannedRepoTidyOp::Decrypt {
+                        require_vault(engine, "decryption")?;
+                        let plain_path = group_repo_dir.join(clean_rel);
+                        push_repo_preview(&mut preview_entries, group_name, os_path, &plain_path, PlanActionKind::Overwrite, PlanDirection::DecryptInRepo);
+                        repo_ops.push(PlannedRepoTidyOp {
                             group_name: group_name.clone(),
                             group_base: group_base.clone(),
                             rel_path: clean_rel.to_string(),
-                            enc_path: path.to_path_buf(),
-                            plain_path: target_plain,
+                            kind: RepoTidyKind::Decrypt { enc_path: path.to_path_buf(), plain_path },
                         });
                     } else {
-                        preview_entries.push(PlanPreviewEntry {
-                            group_name: group_name.clone(),
-                            os_path,
-                            os_action: PlanActionKind::Okay,
-                            repo_path: path.to_path_buf(),
-                            repo_action: PlanActionKind::Okay,
-                            direction: PlanDirection::PlainToRepo,
-                        });
+                        push_repo_preview(&mut preview_entries, group_name, os_path, path, PlanActionKind::Okay, PlanDirection::PlainToRepo);
                     }
                 }
                 _ => {
-                    preview_entries.push(PlanPreviewEntry {
-                        group_name: group_name.clone(),
-                        os_path,
-                        os_action: PlanActionKind::Okay,
-                        repo_path: path.to_path_buf(),
-                        repo_action: PlanActionKind::Delete,
-                        direction: PlanDirection::PlainToRepo,
-                    });
-                    repo_ops.push(PlannedRepoTidyOp::RemoveExcluded {
+                    push_repo_preview(&mut preview_entries, group_name, os_path, path, PlanActionKind::Delete, PlanDirection::PlainToRepo);
+                    repo_ops.push(PlannedRepoTidyOp {
                         group_name: group_name.clone(),
                         group_base: group_base.clone(),
                         rel_path: rel_str,
-                        repo_path: path.to_path_buf(),
+                        kind: RepoTidyKind::RemoveExcluded { repo_path: path.to_path_buf() },
                     });
                 }
             }
@@ -277,8 +230,7 @@ pub fn tidy_groups_with_observer(
     } else {
         for g in group_filters {
             if engine.repo_config.groups.contains_key(g) {
-                let mut p = plan(engine, Some(g.as_str()), lock)?;
-                plans.append(&mut p);
+                plans.append(&mut plan(engine, Some(g.as_str()), lock)?);
             }
         }
     }
@@ -298,14 +250,8 @@ pub fn tidy_groups_with_observer(
             continue;
         }
         let orphan_path = PathBuf::from(&rec.target_path);
-        let group_base = orphan_path
-            .parent()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| expand_tilde("~"));
-        let repo_path = engine
-            .repo_dir
-            .join(&rec.group_name)
-            .join(&rec.relative_path);
+        let group_base = orphan_path.parent().map(PathBuf::from).unwrap_or_else(|| expand_tilde("~"));
+        let repo_path = engine.repo_dir.join(&rec.group_name).join(&rec.relative_path);
         let os_action = match policy {
             TidyOrphanPolicy::PurgeFromOs => PlanActionKind::Delete,
             TidyOrphanPolicy::KeepOnOs => PlanActionKind::Untrack,
@@ -328,99 +274,29 @@ pub fn tidy_groups_with_observer(
     }
 
     let approved = observer.confirm_plan(&preview_entries, dry_run)?;
-
     if dry_run {
-        let mut sim = TidyReport::default();
-        for op in &repo_ops {
-            match op {
-                PlannedRepoTidyOp::Encrypt { .. } => sim.encrypted_in_repo += 1,
-                PlannedRepoTidyOp::Decrypt { .. } => sim.decrypted_in_repo += 1,
-                PlannedRepoTidyOp::RemoveExcluded { .. } => sim.removed_from_repo += 1,
-            }
-        }
-        for op in orphan_ops {
-            match policy {
-                TidyOrphanPolicy::PurgeFromOs => sim.removed_os_orphans.push(op.orphan_path),
-                TidyOrphanPolicy::KeepOnOs => sim.untracked_kept_orphans.push(op.orphan_path),
-            }
-        }
-        return Ok(sim);
+        return Ok(summarize_tidy_dry_run(&repo_ops, orphan_ops, policy));
     }
-
     if !approved {
         return Ok(TidyReport::default());
     }
 
     let mut report = TidyReport::default();
-
     for op in repo_ops {
-        match op {
-            PlannedRepoTidyOp::Encrypt {
-                group_name,
-                group_base,
-                rel_path,
-                plain_path,
-                enc_path,
-            } => {
-                let vault_key = engine.vault_key.ok_or_else(|| EngineError::VaultLocked {
-                    reason: "vault key required for tidy in-repo encryption".into(),
-                })?;
-                let plaintext = fs::read(&plain_path)?;
-                let len = plaintext.len() as u64;
-                let enc = vault_key.encrypt_file(&plaintext)?;
-                write_file_safe(&enc_path, &enc.to_bytes())?;
-                let _ = fs::remove_file(&plain_path);
-                report.encrypted_in_repo += 1;
-                observer.on_file_progress(&group_name, &group_base, &rel_path, Some(len));
-            }
-            PlannedRepoTidyOp::Decrypt {
-                group_name,
-                group_base,
-                rel_path,
-                enc_path,
-                plain_path,
-            } => {
-                let vault_key = engine.vault_key.ok_or_else(|| EngineError::VaultLocked {
-                    reason: "vault key required for tidy in-repo decryption".into(),
-                })?;
-                let raw_enc = fs::read(&enc_path)?;
-                let enc = EncryptedFile::from_bytes(&raw_enc)?;
-                let decrypted = vault_key.decrypt_file(&enc)?;
-                let len = decrypted.expose_secret().len() as u64;
-                write_file_safe(&plain_path, decrypted.expose_secret())?;
-                let _ = fs::remove_file(&enc_path);
-                report.decrypted_in_repo += 1;
-                observer.on_file_progress(&group_name, &group_base, &rel_path, Some(len));
-            }
-            PlannedRepoTidyOp::RemoveExcluded {
-                group_name,
-                group_base,
-                rel_path,
-                repo_path,
-            } => {
-                let _ = fs::remove_file(&repo_path);
-                report.removed_from_repo += 1;
-                observer.on_file_progress(&group_name, &group_base, &rel_path, None);
-            }
-        }
+        let len = execute_repo_tidy_op(engine, &op.kind, &mut report)?;
+        observer.on_file_progress(&op.group_name, &op.group_base, &op.rel_path, len);
     }
-
     for op in orphan_ops {
-        match policy {
-            TidyOrphanPolicy::PurgeFromOs => {
-                if op.orphan_path.is_file() || is_symlink(&op.orphan_path) {
-                    let _ = fs::remove_file(&op.orphan_path);
-                }
-                let _ = engine.state_db.remove_synced_file(&op.orphan_path_str);
-                report.removed_os_orphans.push(op.orphan_path);
-                observer.on_file_progress(&op.group_name, &op.group_base, &op.rel_path, None);
+        if policy == TidyOrphanPolicy::PurgeFromOs {
+            if op.orphan_path.is_file() || is_symlink(&op.orphan_path) {
+                let _ = fs::remove_file(&op.orphan_path);
             }
-            TidyOrphanPolicy::KeepOnOs => {
-                let _ = engine.state_db.remove_synced_file(&op.orphan_path_str);
-                report.untracked_kept_orphans.push(op.orphan_path);
-                observer.on_file_progress(&op.group_name, &op.group_base, &op.rel_path, None);
-            }
+            report.removed_os_orphans.push(op.orphan_path);
+        } else {
+            report.untracked_kept_orphans.push(op.orphan_path);
         }
+        let _ = engine.state_db.remove_synced_file(&op.orphan_path_str);
+        observer.on_file_progress(&op.group_name, &op.group_base, &op.rel_path, None);
     }
 
     if report.encrypted_in_repo > 0
@@ -458,114 +334,191 @@ pub fn tidy_groups(
     tidy_groups_with_observer(engine, group_filters, lock, policy, dry_run, &mut obs)
 }
 
+fn require_vault<'a>(
+    engine: &SyncEngine<'a>,
+    op: &str,
+) -> Result<&'a crate::crypto::vault::VaultKey, EngineError> {
+    engine.vault_key.ok_or_else(|| EngineError::VaultLocked {
+        reason: format!("vault key required for tidy in-repo {op}"),
+    })
+}
+
+fn push_repo_preview(
+    entries: &mut Vec<PlanPreviewEntry>,
+    group_name: &str,
+    os_path: PathBuf,
+    repo_path: &std::path::Path,
+    repo_action: PlanActionKind,
+    direction: PlanDirection,
+) {
+    entries.push(PlanPreviewEntry {
+        group_name: group_name.to_string(),
+        os_path,
+        os_action: PlanActionKind::Okay,
+        repo_path: repo_path.to_path_buf(),
+        repo_action,
+        direction,
+    });
+}
+
+fn summarize_tidy_dry_run(
+    repo_ops: &[PlannedRepoTidyOp],
+    orphan_ops: Vec<PlannedOrphanOp>,
+    policy: TidyOrphanPolicy,
+) -> TidyReport {
+    let mut sim = TidyReport::default();
+    for op in repo_ops {
+        match op.kind {
+            RepoTidyKind::Encrypt { .. } => sim.encrypted_in_repo += 1,
+            RepoTidyKind::Decrypt { .. } => sim.decrypted_in_repo += 1,
+            RepoTidyKind::RemoveExcluded { .. } => sim.removed_from_repo += 1,
+        }
+    }
+    for op in orphan_ops {
+        if policy == TidyOrphanPolicy::PurgeFromOs {
+            sim.removed_os_orphans.push(op.orphan_path);
+        } else {
+            sim.untracked_kept_orphans.push(op.orphan_path);
+        }
+    }
+    sim
+}
+
+fn execute_repo_tidy_op(
+    engine: &SyncEngine,
+    kind: &RepoTidyKind,
+    report: &mut TidyReport,
+) -> Result<Option<u64>, EngineError> {
+    match kind {
+        RepoTidyKind::Encrypt { plain_path, enc_path } => {
+            let vault_key = require_vault(engine, "encryption")?;
+            let plaintext = fs::read(plain_path)?;
+            let len = plaintext.len() as u64;
+            let enc = vault_key.encrypt_file(&plaintext)?;
+            write_file_safe(enc_path, &enc.to_bytes())?;
+            let _ = fs::remove_file(plain_path);
+            report.encrypted_in_repo += 1;
+            Ok(Some(len))
+        }
+        RepoTidyKind::Decrypt { enc_path, plain_path } => {
+            let vault_key = require_vault(engine, "decryption")?;
+            let raw_enc = fs::read(enc_path)?;
+            let enc = EncryptedFile::from_bytes(&raw_enc)?;
+            let decrypted = vault_key.decrypt_file(&enc)?;
+            let len = decrypted.expose_secret().len() as u64;
+            write_file_safe(plain_path, decrypted.expose_secret())?;
+            let _ = fs::remove_file(enc_path);
+            report.decrypted_in_repo += 1;
+            Ok(Some(len))
+        }
+        RepoTidyKind::RemoveExcluded { repo_path } => {
+            let _ = fs::remove_file(repo_path);
+            report.removed_from_repo += 1;
+            Ok(None)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::repo::{OsInfo, RepoConfig};
     use crate::config::state::{DotlerLock, StateDb, SyncedFileRecord};
-    use crate::crypto::SecretString;
-    use crate::crypto::vault::init_vault;
+    use crate::crypto::{SecretString, VaultKey, init_vault};
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
+
+    struct TidyTestEnv {
+        _tmp: tempfile::TempDir,
+        home_dir: PathBuf,
+        repo_dir: PathBuf,
+        state_db: StateDb,
+        lock: DotlerLockGuard,
+    }
+
+    impl TidyTestEnv {
+        fn new() -> Self {
+            let tmp = tempfile::tempdir().unwrap();
+            let home_dir = tmp.path().join("home");
+            let repo_dir = tmp.path().join("repo");
+            fs::create_dir_all(&home_dir).unwrap();
+            fs::create_dir_all(&repo_dir).unwrap();
+            let state_db = StateDb::open(&tmp.path().join("state.db")).unwrap();
+            let lock = DotlerLock::new(tmp.path().join("dotler.lock"))
+                .acquire(Duration::from_millis(500), Duration::from_millis(10))
+                .unwrap();
+            Self {
+                _tmp: tmp,
+                home_dir,
+                repo_dir,
+                state_db,
+                lock,
+            }
+        }
+
+        fn run(&self, toml: &str, vkey: Option<&VaultKey>, policy: TidyOrphanPolicy) -> TidyReport {
+            let repo_cfg = RepoConfig::parse(toml).unwrap();
+            let engine = SyncEngine::new(
+                "main",
+                &self.repo_dir,
+                &repo_cfg,
+                &self.state_db,
+                vec![],
+                OsInfo::detect(),
+                vkey,
+            )
+            .with_home_dir(&self.home_dir);
+            tidy(&engine, None, &self.lock, policy, false).unwrap()
+        }
+
+        fn record_orphan(&self, path: &Path, updated_at: i64) {
+            self.state_db
+                .upsert_synced_file(&SyncedFileRecord {
+                    target_path: path.to_string_lossy().to_string(),
+                    repo_label: "main".to_string(),
+                    group_name: "shell".to_string(),
+                    relative_path: "orphan.conf".to_string(),
+                    file_hash: "00".to_string(),
+                    updated_at,
+                })
+                .unwrap();
+        }
+    }
 
     #[test]
     fn tidy_converts_plain_and_enc_in_repo_and_removes_stale_copies() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home_dir = tmp.path().join("home");
-        let repo_dir = tmp.path().join("repo");
-        fs::create_dir_all(&home_dir).unwrap();
-        fs::create_dir_all(repo_dir.join("sec")).unwrap();
+        let env = TidyTestEnv::new();
+        fs::create_dir_all(env.repo_dir.join("sec")).unwrap();
 
         let pass = SecretString::new("tidy-vault-pass".to_string());
         let (vcfg, vkey, _) = init_vault(&pass).unwrap();
+        fs::write(env.repo_dir.join("sec/secret.txt"), b"top-secret").unwrap();
 
-        // Plain file in repo when rule requires enc
-        fs::write(repo_dir.join("sec/secret.txt"), b"top-secret").unwrap();
         let toml = format!(
             "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[sec]\nos-nux = \"~\"\nos-mac = \"~\"\nfiles = \"secret.txt enc\"\n",
             vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
         );
-        let repo_cfg = RepoConfig::parse(&toml).unwrap();
-        let state_db = StateDb::open(&tmp.path().join("state.db")).unwrap();
-        let lock = DotlerLock::new(tmp.path().join("dotler.lock"))
-            .acquire(Duration::from_millis(500), Duration::from_millis(10))
-            .unwrap();
-
-        let engine = SyncEngine::new(
-            "main",
-            &repo_dir,
-            &repo_cfg,
-            &state_db,
-            vec![],
-            OsInfo::detect(),
-            Some(&vkey),
-        )
-        .with_home_dir(&home_dir);
-
-        let rep = tidy(&engine, None, &lock, TidyOrphanPolicy::KeepOnOs, false).unwrap();
+        let rep = env.run(&toml, Some(&vkey), TidyOrphanPolicy::KeepOnOs);
         assert_eq!(rep.encrypted_in_repo, 1);
-        assert!(!repo_dir.join("sec/secret.txt").exists());
-        assert!(repo_dir.join("sec/secret.txt.enc").is_file());
+        assert!(!env.repo_dir.join("sec/secret.txt").exists());
+        assert!(env.repo_dir.join("sec/secret.txt.enc").is_file());
     }
 
     #[test]
     fn tidy_keep_on_os_vs_purge_from_os() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home_dir = tmp.path().join("home");
-        let repo_dir = tmp.path().join("repo");
-        fs::create_dir_all(&home_dir).unwrap();
-        fs::create_dir_all(&repo_dir).unwrap();
-
-        let orphan_file = home_dir.join("orphan.conf");
+        let env = TidyTestEnv::new();
+        let orphan_file = env.home_dir.join("orphan.conf");
         fs::write(&orphan_file, b"keep me").unwrap();
 
         let toml = "[shell]\nos-nux = \"~\"\nos-mac = \"~\"\nfiles = \"!*\"\n";
-        let repo_cfg = RepoConfig::parse(toml).unwrap();
-        let state_db = StateDb::open(&tmp.path().join("state.db")).unwrap();
-        let lock = DotlerLock::new(tmp.path().join("dotler.lock"))
-            .acquire(Duration::from_millis(500), Duration::from_millis(10))
-            .unwrap();
-
-        state_db
-            .upsert_synced_file(&SyncedFileRecord {
-                target_path: orphan_file.to_string_lossy().to_string(),
-                repo_label: "main".to_string(),
-                group_name: "shell".to_string(),
-                relative_path: "orphan.conf".to_string(),
-                file_hash: "00".to_string(),
-                updated_at: 1,
-            })
-            .unwrap();
-
-        let engine = SyncEngine::new(
-            "main",
-            &repo_dir,
-            &repo_cfg,
-            &state_db,
-            vec![],
-            OsInfo::detect(),
-            None,
-        )
-        .with_home_dir(&home_dir);
-
-        // KeepOnOs keeps file on disk and removes DB entry
-        let rep_keep = tidy(&engine, None, &lock, TidyOrphanPolicy::KeepOnOs, false).unwrap();
+        env.record_orphan(&orphan_file, 1);
+        let rep_keep = env.run(toml, None, TidyOrphanPolicy::KeepOnOs);
         assert_eq!(rep_keep.untracked_kept_orphans.len(), 1);
         assert!(orphan_file.is_file());
-        assert!(state_db.list_synced_files(None).unwrap().is_empty());
+        assert!(env.state_db.list_synced_files(None).unwrap().is_empty());
 
-        // Re-insert and test PurgeFromOs
-        state_db
-            .upsert_synced_file(&SyncedFileRecord {
-                target_path: orphan_file.to_string_lossy().to_string(),
-                repo_label: "main".to_string(),
-                group_name: "shell".to_string(),
-                relative_path: "orphan.conf".to_string(),
-                file_hash: "00".to_string(),
-                updated_at: 2,
-            })
-            .unwrap();
-
-        let rep_purge = tidy(&engine, None, &lock, TidyOrphanPolicy::PurgeFromOs, false).unwrap();
+        env.record_orphan(&orphan_file, 2);
+        let rep_purge = env.run(toml, None, TidyOrphanPolicy::PurgeFromOs);
         assert_eq!(rep_purge.removed_os_orphans.len(), 1);
         assert!(!orphan_file.exists());
     }

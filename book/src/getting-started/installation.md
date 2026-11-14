@@ -19,7 +19,7 @@ irm https://msisdev.github.io/dotler/install.ps1 | iex
 Optional environment variables for `install.sh` / `install.ps1`:
 
 - `DOTLER_INSTALL_DIR`: Custom installation directory (default: `~/.local/bin`)
-- `DOTLER_VERSION`: Specific release tag to install, e.g., `v0.2.0` (default: `latest`)
+- `DOTLER_VERSION`: Specific release tag to install, e.g., `v0.3.0` (default: `latest`)
 - `DOTLER_LIBC`: Linux C library variant, `musl` (default, static) or `gnu`
 
 ## Install with Cargo
@@ -52,7 +52,7 @@ dotler update --check
 dotler update
 
 # Update non-interactively or target a specific release tag
-dotler update -y --version v0.2.0
+dotler update -y --version v0.3.0
 ```
 
 - **Standalone installations (`~/.local/bin/dotler`)**: Downloads the platform release archive, verifies its `SHA-256` checksum, and atomically replaces the executable in place.

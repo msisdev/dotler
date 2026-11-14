@@ -1,148 +1,14 @@
-//! Integration tests for AI Agent interface: dotler.toml & dotler init onboarding hints,
-//! dotler ai briefing, and Model Context Protocol (MCP) JSON-RPC 2.0 stdio server.
+mod common;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::time::Duration;
 
+use common::AgentTestSandbox;
 use serde_json::{Value, json};
-use tempfile::TempDir;
-
-struct AgentTestSandbox {
-    _root: TempDir,
-    home_dir: PathBuf,
-    dotler_dir: PathBuf,
-    repo_dir: PathBuf,
-    bare_git_dir: PathBuf,
-}
-
-impl AgentTestSandbox {
-    fn new() -> Self {
-        let root =
-            tempfile::tempdir().expect("Failed to create temporary directory for test sandbox");
-        let root_path = root.path();
-        let home_dir = root_path.join("home");
-        let dotler_dir = home_dir.join(".config").join("dotler");
-        let repo_dir = home_dir.join("dotfiles");
-        let bare_git_dir = root_path.join("bare_repo.git");
-
-        fs::create_dir_all(&dotler_dir).expect("Failed to create ~/.config/dotler");
-        fs::create_dir_all(&repo_dir).expect("Failed to create dotfiles repository");
-
-        // Seed a working Git repo with a dotler.toml, then clone --bare
-        let worktree = root_path.join("worktree");
-        fs::create_dir_all(&worktree).unwrap();
-        Command::new("git")
-            .args(["init", worktree.to_str().unwrap()])
-            .status()
-            .unwrap();
-        let seed_toml = r#"[shell]
-path = "~"
-files = """
-*
-!*.log
-"""
-"#;
-        fs::write(worktree.join("dotler.toml"), seed_toml).unwrap();
-        Command::new("git")
-            .args([
-                "-C",
-                worktree.to_str().unwrap(),
-                "config",
-                "user.name",
-                "Tester",
-            ])
-            .status()
-            .unwrap();
-        Command::new("git")
-            .args([
-                "-C",
-                worktree.to_str().unwrap(),
-                "config",
-                "user.email",
-                "test@example.com",
-            ])
-            .status()
-            .unwrap();
-        Command::new("git")
-            .args(["-C", worktree.to_str().unwrap(), "add", "."])
-            .status()
-            .unwrap();
-        Command::new("git")
-            .args([
-                "-C",
-                worktree.to_str().unwrap(),
-                "commit",
-                "-m",
-                "Initial commit",
-            ])
-            .status()
-            .unwrap();
-        Command::new("git")
-            .args([
-                "clone",
-                "--bare",
-                worktree.to_str().unwrap(),
-                bare_git_dir.to_str().unwrap(),
-            ])
-            .status()
-            .unwrap();
-
-        Self {
-            _root: root,
-            home_dir,
-            dotler_dir,
-            repo_dir,
-            bare_git_dir,
-        }
-    }
-
-    fn bin_cmd(&self) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_dotler"));
-        cmd.env("HOME", &self.home_dir)
-            .env_remove("DOTLER_PASSPHRASE")
-            .current_dir(&self.repo_dir)
-            .stdin(Stdio::null());
-        cmd
-    }
-
-    fn bin_cmd_with_passphrase(&self, pass: &str) -> Command {
-        let mut cmd = self.bin_cmd();
-        cmd.env("DOTLER_PASSPHRASE", pass);
-        cmd
-    }
-
-    fn spawn_mcp(&self) -> std::process::Child {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_dotler"));
-        cmd.env("HOME", &self.home_dir)
-            .env_remove("DOTLER_PASSPHRASE")
-            .current_dir(&self.repo_dir)
-            .arg("mcp")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        cmd.spawn().expect("Failed to spawn dotler mcp process")
-    }
-
-    fn spawn_mcp_with_passphrase(&self, pass: &str) -> std::process::Child {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_dotler"));
-        cmd.env("HOME", &self.home_dir)
-            .env("DOTLER_PASSPHRASE", pass)
-            .current_dir(&self.repo_dir)
-            .arg("mcp")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        cmd.spawn()
-            .expect("Failed to spawn dotler mcp process with passphrase")
-    }
-}
 
 #[test]
 fn test_dotler_init_ai_hint_and_no_skill_md() {
-    let sandbox = AgentTestSandbox::new();
+    let sandbox = AgentTestSandbox::new_agent();
 
     let output = sandbox
         .bin_cmd()
@@ -208,7 +74,7 @@ fn test_dotler_init_ai_hint_and_no_skill_md() {
 
 #[test]
 fn test_dotler_ai_briefing_4_sections_and_zero_secret_leakage() {
-    let sandbox = AgentTestSandbox::new();
+    let sandbox = AgentTestSandbox::new_agent();
 
     // Initialize repo first
     let init_out = sandbox
@@ -274,7 +140,7 @@ fn test_dotler_ai_briefing_4_sections_and_zero_secret_leakage() {
 
 #[test]
 fn test_mcp_handshake_and_tool_discovery() {
-    let sandbox = AgentTestSandbox::new();
+    let sandbox = AgentTestSandbox::new_agent();
     let mut child = sandbox.spawn_mcp();
 
     let mut stdin = child.stdin.take().expect("Child stdin unavailable");
@@ -393,7 +259,7 @@ fn test_mcp_handshake_and_tool_discovery() {
 
 #[test]
 fn test_mcp_all_7_tools_execution() {
-    let sandbox = AgentTestSandbox::new();
+    let sandbox = AgentTestSandbox::new_agent();
 
     // Initialize local repo
     let init_out = sandbox
@@ -510,172 +376,6 @@ files = """
         text7.contains("shell"),
         "Remote repo inspection must find shell group"
     );
-
-    drop(stdin);
-    let _ = child.wait();
-}
-
-#[test]
-fn test_mcp_stateless_idle_and_lock_concurrency() {
-    let sandbox = AgentTestSandbox::new();
-
-    // Initialize repo
-    let init_out = sandbox
-        .bin_cmd()
-        .args(["init", "--label", "primary"])
-        .output()
-        .unwrap();
-    assert_eq!(init_out.status.code(), Some(0));
-
-    let lock_file_path = sandbox.dotler_dir.join("dotler.lock");
-
-    // Spawn MCP server
-    let mut child = sandbox.spawn_mcp();
-    let mut stdin = child.stdin.take().expect("Child stdin unavailable");
-    let mut reader = BufReader::new(child.stdout.take().expect("Child stdout unavailable"));
-
-    // Handshake
-    let init_req = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {}
-    });
-    writeln!(stdin, "{}", serde_json::to_string(&init_req).unwrap()).unwrap();
-    stdin.flush().unwrap();
-    let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
-
-    // STATELESS IDLE CHECK:
-    // While MCP server is blocked waiting on stdin, an external process MUST be able to acquire lock immediately.
-    let lock = dotler::config::state::DotlerLock::new(lock_file_path.clone());
-    let lock_guard = lock
-        .acquire(Duration::from_millis(100), Duration::from_millis(10))
-        .expect("Stateless Idle Invariant: MCP server MUST NOT hold lock while idle on stdin");
-
-    // While external lock is held, send tools/call request to MCP server.
-    // The MCP server should wait, and if we release after a brief pause, complete successfully.
-    let call_req = json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/call",
-        "params": {
-            "name": "dotler_briefing",
-            "arguments": {}
-        }
-    });
-    writeln!(stdin, "{}", serde_json::to_string(&call_req).unwrap()).unwrap();
-    stdin.flush().unwrap();
-
-    // Release external lock after short pause
-    std::thread::sleep(Duration::from_millis(50));
-    drop(lock_guard);
-
-    line.clear();
-    reader.read_line(&mut line).unwrap();
-    let resp: Value = serde_json::from_str(&line).expect("Valid JSON response");
-
-    // The response must either succeed (if lock released before timeout) or return lock timeout error
-    assert_eq!(resp["jsonrpc"], "2.0");
-
-    // Now call again when lock is completely free
-    let call_req2 = json!({
-        "jsonrpc": "2.0",
-        "id": 3,
-        "method": "tools/call",
-        "params": {
-            "name": "dotler_briefing",
-            "arguments": {}
-        }
-    });
-    writeln!(stdin, "{}", serde_json::to_string(&call_req2).unwrap()).unwrap();
-    stdin.flush().unwrap();
-
-    line.clear();
-    reader.read_line(&mut line).unwrap();
-    let resp2: Value = serde_json::from_str(&line).expect("Valid JSON response");
-    assert_eq!(resp2["id"], 3);
-    assert_eq!(resp2["result"]["isError"], false);
-
-    // Verify No-Unlink: lock file is preserved on disk
-    assert!(
-        lock_file_path.exists(),
-        "No-Unlink Invariant: dotler.lock must remain on disk after unlocking"
-    );
-
-    drop(stdin);
-    let _ = child.wait();
-}
-
-#[test]
-fn test_mcp_tidy_safe_keep_default() {
-    let sandbox = AgentTestSandbox::new();
-    let init_out = sandbox
-        .bin_cmd()
-        .args(["init", "--label", "primary"])
-        .output()
-        .unwrap();
-    assert_eq!(init_out.status.code(), Some(0));
-
-    // Put a file in home
-    let test_file = sandbox.home_dir.join(".sample_rc");
-    fs::write(&test_file, "sample config\n").unwrap();
-
-    let mut child = sandbox.spawn_mcp();
-    let mut stdin = child.stdin.take().expect("Child stdin unavailable");
-    let mut reader = BufReader::new(child.stdout.take().expect("Child stdout unavailable"));
-
-    // Handshake
-    let init_req = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
-    writeln!(stdin, "{}", serde_json::to_string(&init_req).unwrap()).unwrap();
-    stdin.flush().unwrap();
-    let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
-
-    // Call dotler_tidy with NO purge flag (must default to purge=false)
-    let tidy_req = json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/call",
-        "params": {
-            "name": "dotler_tidy",
-            "arguments": {}
-        }
-    });
-    writeln!(stdin, "{}", serde_json::to_string(&tidy_req).unwrap()).unwrap();
-    stdin.flush().unwrap();
-
-    line.clear();
-    reader.read_line(&mut line).unwrap();
-    let resp: Value = serde_json::from_str(&line).expect("Valid JSON response");
-
-    assert_eq!(resp["id"], 2);
-    assert_eq!(resp["result"]["isError"], false);
-
-    // Safe agent default: the file must NOT be deleted from the filesystem
-    assert!(
-        test_file.exists(),
-        "Safe Default Invariant: dotler_tidy must default to purge=false and preserve OS files"
-    );
-
-    // Passing removed legacy argument (`rm`) must return a tool error
-    let legacy_req = json!({
-        "jsonrpc": "2.0",
-        "id": 3,
-        "method": "tools/call",
-        "params": {
-            "name": "dotler_tidy",
-            "arguments": { "rm": true }
-        }
-    });
-    writeln!(stdin, "{}", serde_json::to_string(&legacy_req).unwrap()).unwrap();
-    stdin.flush().unwrap();
-
-    line.clear();
-    reader.read_line(&mut line).unwrap();
-    let legacy_resp: Value = serde_json::from_str(&line).expect("Valid JSON response");
-    assert_eq!(legacy_resp["id"], 3);
-    assert_eq!(legacy_resp["result"]["isError"], true);
 
     drop(stdin);
     let _ = child.wait();

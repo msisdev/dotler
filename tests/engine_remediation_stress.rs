@@ -1,125 +1,15 @@
-//! Adversarial stress test suite for Phase 3 Engine remediation.
-//!
-//! Validates:
-//! 1. Empty shorthand slugs in `parse_url` (gh:, gl:, cb:, srht:, bb:)
-//! 2. Path security on `path_override` in `install_remote` (path traversal, absolute paths outside home, .git, config)
-//! 3. Repeated install and uninstall stress on fresh files and pre-existing files
-//! 4. Database synchronization in `import_files` when skipping on hash match
+mod common;
 
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
-use tempfile::TempDir;
-
+use common::{TestGitRepo, TestSandbox};
 use dotler::config::ConfigError;
 use dotler::config::repo::{OsInfo, RepoConfig};
-use dotler::config::state::{DotlerLock, DotlerLockGuard, StateDb};
 use dotler::crypto::SecretString;
 use dotler::crypto::vault::init_vault;
 use dotler::engine::EngineError;
 use dotler::engine::remote::{install_remote, parse_url, uninstall_remote};
 use dotler::engine::sync::{FileSyncStatus, SyncEngine};
-
-struct TestSandbox {
-    _root: TempDir,
-    home_dir: PathBuf,
-    _config_dir: PathBuf,
-    state_db: StateDb,
-    lock_path: PathBuf,
-}
-
-impl TestSandbox {
-    fn new() -> Self {
-        let root = tempfile::tempdir().expect("create temp sandbox root");
-        let home_dir = root.path().join("home");
-        let config_dir = home_dir.join(".config").join("dotler");
-        fs::create_dir_all(&config_dir).expect("create config dir");
-
-        let db_path = config_dir.join("state.db");
-        let state_db = StateDb::open(&db_path).expect("open state db");
-        let lock_path = config_dir.join("dotler.lock");
-
-        Self {
-            _root: root,
-            home_dir,
-            _config_dir: config_dir,
-            state_db,
-            lock_path,
-        }
-    }
-
-    fn acquire_lock(&self) -> DotlerLockGuard {
-        let lock = DotlerLock::new(self.lock_path.clone());
-        lock.acquire(Duration::from_millis(5000), Duration::from_millis(50))
-            .expect("acquire lock")
-    }
-
-    fn write_home_file(&self, rel: &str, content: &[u8]) -> PathBuf {
-        let path = self.home_dir.join(rel);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        fs::write(&path, content).unwrap();
-        path
-    }
-}
-
-struct TestGitRepo {
-    _temp: TempDir,
-    clone_url: String,
-}
-
-impl TestGitRepo {
-    fn new(dotler_toml: &str, files: &[(&str, &[u8])]) -> Self {
-        let temp = tempfile::tempdir().expect("create mock git tempdir");
-        let worktree = temp.path().join("worktree");
-        let bare = temp.path().join("repo.git");
-        fs::create_dir_all(&worktree).unwrap();
-
-        let run = |args: &[&str], dir: &Path| {
-            let status = Command::new("git")
-                .args(args)
-                .current_dir(dir)
-                .status()
-                .expect("git exec");
-            assert!(status.success(), "git command failed: {:?}", args);
-        };
-
-        run(&["init", "-b", "main"], &worktree);
-        run(
-            &["config", "user.email", "challenger@test.local"],
-            &worktree,
-        );
-        run(&["config", "user.name", "Challenger"], &worktree);
-
-        fs::write(worktree.join("dotler.toml"), dotler_toml).unwrap();
-        for (rel, data) in files {
-            let p = worktree.join(rel);
-            if let Some(parent) = p.parent() {
-                fs::create_dir_all(parent).unwrap();
-            }
-            fs::write(p, data).unwrap();
-        }
-
-        run(&["add", "."], &worktree);
-        run(&["commit", "-m", "Initial commit"], &worktree);
-        run(
-            &[
-                "clone",
-                "--bare",
-                worktree.to_str().unwrap(),
-                bare.to_str().unwrap(),
-            ],
-            temp.path(),
-        );
-
-        Self {
-            _temp: temp,
-            clone_url: format!("file://{}", bare.display()),
-        }
-    }
-}
+use std::fs;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn test_adversarial_parse_url_empty_slugs_and_malformed() {

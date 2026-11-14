@@ -1,8 +1,13 @@
 //! Command-line interface orchestration, argument parsing, and output formatting.
 
+pub mod args;
+pub mod channel;
 pub mod commands;
+pub mod observer;
 pub mod output;
+pub mod render;
 pub mod update;
+pub mod vault;
 
 use clap::Parser;
 use std::io::{IsTerminal, Write};

@@ -1,6 +1,10 @@
-pub(crate) mod bip39_words;
+pub mod cipher;
 pub mod keyring;
+pub mod mnemonic;
+pub mod passphrase;
 pub mod vault;
+#[allow(unused_imports)]
+pub(crate) use mnemonic as bip39_words;
 
 use zeroize::Zeroize;
 

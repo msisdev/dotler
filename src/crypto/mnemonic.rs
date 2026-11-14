@@ -1,3 +1,10 @@
+use sha2::{Digest, Sha256};
+
+use crate::crypto::vault::VaultError;
+use crate::crypto::{ExposeSecret, SecretString, fill_random_bytes};
+
+pub const BIP39_ENTROPY_BITS: usize = 128;
+
 pub static WORDS: [&str; 2048] = [
     "abandon", "ability", "able", "about", "above", "absent", "absorb", "abstract", "absurd",
     "abuse", "access", "accident", "account", "accuse", "achieve", "acid", "acoustic", "acquire",
@@ -211,3 +218,110 @@ pub static WORDS: [&str; 2048] = [
     "write", "wrong", "yard", "year", "yellow", "you", "young", "youth", "zebra", "zero", "zone",
     "zoo",
 ];
+
+pub struct RecoveryMnemonic(pub SecretString);
+
+impl std::fmt::Debug for RecoveryMnemonic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("RecoveryMnemonic")
+            .field(&"[REDACTED]")
+            .finish()
+    }
+}
+
+impl RecoveryMnemonic {
+    pub fn generate() -> Result<Self, VaultError> {
+        let mut entropy = [0u8; 16];
+        fill_random_bytes(&mut entropy);
+        let checksum_byte = Sha256::digest(entropy)[0] & 0xF0;
+        let mut buf = [0u8; 17];
+        buf[0..16].copy_from_slice(&entropy);
+        buf[16] = checksum_byte;
+
+        let mut words = Vec::with_capacity(12);
+        for i in 0..12 {
+            let mut idx: usize = 0;
+            for b in 0..11 {
+                let pos = i * 11 + b;
+                let bit = (buf[pos / 8] >> (7 - (pos % 8))) & 1;
+                idx = (idx << 1) | (bit as usize);
+            }
+            words.push(WORDS[idx]);
+        }
+        Ok(Self(SecretString::new(words.join(" "))))
+    }
+
+    pub fn validate(phrase: &str) -> Result<(), VaultError> {
+        let words: Vec<&str> = phrase.split_whitespace().collect();
+        if words.len() != 12 {
+            return Err(VaultError::InvalidMnemonic(format!(
+                "Mnemonic phrase must contain exactly 12 words, found {}",
+                words.len()
+            )));
+        }
+        let mut buf = [0u8; 17];
+        for (i, &word) in words.iter().enumerate() {
+            let idx = WORDS.binary_search(&word).map_err(|_| {
+                VaultError::InvalidMnemonic(format!("Invalid mnemonic word: '{word}'"))
+            })?;
+            for b in 0..11 {
+                if ((idx >> (10 - b)) & 1) == 1 {
+                    let pos = i * 11 + b;
+                    buf[pos / 8] |= 1 << (7 - (pos % 8));
+                }
+            }
+        }
+        let expected_cs = Sha256::digest(&buf[0..16])[0] & 0xF0;
+        if buf[16] != expected_cs {
+            return Err(VaultError::InvalidMnemonic(
+                "Invalid mnemonic phrase: checksum mismatch".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn phrase(&self) -> &str {
+        self.0.expose_secret()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bip39_mnemonic_generation_and_validation() {
+        let mnemonic = RecoveryMnemonic::generate().unwrap();
+        let words: Vec<&str> = mnemonic.phrase().split_whitespace().collect();
+        assert_eq!(words.len(), 12);
+        assert!(RecoveryMnemonic::validate(mnemonic.phrase()).is_ok());
+
+        let too_short = words[0..11].join(" ");
+        assert!(matches!(
+            RecoveryMnemonic::validate(&too_short),
+            Err(VaultError::InvalidMnemonic(_))
+        ));
+
+        let mut too_long_words = words.clone();
+        too_long_words.push(words[0]);
+        assert!(matches!(
+            RecoveryMnemonic::validate(&too_long_words.join(" ")),
+            Err(VaultError::InvalidMnemonic(_))
+        ));
+
+        let mut corrupted_words = words;
+        corrupted_words[0] = "notaword";
+        assert!(matches!(
+            RecoveryMnemonic::validate(&corrupted_words.join(" ")),
+            Err(VaultError::InvalidMnemonic(_))
+        ));
+    }
+
+    #[test]
+    fn test_recovery_mnemonic_debug_redacted() {
+        let mnemonic = RecoveryMnemonic::generate().unwrap();
+        let debug_str = format!("{mnemonic:?}");
+        assert!(debug_str.contains("[REDACTED]"));
+        assert!(!debug_str.contains(mnemonic.phrase().split_whitespace().next().unwrap()));
+    }
+}

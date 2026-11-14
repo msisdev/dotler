@@ -390,7 +390,10 @@ mod tests {
         assert_eq!(code, EXIT_CONFIG_OR_ARGS_ERROR);
 
         let out = String::from_utf8(stdout_buf).unwrap();
-        assert!(!out.contains("\x1b["), "Error JSON must not contain ANSI codes");
+        assert!(
+            !out.contains("\x1b["),
+            "Error JSON must not contain ANSI codes"
+        );
         let payload: JsonErrorPayload = serde_json::from_str(&out).unwrap();
         assert!(!payload.ok);
         assert_eq!(payload.error_code, "CLI_ARGS_ERROR");

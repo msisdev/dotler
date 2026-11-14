@@ -162,7 +162,6 @@ fn test_empirical_resolved_passphrase_redacted_debug() {
     assert!(!debug_out.contains("super-sensitive-unrevealed-password"));
 }
 
-
 #[test]
 fn test_empirical_concurrency_50_threads_chaos_stampede() {
     let _guard = TestKeyringGuard::new();
@@ -217,7 +216,6 @@ fn test_empirical_concurrency_50_threads_chaos_stampede() {
     OsKeyring::delete().unwrap();
     assert!(OsKeyring::get().unwrap().is_none());
 }
-
 
 #[test]
 fn test_empirical_multibyte_unicode_and_large_passphrase() {

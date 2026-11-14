@@ -74,7 +74,8 @@ impl<'a> SyncEngine<'a> {
             let repo_hash = blake3::hash(&plaintext_bytes).to_hex().to_string();
 
             let target_is_symlink = is_symlink(&plan.target_os_path);
-            let can_skip = check_export_target_conflict(plan, &repo_hash, target_is_symlink, force)?;
+            let can_skip =
+                check_export_target_conflict(plan, &repo_hash, target_is_symlink, force)?;
 
             let os_action = if can_skip {
                 PlanActionKind::Okay
@@ -136,7 +137,12 @@ impl<'a> SyncEngine<'a> {
 
             report.processed += 1;
             let group_base = self.group_base_for(&plan.group_name);
-            observer.on_file_progress(&plan.group_name, &group_base, &plan.relative_path, Some(file_size));
+            observer.on_file_progress(
+                &plan.group_name,
+                &group_base,
+                &plan.relative_path,
+                Some(file_size),
+            );
         }
 
         if has_updates {
@@ -265,13 +271,23 @@ mod tests {
         fs::create_dir_all(repo_dir.join("shell")).unwrap();
         fs::write(repo_dir.join("shell/.bashrc"), b"repo v1\n").unwrap();
 
-        let repo_cfg = RepoConfig::parse("[shell]\nos-nux = \"~\"\nos-mac = \"~\"\nfiles = \".bashrc\"\n").unwrap();
+        let repo_cfg =
+            RepoConfig::parse("[shell]\nos-nux = \"~\"\nos-mac = \"~\"\nfiles = \".bashrc\"\n")
+                .unwrap();
         let state_db = StateDb::open(&tmp.path().join("state.db")).unwrap();
         let lock = DotlerLock::new(tmp.path().join("dotler.lock"))
             .acquire(Duration::from_millis(500), Duration::from_millis(10))
             .unwrap();
-        let engine = SyncEngine::new("main", &repo_dir, &repo_cfg, &state_db, vec![], OsInfo::detect(), None)
-            .with_home_dir(&home_dir);
+        let engine = SyncEngine::new(
+            "main",
+            &repo_dir,
+            &repo_cfg,
+            &state_db,
+            vec![],
+            OsInfo::detect(),
+            None,
+        )
+        .with_home_dir(&home_dir);
 
         let plans = engine.plan(None, &lock).unwrap();
         let dry = export_files(&engine, &plans, &lock, false, true).unwrap();

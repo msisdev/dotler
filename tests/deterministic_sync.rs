@@ -516,4 +516,3 @@ files = "dry.conf"
         .unwrap();
     assert!(record.is_none());
 }
-

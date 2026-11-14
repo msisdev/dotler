@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ConfigError;
 
-
 pub use crate::config::cascade::{OsInfo, RECOGNIZED_OS_KEYS, resolve_group_target_path};
 pub use crate::config::path_security::{
     WalkDir, WalkEntry, is_symlink, validate_dir_no_symlinks, validate_os_dir_path,
@@ -169,7 +168,6 @@ pub struct GroupConfig {
     pub paths: BTreeMap<String, String>,
 }
 
-
 impl RepoConfig {
     pub fn parse(content: &str) -> Result<Self, ConfigError> {
         let repo: RepoConfig = toml::from_str(content).map_err(|e| {
@@ -269,7 +267,6 @@ impl RepoConfig {
 
         Ok(())
     }
-
 
     pub fn save_atomic(&self, path: &Path) -> Result<(), ConfigError> {
         self.validate()?;
@@ -486,7 +483,6 @@ extra_field = "unexpected"
         ));
     }
 
-
     #[test]
     fn test_overridden_encrypt_rule_does_not_require_vault() {
         let content = r#"
@@ -511,7 +507,6 @@ files = """
         );
     }
 
-
     #[test]
     fn test_vault_required_when_encrypted_rule_present() {
         for toml in [
@@ -527,13 +522,19 @@ files = """
     fn test_load_without_vault_check_allows_encrypted_rules_before_vault_init() {
         let dir = tempfile::tempdir().unwrap();
         let manifest_path = dir.path().join("dotler.toml");
-        fs::write(&manifest_path, "[shell]\nos-nux = \"~\"\nfiles = \"secret.txt enc\"\n").unwrap();
+        fs::write(
+            &manifest_path,
+            "[shell]\nos-nux = \"~\"\nfiles = \"secret.txt enc\"\n",
+        )
+        .unwrap();
 
-        assert!(matches!(RepoConfig::load(&manifest_path), Err(ConfigError::MissingVaultConfig)));
+        assert!(matches!(
+            RepoConfig::load(&manifest_path),
+            Err(ConfigError::MissingVaultConfig)
+        ));
         let loaded = RepoConfig::load_without_vault_check(&manifest_path)
             .expect("load_without_vault_check must allow encrypted rules before vault init");
         assert!(loaded.vault.is_none());
         assert!(loaded.groups.contains_key("shell"));
     }
-
 }

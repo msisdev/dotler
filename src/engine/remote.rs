@@ -141,12 +141,14 @@ impl RemoteRepoUrl {
             });
         }
 
-        let (clone_url, subpath) = if let Some(slug) =
-            trimmed.strip_prefix("gh:").or_else(|| trimmed.strip_prefix("github:"))
+        let (clone_url, subpath) = if let Some(slug) = trimmed
+            .strip_prefix("gh:")
+            .or_else(|| trimmed.strip_prefix("github:"))
         {
             parse_shorthand_slug(raw, slug, "https://github.com/", true)?
-        } else if let Some(slug) =
-            trimmed.strip_prefix("gl:").or_else(|| trimmed.strip_prefix("gitlab:"))
+        } else if let Some(slug) = trimmed
+            .strip_prefix("gl:")
+            .or_else(|| trimmed.strip_prefix("gitlab:"))
         {
             let clean = slug.trim_matches('/');
             if clean.is_empty() {
@@ -156,7 +158,10 @@ impl RemoteRepoUrl {
                 });
             }
             if let Some((repo_part, sub_part)) = clean.split_once(".git/") {
-                (format!("https://gitlab.com/{repo_part}.git"), Some(normalize_subpath(sub_part)?))
+                (
+                    format!("https://gitlab.com/{repo_part}.git"),
+                    Some(normalize_subpath(sub_part)?),
+                )
             } else if clean.ends_with("/dotler.toml") {
                 let (repo_part, sub) = split_two_segment_slug(clean);
                 let sub_norm = match sub {
@@ -165,18 +170,24 @@ impl RemoteRepoUrl {
                 };
                 (format!("https://gitlab.com/{repo_part}.git"), sub_norm)
             } else {
-                (format!("https://gitlab.com/{}.git", clean.trim_end_matches(".git")), None)
+                (
+                    format!("https://gitlab.com/{}.git", clean.trim_end_matches(".git")),
+                    None,
+                )
             }
-        } else if let Some(slug) =
-            trimmed.strip_prefix("cb:").or_else(|| trimmed.strip_prefix("codeberg:"))
+        } else if let Some(slug) = trimmed
+            .strip_prefix("cb:")
+            .or_else(|| trimmed.strip_prefix("codeberg:"))
         {
             parse_shorthand_slug(raw, slug, "https://codeberg.org/", true)?
-        } else if let Some(slug) =
-            trimmed.strip_prefix("srht:").or_else(|| trimmed.strip_prefix("sourcehut:"))
+        } else if let Some(slug) = trimmed
+            .strip_prefix("srht:")
+            .or_else(|| trimmed.strip_prefix("sourcehut:"))
         {
             parse_shorthand_slug(raw, slug, "https://git.sr.ht/", false)?
-        } else if let Some(slug) =
-            trimmed.strip_prefix("bb:").or_else(|| trimmed.strip_prefix("bitbucket:"))
+        } else if let Some(slug) = trimmed
+            .strip_prefix("bb:")
+            .or_else(|| trimmed.strip_prefix("bitbucket:"))
         {
             parse_shorthand_slug(raw, slug, "https://bitbucket.org/", true)?
         } else if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
@@ -210,8 +221,10 @@ fn parse_http_repo_url(trimmed: &str) -> Result<(String, Option<String>), Engine
         && let Some((host, path_part)) = rest.split_once('/')
     {
         let clean_path = path_part.trim_matches('/');
-        let is_two_seg_host =
-            matches!(host, "github.com" | "codeberg.org" | "bitbucket.org" | "git.sr.ht");
+        let is_two_seg_host = matches!(
+            host,
+            "github.com" | "codeberg.org" | "bitbucket.org" | "git.sr.ht"
+        );
         if is_two_seg_host || clean_path.ends_with("/dotler.toml") {
             let (repo_part, sub) = split_two_segment_slug(clean_path);
             let sub_norm = match sub {
@@ -415,7 +428,11 @@ pub fn list_remote(
     branch: Option<&str>,
     _lock: &DotlerLockGuard,
 ) -> Result<RemoteRepoSummary, EngineError> {
-    let local_path = Path::new(url.clone_url.strip_prefix("file://").unwrap_or(&url.clone_url));
+    let local_path = Path::new(
+        url.clone_url
+            .strip_prefix("file://")
+            .unwrap_or(&url.clone_url),
+    );
     let is_bare = local_path.join("HEAD").is_file()
         && local_path.join("objects").is_dir()
         && !local_path.join(".git").exists();

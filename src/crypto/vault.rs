@@ -5,9 +5,7 @@ use sha2::Sha256;
 use crate::config::repo::VaultConfig;
 use crate::crypto::{ExposeSecret, Secret, SecretString, fill_random_bytes};
 
-pub use crate::crypto::cipher::{
-    ENC_FILE_MIN_LEN, EncryptedFile, VAULT_SLOT_LEN, VaultSlot,
-};
+pub use crate::crypto::cipher::{ENC_FILE_MIN_LEN, EncryptedFile, VAULT_SLOT_LEN, VaultSlot};
 pub use crate::crypto::mnemonic::{BIP39_ENTROPY_BITS, RecoveryMnemonic};
 
 pub const VAULT_KEY_LEN: usize = 32;
@@ -277,10 +275,22 @@ mod tests {
         assert_eq!(config.vault_id, initial_key.vault_id());
 
         let pass_slot = VaultSlot::from_base64(&config.password_slot).unwrap();
-        assert_eq!(pass_slot.unwrap(&initial_pass, Some(&config.vault_id)).unwrap().expose(), initial_key.expose());
+        assert_eq!(
+            pass_slot
+                .unwrap(&initial_pass, Some(&config.vault_id))
+                .unwrap()
+                .expose(),
+            initial_key.expose()
+        );
 
         let rec_slot = VaultSlot::from_base64(&config.recovery_slot).unwrap();
-        assert_eq!(rec_slot.unwrap(&mnemonic.0, Some(&config.vault_id)).unwrap().expose(), initial_key.expose());
+        assert_eq!(
+            rec_slot
+                .unwrap(&mnemonic.0, Some(&config.vault_id))
+                .unwrap()
+                .expose(),
+            initial_key.expose()
+        );
 
         let new_pass = SecretString::new("new-super-secure-passphrase".to_string());
         let updated = change_password(&config, &initial_pass, &new_pass).unwrap();
@@ -289,25 +299,45 @@ mod tests {
         assert_eq!(updated.recovery_slot, config.recovery_slot);
 
         let new_slot = VaultSlot::from_base64(&updated.password_slot).unwrap();
-        assert!(matches!(new_slot.unwrap(&initial_pass, Some(&updated.vault_id)), Err(VaultError::InvalidSecret)));
-        assert_eq!(new_slot.unwrap(&new_pass, Some(&updated.vault_id)).unwrap().expose(), initial_key.expose());
+        assert!(matches!(
+            new_slot.unwrap(&initial_pass, Some(&updated.vault_id)),
+            Err(VaultError::InvalidSecret)
+        ));
+        assert_eq!(
+            new_slot
+                .unwrap(&new_pass, Some(&updated.vault_id))
+                .unwrap()
+                .expose(),
+            initial_key.expose()
+        );
     }
 
     #[test]
     fn test_single_use_mnemonic_auto_revocation() {
-        let (config, initial_key, mnemonic1) = init_vault(&SecretString::new("pass1".to_string())).unwrap();
+        let (config, initial_key, mnemonic1) =
+            init_vault(&SecretString::new("pass1".to_string())).unwrap();
         let recovered_pass = SecretString::new("recovered-pass".to_string());
-        let (recovered_config, mnemonic2) = recover_vault(&config, &mnemonic1.0, &recovered_pass).unwrap();
+        let (recovered_config, mnemonic2) =
+            recover_vault(&config, &mnemonic1.0, &recovered_pass).unwrap();
 
         assert_eq!(recovered_config.vault_id, config.vault_id);
         assert_ne!(mnemonic1.phrase(), mnemonic2.phrase());
         assert_ne!(recovered_config.recovery_slot, config.recovery_slot);
 
         let rec_pass_slot = VaultSlot::from_base64(&recovered_config.password_slot).unwrap();
-        assert_eq!(rec_pass_slot.unwrap(&recovered_pass, Some(&recovered_config.vault_id)).unwrap().expose(), initial_key.expose());
+        assert_eq!(
+            rec_pass_slot
+                .unwrap(&recovered_pass, Some(&recovered_config.vault_id))
+                .unwrap()
+                .expose(),
+            initial_key.expose()
+        );
 
         let third_pass = SecretString::new("third-pass".to_string());
-        assert!(matches!(recover_vault(&recovered_config, &mnemonic1.0, &third_pass), Err(VaultError::InvalidSecret)));
+        assert!(matches!(
+            recover_vault(&recovered_config, &mnemonic1.0, &third_pass),
+            Err(VaultError::InvalidSecret)
+        ));
         let (config3, _) = recover_vault(&recovered_config, &mnemonic2.0, &third_pass).unwrap();
         assert_eq!(config3.vault_id, config.vault_id);
     }
@@ -317,16 +347,32 @@ mod tests {
         let initial_pass = SecretString::new("initial-passphrase".to_string());
         let (config, initial_key, mnemonic) = init_vault(&initial_pass).unwrap();
         let words: Vec<&str> = mnemonic.phrase().split_whitespace().collect();
-        let messy_phrase = format!("  \n  {} \t\t {}   \n  ", words[0..6].join("   \t  "), words[6..12].join("\n  "));
+        let messy_phrase = format!(
+            "  \n  {} \t\t {}   \n  ",
+            words[0..6].join("   \t  "),
+            words[6..12].join("\n  ")
+        );
 
         let new_pass = SecretString::new("new-passphrase".to_string());
-        let (recovered_config, _) = recover_vault(&config, &SecretString::new(messy_phrase), &new_pass)
-            .expect("recover_vault should succeed with messy whitespace and newlines");
+        let (recovered_config, _) =
+            recover_vault(&config, &SecretString::new(messy_phrase), &new_pass)
+                .expect("recover_vault should succeed with messy whitespace and newlines");
         let slot = VaultSlot::from_base64(&recovered_config.password_slot).unwrap();
-        assert_eq!(slot.unwrap(&new_pass, Some(&config.vault_id)).unwrap().expose(), initial_key.expose());
+        assert_eq!(
+            slot.unwrap(&new_pass, Some(&config.vault_id))
+                .unwrap()
+                .expose(),
+            initial_key.expose()
+        );
 
         let empty_pass = SecretString::new("   ".to_string());
-        assert!(matches!(init_vault(&empty_pass), Err(VaultError::WeakPassphrase(_))));
-        assert!(matches!(change_password(&config, &initial_pass, &empty_pass), Err(VaultError::WeakPassphrase(_))));
+        assert!(matches!(
+            init_vault(&empty_pass),
+            Err(VaultError::WeakPassphrase(_))
+        ));
+        assert!(matches!(
+            change_password(&config, &initial_pass, &empty_pass),
+            Err(VaultError::WeakPassphrase(_))
+        ));
     }
 }

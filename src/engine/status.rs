@@ -133,14 +133,13 @@ fn plan_group(
     let group_repo_dir = engine.repo_dir.join(group_name);
     let mut candidates = BTreeSet::new();
     collect_repo_and_db_candidates(engine, group_name, &group_repo_dir, &mut candidates)?;
-    collect_os_candidates(
-        engine,
+    collect_os_candidates(engine, &target_base_path, home_dir, &rules, &mut candidates)?;
+    collect_single_file_rule_candidates(
         &target_base_path,
-        home_dir,
+        &group_repo_dir,
         &rules,
         &mut candidates,
-    )?;
-    collect_single_file_rule_candidates(&target_base_path, &group_repo_dir, &rules, &mut candidates);
+    );
 
     for rel_path in candidates {
         if is_reserved_dotler_or_git(&rel_path) {
@@ -150,14 +149,20 @@ fn plan_group(
         if target_os_path.starts_with(&engine.repo_dir) {
             continue;
         }
-    if let Some(entry) = build_file_plan(
-        engine, group_name, &group_repo_dir, home_dir, &rules, rel_path, target_os_path,
-    )? {
-        plans.push(entry);
+        if let Some(entry) = build_file_plan(
+            engine,
+            group_name,
+            &group_repo_dir,
+            home_dir,
+            &rules,
+            rel_path,
+            target_os_path,
+        )? {
+            plans.push(entry);
+        }
     }
-}
 
-Ok(())
+    Ok(())
 }
 
 fn collect_repo_and_db_candidates(
@@ -168,15 +173,24 @@ fn collect_repo_and_db_candidates(
 ) -> Result<(), EngineError> {
     validate_dir_no_symlinks(group_repo_dir)?;
     if group_repo_dir.is_dir() {
-        for entry in WalkDir::new(group_repo_dir).into_iter().filter_map(|e| e.ok()) {
+        for entry in WalkDir::new(group_repo_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
             if !entry.file_type().is_file()
-                || entry.file_name().to_string_lossy().starts_with(TMP_FILE_PREFIX)
+                || entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(TMP_FILE_PREFIX)
             {
                 continue;
             }
             if let Ok(rel) = entry.path().strip_prefix(group_repo_dir) {
                 let rel_str = rel.to_string_lossy().to_string();
-                let clean = rel_str.strip_suffix(".enc").map(str::to_string).unwrap_or(rel_str);
+                let clean = rel_str
+                    .strip_suffix(".enc")
+                    .map(str::to_string)
+                    .unwrap_or(rel_str);
                 candidates.insert(clean);
             }
         }
@@ -230,7 +244,10 @@ fn collect_os_candidates(
     {
         let ft = entry.file_type();
         if !(ft.is_file() || (ft.is_symlink() && !entry.path().is_dir()))
-            || entry.file_name().to_string_lossy().starts_with(TMP_FILE_PREFIX)
+            || entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(TMP_FILE_PREFIX)
         {
             continue;
         }
@@ -259,14 +276,20 @@ fn collect_single_file_rule_candidates(
             continue;
         }
         let trimmed = rule.pattern.trim_start_matches("./").trim_end_matches('/');
-        if trimmed.is_empty() || trimmed.contains('*') || trimmed.contains('?') || trimmed.contains('[') {
+        if trimmed.is_empty()
+            || trimmed.contains('*')
+            || trimmed.contains('?')
+            || trimmed.contains('[')
+        {
             continue;
         }
         let dir_prefix = format!("{trimmed}/");
         if target_base_path.join(trimmed).is_dir()
             || group_repo_dir.join(trimmed).is_dir()
             || candidates.iter().any(|c| c.starts_with(&dir_prefix))
-            || rules.iter().any(|r| r.pattern.trim_start_matches("./").starts_with(&dir_prefix))
+            || rules
+                .iter()
+                .any(|r| r.pattern.trim_start_matches("./").starts_with(&dir_prefix))
         {
             continue;
         }
@@ -284,7 +307,9 @@ fn build_file_plan(
     target_os_path: PathBuf,
 ) -> Result<Option<FileActionPlan>, EngineError> {
     let mode = evaluate_selection(rules, &rel_path);
-    let db_record = engine.state_db.get_synced_file(&target_os_path.to_string_lossy())?;
+    let db_record = engine
+        .state_db
+        .get_synced_file(&target_os_path.to_string_lossy())?;
     let db_hash = db_record.as_ref().map(|r| r.file_hash.clone());
 
     if mode.is_none() || mode == Some(SelectionMode::Exclude) {
@@ -313,13 +338,25 @@ fn build_file_plan(
     if is_template && let Some(ref bytes) = os_bytes {
         unrender_home_template(bytes, home_dir, &rel_path)?;
     }
-    let os_hash = os_bytes.as_ref().map(|b| blake3::hash(b).to_hex().to_string());
+    let os_hash = os_bytes
+        .as_ref()
+        .map(|b| blake3::hash(b).to_hex().to_string());
 
     let (repo_hash, encryption_mismatch) = compute_repo_hash_and_mismatch(
-        engine, home_dir, &rel_path, is_encrypted, is_template, &plain_repo_path, &enc_repo_path,
+        engine,
+        home_dir,
+        &rel_path,
+        is_encrypted,
+        is_template,
+        &plain_repo_path,
+        &enc_repo_path,
     )?;
 
-    let chosen_repo_path = if is_encrypted { enc_repo_path } else { plain_repo_path };
+    let chosen_repo_path = if is_encrypted {
+        enc_repo_path
+    } else {
+        plain_repo_path
+    };
     let status = classify_sync_status(&os_hash, &repo_hash, &db_hash, encryption_mismatch);
 
     Ok(Some(FileActionPlan {
@@ -357,7 +394,15 @@ fn compute_repo_hash_and_mismatch(
             && let Some(key) = engine.vault_key
             && let Ok(plain) = key.decrypt_file(&enc_file)
         {
-            return Ok((Some(hash_maybe_template(plain.expose_secret(), is_template, home_dir, rel_path)?), false));
+            return Ok((
+                Some(hash_maybe_template(
+                    plain.expose_secret(),
+                    is_template,
+                    home_dir,
+                    rel_path,
+                )?),
+                false,
+            ));
         }
         return Ok((None, false));
     }
@@ -365,8 +410,18 @@ fn compute_repo_hash_and_mismatch(
     if enc_repo_path.is_file() && !plain_repo_path.is_file() {
         return Ok((None, true));
     }
-    if plain_repo_path.is_file() && let Ok(bytes) = fs::read(plain_repo_path) {
-        return Ok((Some(hash_maybe_template(&bytes, is_template, home_dir, rel_path)?), false));
+    if plain_repo_path.is_file()
+        && let Ok(bytes) = fs::read(plain_repo_path)
+    {
+        return Ok((
+            Some(hash_maybe_template(
+                &bytes,
+                is_template,
+                home_dir,
+                rel_path,
+            )?),
+            false,
+        ));
     }
     Ok((None, false))
 }
@@ -377,7 +432,11 @@ fn hash_maybe_template(
     home_dir: &Path,
     rel_path: &str,
 ) -> Result<String, EngineError> {
-    let rendered = if is_template { render_home_template(bytes, home_dir, rel_path)? } else { bytes.to_vec() };
+    let rendered = if is_template {
+        render_home_template(bytes, home_dir, rel_path)?
+    } else {
+        bytes.to_vec()
+    };
     Ok(blake3::hash(&rendered).to_hex().to_string())
 }
 
@@ -499,7 +558,10 @@ mod tests {
         let toml_exclude = "[nvim]\nos-nux = \"~/.config/nvim\"\nos-mac = \"~/.config/nvim\"\nfiles = \"\"\"\n*\n!cache\n!tmp_dir/\n\"\"\"\n";
         let plans1 = env.run_plan(toml_exclude);
         let rel1: Vec<&str> = plans1.iter().map(|p| p.relative_path.as_str()).collect();
-        assert_eq!(rel1, vec!["init.lua", "lua/core.lua", "lua/plugins/lsp.lua"]);
+        assert_eq!(
+            rel1,
+            vec!["init.lua", "lua/core.lua", "lua/plugins/lsp.lua"]
+        );
 
         let toml_include_dir = "[nvim]\nos-nux = \"~/.config/nvim\"\nos-mac = \"~/.config/nvim\"\nfiles = \"\"\"\nlua\n!lua/plugins\n\"\"\"\n";
         let plans2 = env.run_plan(toml_include_dir);

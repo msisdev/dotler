@@ -133,8 +133,13 @@ pub fn clone_repo_with_observer(
         }
     }
 
-    let (preview_entries, clone_files) =
-        build_clone_preview(url, manifest_dir, target_dir, &selected_pairs, &selected_groups)?;
+    let (preview_entries, clone_files) = build_clone_preview(
+        url,
+        manifest_dir,
+        target_dir,
+        &selected_pairs,
+        &selected_groups,
+    )?;
 
     let approved = observer.confirm_plan(&preview_entries, dry_run)?;
     if dry_run {
@@ -265,7 +270,12 @@ fn build_clone_preview(
                     PlanDirection::PlainToRepo
                 },
             });
-            clone_files.push((effective_name.clone(), target_dir.join(effective_name), rel, size));
+            clone_files.push((
+                effective_name.clone(),
+                target_dir.join(effective_name),
+                rel,
+                size,
+            ));
         }
     }
 
@@ -282,7 +292,12 @@ fn build_clone_preview(
             repo_action: PlanActionKind::Create,
             direction: PlanDirection::PlainToRepo,
         });
-        clone_files.push((fallback_group, target_dir.to_path_buf(), "dotler.toml".to_string(), 0));
+        clone_files.push((
+            fallback_group,
+            target_dir.to_path_buf(),
+            "dotler.toml".to_string(),
+            0,
+        ));
     }
 
     Ok((preview_entries, clone_files))

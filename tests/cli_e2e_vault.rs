@@ -435,4 +435,3 @@ fn test_e2e_vault_hint_and_use_keyring_optout() {
     let final_local_cfg = fs::read_to_string(&config_toml_path).unwrap();
     assert!(final_local_cfg.contains("use_keyring = false"));
 }
-

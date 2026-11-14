@@ -264,19 +264,28 @@ mod tests {
     #[test]
     fn test_passphrase_supply_tier2_env() {
         let _guard = MockKeyringGuard::new();
-        unsafe { std::env::set_var(PASSPHRASE_ENV_VAR, "env-variable-pw\n"); }
+        unsafe {
+            std::env::set_var(PASSPHRASE_ENV_VAR, "env-variable-pw\n");
+        }
         let resolved = OsKeyring::resolve(false, None).unwrap();
         assert_eq!(resolved.source, PassphraseSource::EnvVar);
         assert_eq!(resolved.secret.expose_secret(), "env-variable-pw");
-        unsafe { std::env::remove_var(PASSPHRASE_ENV_VAR); }
+        unsafe {
+            std::env::remove_var(PASSPHRASE_ENV_VAR);
+        }
     }
 
     #[test]
     fn test_passphrase_supply_tier3_non_interactive_blocked() {
         let _guard = MockKeyringGuard::new();
-        unsafe { std::env::remove_var(PASSPHRASE_ENV_VAR); }
+        unsafe {
+            std::env::remove_var(PASSPHRASE_ENV_VAR);
+        }
         let result = OsKeyring::resolve(false, None);
-        assert!(matches!(result, Err(KeyringError::PassphraseRequiredInNonInteractiveMode)));
+        assert!(matches!(
+            result,
+            Err(KeyringError::PassphraseRequiredInNonInteractiveMode)
+        ));
         if let Err(e) = result {
             assert_eq!(e.exit_code(), 4);
         }
@@ -290,7 +299,10 @@ mod tests {
         let mut buf = String::new();
         for ch in ['s', 'e', 'c', 'x'] {
             assert_eq!(
-                handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+                handle_passphrase_key(
+                    &mut buf,
+                    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)
+                ),
                 PromptAction::Continue
             );
         }
@@ -307,14 +319,26 @@ mod tests {
             PromptAction::Continue
         );
         assert_eq!(
-            handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            handle_passphrase_key(
+                &mut buf,
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)
+            ),
             PromptAction::Continue
         );
         for ch in ['r', 'e', 't', '한', '🔒'] {
-            handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+            handle_passphrase_key(
+                &mut buf,
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+            );
         }
-        handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        handle_passphrase_key(
+            &mut buf,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        );
+        handle_passphrase_key(
+            &mut buf,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        );
         assert_eq!(
             handle_passphrase_key(&mut buf, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             PromptAction::Submit(true)
@@ -328,11 +352,20 @@ mod tests {
         for cancel_event in [
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+            KeyEvent::new(
+                KeyCode::Char('C'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
-            KeyEvent::new(KeyCode::Char('D'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+            KeyEvent::new(
+                KeyCode::Char('D'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
         ] {
-            assert_eq!(handle_passphrase_key(&mut buf, cancel_event), PromptAction::Cancel);
+            assert_eq!(
+                handle_passphrase_key(&mut buf, cancel_event),
+                PromptAction::Cancel
+            );
         }
     }
 }

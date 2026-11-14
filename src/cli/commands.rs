@@ -52,7 +52,9 @@ pub fn dispatch<W1: Write, W2: Write>(
         Command::Import(args) => handle_import(args, cli, is_interactive, stdout, lock_guard),
         Command::Export(args) => handle_export(args, cli, is_interactive, stdout, lock_guard),
         Command::Tidy(args) => handle_tidy(args, cli, is_interactive, stdout, lock_guard),
-        Command::Vault { command } => handle_vault(command, cli, is_interactive, stdout, lock_guard),
+        Command::Vault { command } => {
+            handle_vault(command, cli, is_interactive, stdout, lock_guard)
+        }
         Command::Key { command } => handle_key(command, cli, is_interactive, stdout, lock_guard),
         Command::Ai(_) => handle_ai(cli, stdout, lock_guard),
         Command::Update(args) => handle_update(args, cli, is_interactive, stdout, lock_guard),
@@ -94,8 +96,11 @@ fn handle_git<W: Write>(
         }
         GitCommand::Clone(args) => {
             let parsed_url = crate::engine::remote::parse_url(&args.url)?;
-            let selectors: Vec<GroupSelector> =
-                args.groups.iter().map(|s| GroupSelector::parse(s)).collect();
+            let selectors: Vec<GroupSelector> = args
+                .groups
+                .iter()
+                .map(|s| GroupSelector::parse(s))
+                .collect();
             let repo_name = parsed_url
                 .clone_url
                 .trim_end_matches('/')
@@ -282,7 +287,12 @@ fn handle_ai<W: Write>(
         local_cfg.use_keyring && OsKeyring::get().map(|opt| opt.is_some()).unwrap_or(false);
 
     let briefing_markdown = render_briefing(local_cfg, &os_info, keyring_ready);
-    Ok(render_success_to(stdout, "ai", &briefing_markdown, cli.json))
+    Ok(render_success_to(
+        stdout,
+        "ai",
+        &briefing_markdown,
+        cli.json,
+    ))
 }
 
 fn handle_update<W: Write>(

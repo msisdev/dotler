@@ -132,13 +132,21 @@ pub(crate) fn handle_vault<W: Write>(
             let mut repo_cfg_res = get_repo_config(manifest_path);
             let mut repo_cfg = repo_cfg_res.get()?.clone();
 
-            let vault_cfg = repo_cfg.vault.as_ref().ok_or_else(|| EngineError::VaultLocked {
-                reason: "Vault is not configured".to_string(),
-            })?;
+            let vault_cfg = repo_cfg
+                .vault
+                .as_ref()
+                .ok_or_else(|| EngineError::VaultLocked {
+                    reason: "Vault is not configured".to_string(),
+                })?;
             let mnemonic_phrase = if let Some(ref m) = args.mnemonic {
                 SecretString::new(m.clone())
             } else {
-                read_new_passphrase(false, false, is_interactive, "Enter 12-word recovery mnemonic: ")?
+                read_new_passphrase(
+                    false,
+                    false,
+                    is_interactive,
+                    "Enter 12-word recovery mnemonic: ",
+                )?
             };
             let new_pass = read_new_passphrase(
                 args.password_stdin,
@@ -147,7 +155,8 @@ pub(crate) fn handle_vault<W: Write>(
                 "Enter new vault passphrase: ",
             )?;
 
-            let (mut new_cfg, new_mnemonic) = recover_vault(vault_cfg, &mnemonic_phrase, &new_pass)?;
+            let (mut new_cfg, new_mnemonic) =
+                recover_vault(vault_cfg, &mnemonic_phrase, &new_pass)?;
             if let Some(ref h) = args.hint {
                 let trimmed = h.trim();
                 new_cfg.vault_hint = (!trimmed.is_empty()).then(|| trimmed.to_string());
@@ -198,43 +207,49 @@ fn handle_vault_init<W: Write>(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
-    let (vault_cfg, mnemonic_opt, pass, should_update_keyring) =
-        if let Some(raw_payload) = fetch_external_vault_payload(local_cfg, args)? {
-            let ext_vault = VaultConfig::parse_external_payload(&raw_payload)?;
-            let pw_slot = VaultSlot::from_base64(&ext_vault.password_slot)?;
-            let _rec_slot = VaultSlot::from_base64(&ext_vault.recovery_slot)?;
+    let (vault_cfg, mnemonic_opt, pass, should_update_keyring) = if let Some(raw_payload) =
+        fetch_external_vault_payload(local_cfg, args)?
+    {
+        let ext_vault = VaultConfig::parse_external_payload(&raw_payload)?;
+        let pw_slot = VaultSlot::from_base64(&ext_vault.password_slot)?;
+        let _rec_slot = VaultSlot::from_base64(&ext_vault.recovery_slot)?;
 
-            let (pass, should_update_keyring) = resolve_vault_init_passphrase(
-                stdout,
-                local_cfg.use_keyring,
-                args.password_stdin,
-                is_interactive,
-                cli.json,
-                true,
-            )?;
+        let (pass, should_update_keyring) = resolve_vault_init_passphrase(
+            stdout,
+            local_cfg.use_keyring,
+            args.password_stdin,
+            is_interactive,
+            cli.json,
+            true,
+        )?;
 
-            let expected_vid = (!ext_vault.vault_id.is_empty()).then_some(ext_vault.vault_id.as_str());
-            let vault_key = pw_slot.unwrap(&pass, expected_vid)?;
-            let cfg = VaultConfig {
-                vault_id: vault_key.vault_id(),
-                password_slot: ext_vault.password_slot,
-                recovery_slot: ext_vault.recovery_slot,
-                vault_hint: explicit_hint.or(ext_vault.vault_hint),
-            };
-            (cfg, None, pass, should_update_keyring)
-        } else {
-            let (pass, should_update_keyring) = resolve_vault_init_passphrase(
-                stdout,
-                local_cfg.use_keyring,
-                args.password_stdin,
-                is_interactive,
-                cli.json,
-                false,
-            )?;
-            let (mut cfg, _vault_key, mnemonic) = init_vault(&pass)?;
-            cfg.vault_hint = explicit_hint;
-            (cfg, Some(mnemonic.phrase().to_string()), pass, should_update_keyring)
+        let expected_vid = (!ext_vault.vault_id.is_empty()).then_some(ext_vault.vault_id.as_str());
+        let vault_key = pw_slot.unwrap(&pass, expected_vid)?;
+        let cfg = VaultConfig {
+            vault_id: vault_key.vault_id(),
+            password_slot: ext_vault.password_slot,
+            recovery_slot: ext_vault.recovery_slot,
+            vault_hint: explicit_hint.or(ext_vault.vault_hint),
         };
+        (cfg, None, pass, should_update_keyring)
+    } else {
+        let (pass, should_update_keyring) = resolve_vault_init_passphrase(
+            stdout,
+            local_cfg.use_keyring,
+            args.password_stdin,
+            is_interactive,
+            cli.json,
+            false,
+        )?;
+        let (mut cfg, _vault_key, mnemonic) = init_vault(&pass)?;
+        cfg.vault_hint = explicit_hint;
+        (
+            cfg,
+            Some(mnemonic.phrase().to_string()),
+            pass,
+            should_update_keyring,
+        )
+    };
 
     let vault_id = vault_cfg.vault_id.clone();
     let vault_hint = vault_cfg.vault_hint.clone();
@@ -327,19 +342,31 @@ mod tests {
             .expect("interactive unlock must succeed")
             .expect("vault key must be returned");
         assert_eq!(unlocked.vault_id(), expected_key.vault_id());
-        assert_eq!(OsKeyring::get().unwrap().unwrap().expose_secret(), "interactive-day0-secret");
+        assert_eq!(
+            OsKeyring::get().unwrap().unwrap().expose_secret(),
+            "interactive-day0-secret"
+        );
 
         OsKeyring::push_mock_prompt_reply("rotated-new-secret-999");
-        let targets = vec![("primary".to_string(), PathBuf::from("/tmp/dummy"), vault_cfg.clone())];
+        let targets = vec![(
+            "primary".to_string(),
+            PathBuf::from("/tmp/dummy"),
+            vault_cfg.clone(),
+        )];
         let resolved_old = resolve_old_passphrase_for_vaults(&targets, true, true).unwrap();
         assert_eq!(resolved_old.expose_secret(), "interactive-day0-secret");
 
-        let resolved_new = read_new_passphrase(false, false, true, "Enter new vault passphrase: ").unwrap();
+        let resolved_new =
+            read_new_passphrase(false, false, true, "Enter new vault passphrase: ").unwrap();
         assert_eq!(resolved_new.expose_secret(), "rotated-new-secret-999");
 
         let rotated_cfg = change_password(&vault_cfg, &resolved_old, &resolved_new).unwrap();
         let rotated_slot = VaultSlot::from_base64(&rotated_cfg.password_slot).unwrap();
-        assert!(rotated_slot.unwrap(&resolved_new, Some(&rotated_cfg.vault_id)).is_ok());
+        assert!(
+            rotated_slot
+                .unwrap(&resolved_new, Some(&rotated_cfg.vault_id))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -378,7 +405,11 @@ mod tests {
         write_vault_manifest(&repo_a, &vcfg_a);
         write_vault_manifest(&repo_b, &vcfg_b);
         write_vault_manifest(&repo_other, &vcfg_other);
-        write_file_safe(&repo_plain.join("dotler.toml"), b"[shell]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nfiles = \"*\"\n").unwrap();
+        write_file_safe(
+            &repo_plain.join("dotler.toml"),
+            b"[shell]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nfiles = \"*\"\n",
+        )
+        .unwrap();
 
         let mut local_cfg = LocalConfig::default();
         for (name, dir) in [
@@ -388,7 +419,9 @@ mod tests {
             ("repo_plain", &repo_plain),
             ("repo_missing", &repo_missing),
         ] {
-            local_cfg.repos.insert(name.to_string(), dir.to_string_lossy().to_string());
+            local_cfg
+                .repos
+                .insert(name.to_string(), dir.to_string_lossy().to_string());
         }
 
         OsKeyring::push_mock_prompt_reply("wrong-old-pass-000");
@@ -398,10 +431,17 @@ mod tests {
 
         OsKeyring::set(&old_pass).unwrap();
         OsKeyring::push_mock_prompt_reply("shared-new-pass-999");
-        let report = rotate_vault_passphrases(&local_cfg, None, false, Some("updated-hint"), true).unwrap();
+        let report =
+            rotate_vault_passphrases(&local_cfg, None, false, Some("updated-hint"), true).unwrap();
         assert_eq!(report.status, "password_rotated");
-        assert_eq!(report.rotated_repos, vec!["repo_a".to_string(), "repo_b".to_string()]);
-        assert_eq!(report.skipped_repos, vec!["repo_missing", "repo_other", "repo_plain"]);
+        assert_eq!(
+            report.rotated_repos,
+            vec!["repo_a".to_string(), "repo_b".to_string()]
+        );
+        assert_eq!(
+            report.skipped_repos,
+            vec!["repo_missing", "repo_other", "repo_plain"]
+        );
         assert!(report.keyring_updated);
 
         let keyring_secret = OsKeyring::get().unwrap().unwrap();
@@ -412,15 +452,27 @@ mod tests {
         ] {
             let disk_enc = fs::read(repo_dir.join("shell/token.enc")).unwrap();
             assert_eq!(&disk_enc, orig_enc);
-            let vcfg = RepoConfig::load(&repo_dir.join("dotler.toml")).unwrap().vault.unwrap();
+            let vcfg = RepoConfig::load(&repo_dir.join("dotler.toml"))
+                .unwrap()
+                .vault
+                .unwrap();
             assert_eq!(vcfg.vault_hint.as_deref(), Some("updated-hint"));
             let slot = VaultSlot::from_base64(&vcfg.password_slot).unwrap();
             assert!(slot.unwrap(&old_pass, Some(&vcfg.vault_id)).is_err());
             let unlocked = slot.unwrap(&keyring_secret, Some(&vcfg.vault_id)).unwrap();
-            let dec = unlocked.decrypt_file(&crate::crypto::vault::EncryptedFile::from_bytes(&disk_enc).unwrap()).unwrap();
+            let dec = unlocked
+                .decrypt_file(&crate::crypto::vault::EncryptedFile::from_bytes(&disk_enc).unwrap())
+                .unwrap();
             assert_eq!(dec.expose_secret().as_slice(), expected);
         }
-        assert_eq!(RepoConfig::load(&repo_other.join("dotler.toml")).unwrap().vault.unwrap().password_slot, vcfg_other.password_slot);
+        assert_eq!(
+            RepoConfig::load(&repo_other.join("dotler.toml"))
+                .unwrap()
+                .vault
+                .unwrap()
+                .password_slot,
+            vcfg_other.password_slot
+        );
     }
 
     #[test]
@@ -429,14 +481,19 @@ mod tests {
         let pass = SecretString::new("keyring-disabled-secret-123".to_string());
         let (mut vault_cfg, expected_key, _) = init_vault(&pass).unwrap();
         vault_cfg.vault_hint = Some("my hint".to_string());
-        let repo_cfg = RepoConfig { vault: Some(vault_cfg), ..Default::default() };
+        let repo_cfg = RepoConfig {
+            vault: Some(vault_cfg),
+            ..Default::default()
+        };
 
         OsKeyring::set(&pass).unwrap();
         assert!(unlock_vault_if_needed(&repo_cfg, false, false, true).is_err());
 
         OsKeyring::clear_mock();
         OsKeyring::push_mock_prompt_reply("keyring-disabled-secret-123");
-        let unlocked = unlock_vault_if_needed(&repo_cfg, false, true, true).unwrap().unwrap();
+        let unlocked = unlock_vault_if_needed(&repo_cfg, false, true, true)
+            .unwrap()
+            .unwrap();
         assert_eq!(unlocked.vault_id(), expected_key.vault_id());
         assert!(OsKeyring::get().unwrap().is_none());
     }
@@ -448,14 +505,16 @@ mod tests {
 
         ConfirmPrompt::push_mock_input("yes");
         let (resolved_yes, update_yes) =
-            resolve_vault_init_passphrase(&mut Vec::new(), true, false, true, false, false).unwrap();
+            resolve_vault_init_passphrase(&mut Vec::new(), true, false, true, false, false)
+                .unwrap();
         assert_eq!(resolved_yes.expose_secret(), "existing-keyring-pass-111");
         assert!(!update_yes);
 
         ConfirmPrompt::push_mock_input("no");
         OsKeyring::push_mock_prompt_reply("brand-new-pass-222");
         let (resolved_no, update_no) =
-            resolve_vault_init_passphrase(&mut Vec::new(), true, false, true, false, false).unwrap();
+            resolve_vault_init_passphrase(&mut Vec::new(), true, false, true, false, false)
+                .unwrap();
         assert_eq!(resolved_no.expose_secret(), "brand-new-pass-222");
         assert!(update_no);
     }

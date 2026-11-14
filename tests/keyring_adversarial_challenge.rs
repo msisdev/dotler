@@ -6,9 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use dotler::crypto::{ExposeSecret, SecretString};
-use dotler::crypto::{
-    KeyringError, OsKeyring, PASSPHRASE_ENV_VAR, PassphraseSource,
-};
+use dotler::crypto::{KeyringError, OsKeyring, PASSPHRASE_ENV_VAR, PassphraseSource};
 
 static GLOBAL_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
@@ -437,7 +435,6 @@ fn test_empirical_subprocess_non_interactive_closed_stdin_exit_code_4() {
     assert_eq!(output.status.code(), Some(4));
 }
 
-
 // Helper for malformed dbus test
 #[test]
 fn helper_headless_malformed_dbus_process() {
@@ -476,7 +473,6 @@ fn helper_headless_malformed_dbus_process() {
     }
 }
 
-
 #[test]
 fn test_empirical_headless_malformed_dbus_socket_address() {
     let binary = current_test_binary();
@@ -511,4 +507,3 @@ fn test_empirical_headless_malformed_dbus_socket_address() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
-

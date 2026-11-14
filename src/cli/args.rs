@@ -12,19 +12,43 @@ use clap::{Args, Parser, Subcommand};
     long_about = None
 )]
 pub struct Cli {
-    #[arg(short = 'j', long = "json", global = true, help = "Output structured JSON")]
+    #[arg(
+        short = 'j',
+        long = "json",
+        global = true,
+        help = "Output structured JSON"
+    )]
     pub json: bool,
 
-    #[arg(short = 'd', long = "device", global = true, help = "Target device profile override")]
+    #[arg(
+        short = 'd',
+        long = "device",
+        global = true,
+        help = "Target device profile override"
+    )]
     pub device: Option<String>,
 
-    #[arg(short = 'r', long = "repo", global = true, help = "Repository label override")]
+    #[arg(
+        short = 'r',
+        long = "repo",
+        global = true,
+        help = "Repository label override"
+    )]
     pub repo: Option<String>,
 
-    #[arg(long = "dry-run", global = true, help = "Simulate operations without writing changes")]
+    #[arg(
+        long = "dry-run",
+        global = true,
+        help = "Simulate operations without writing changes"
+    )]
     pub dry_run: bool,
 
-    #[arg(short = 'v', long = "verbose", global = true, help = "Enable verbose output")]
+    #[arg(
+        short = 'v',
+        long = "verbose",
+        global = true,
+        help = "Enable verbose output"
+    )]
     pub verbose: bool,
 
     #[command(subcommand)]
@@ -87,7 +111,10 @@ pub struct InitArgs {
     #[arg(short, long, help = "Primary device name to register")]
     pub device: Option<String>,
 
-    #[arg(long = "repo-path", help = "Target directory path for repository initialization")]
+    #[arg(
+        long = "repo-path",
+        help = "Target directory path for repository initialization"
+    )]
     pub repo_path: Option<PathBuf>,
 }
 
@@ -147,7 +174,11 @@ pub struct GitInstallArgs {
     #[arg(required = true, help = "Groups to install")]
     pub groups: Vec<String>,
 
-    #[arg(short, long, help = "Custom target path override (e.g. group=~/custom/path)")]
+    #[arg(
+        short,
+        long,
+        help = "Custom target path override (e.g. group=~/custom/path)"
+    )]
     pub path: Vec<String>,
 
     #[arg(short, long, help = "Remote branch name")]
@@ -162,7 +193,10 @@ pub struct GitInstallArgs {
     #[arg(short = 'a', long = "all", help = "Show all files in preview")]
     pub all: bool,
 
-    #[arg(long = "dry-run", help = "Simulate installation without writing changes")]
+    #[arg(
+        long = "dry-run",
+        help = "Simulate installation without writing changes"
+    )]
     pub dry_run: bool,
 }
 
@@ -328,7 +362,10 @@ pub struct VaultInitArgs {
 
 #[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
 pub struct VaultPasswdArgs {
-    #[arg(long = "password-stdin", help = "Read new passphrase from standard input")]
+    #[arg(
+        long = "password-stdin",
+        help = "Read new passphrase from standard input"
+    )]
     pub password_stdin: bool,
 
     #[arg(long, help = "Optional plaintext password hint stored in dotler.toml")]
@@ -340,7 +377,10 @@ pub struct VaultRecoverArgs {
     #[arg(long, help = "12-word recovery mnemonic phrase")]
     pub mnemonic: Option<String>,
 
-    #[arg(long = "password-stdin", help = "Read new passphrase from standard input")]
+    #[arg(
+        long = "password-stdin",
+        help = "Read new passphrase from standard input"
+    )]
     pub password_stdin: bool,
 
     #[arg(long, help = "Optional plaintext password hint stored in dotler.toml")]
@@ -412,19 +452,41 @@ mod tests {
         assert!(matches!(imp.command, Command::Import(a) if a.yes && a.all && a.dry_run));
 
         let exp = Cli::try_parse_from(["dotler", "export", "-y", "-a", "--dry-run", "-f"]).unwrap();
-        assert!(matches!(exp.command, Command::Export(a) if a.yes && a.all && a.dry_run && a.force));
+        assert!(
+            matches!(exp.command, Command::Export(a) if a.yes && a.all && a.dry_run && a.force)
+        );
 
-        let tidy = Cli::try_parse_from(["dotler", "tidy", "-y", "-a", "--dry-run", "--purge"]).unwrap();
+        let tidy =
+            Cli::try_parse_from(["dotler", "tidy", "-y", "-a", "--dry-run", "--purge"]).unwrap();
         assert!(matches!(tidy.command, Command::Tidy(a) if a.yes && a.all && a.dry_run && a.purge));
 
-        let clone = Cli::try_parse_from(["dotler", "git", "clone", "gh:u/r", "-y", "-a", "--dry-run"]).unwrap();
-        assert!(matches!(clone.command, Command::Git { command: GitCommand::Clone(a) } if a.yes && a.all && a.dry_run));
+        let clone =
+            Cli::try_parse_from(["dotler", "git", "clone", "gh:u/r", "-y", "-a", "--dry-run"])
+                .unwrap();
+        assert!(
+            matches!(clone.command, Command::Git { command: GitCommand::Clone(a) } if a.yes && a.all && a.dry_run)
+        );
 
-        let install = Cli::try_parse_from(["dotler", "git", "install", "gh:u/r", "nvim", "-y", "-a", "--dry-run"]).unwrap();
-        assert!(matches!(install.command, Command::Git { command: GitCommand::Install(a) } if a.yes && a.all && a.dry_run));
+        let install = Cli::try_parse_from([
+            "dotler",
+            "git",
+            "install",
+            "gh:u/r",
+            "nvim",
+            "-y",
+            "-a",
+            "--dry-run",
+        ])
+        .unwrap();
+        assert!(
+            matches!(install.command, Command::Git { command: GitCommand::Install(a) } if a.yes && a.all && a.dry_run)
+        );
 
-        let uninstall = Cli::try_parse_from(["dotler", "git", "uninstall", "-y", "-a", "--dry-run"]).unwrap();
-        assert!(matches!(uninstall.command, Command::Git { command: GitCommand::Uninstall(a) } if a.yes && a.all && a.dry_run));
+        let uninstall =
+            Cli::try_parse_from(["dotler", "git", "uninstall", "-y", "-a", "--dry-run"]).unwrap();
+        assert!(
+            matches!(uninstall.command, Command::Git { command: GitCommand::Uninstall(a) } if a.yes && a.all && a.dry_run)
+        );
     }
 
     #[test]
@@ -446,8 +508,16 @@ mod tests {
             assert!(Cli::try_parse_from(&argv).is_ok(), "failed: {argv:?}");
         }
 
-        let parsed = Cli::try_parse_from(["dotler", "update", "--check", "--version", "v0.3.0", "--force", "-y"])
-            .expect("dotler update flags must parse");
+        let parsed = Cli::try_parse_from([
+            "dotler",
+            "update",
+            "--check",
+            "--version",
+            "v0.3.0",
+            "--force",
+            "-y",
+        ])
+        .expect("dotler update flags must parse");
         match parsed.command {
             Command::Update(u) => {
                 assert!(u.check && u.force && u.yes);
@@ -459,17 +529,58 @@ mod tests {
 
     #[test]
     fn test_vault_init_external_flags_mutual_exclusion() {
-        let g = Cli::try_parse_from(["dotler", "vault", "init", "--git", "github:user/dots"]).unwrap();
-        assert!(matches!(g.command, Command::Vault { command: VaultCommand::Init(a) } if a.git.as_deref() == Some("github:user/dots")));
+        let g =
+            Cli::try_parse_from(["dotler", "vault", "init", "--git", "github:user/dots"]).unwrap();
+        assert!(
+            matches!(g.command, Command::Vault { command: VaultCommand::Init(a) } if a.git.as_deref() == Some("github:user/dots"))
+        );
 
-        let u = Cli::try_parse_from(["dotler", "vault", "init", "--url", "https://example.com/vault.json"]).unwrap();
-        assert!(matches!(u.command, Command::Vault { command: VaultCommand::Init(a) } if a.url.as_deref() == Some("https://example.com/vault.json")));
+        let u = Cli::try_parse_from([
+            "dotler",
+            "vault",
+            "init",
+            "--url",
+            "https://example.com/vault.json",
+        ])
+        .unwrap();
+        assert!(
+            matches!(u.command, Command::Vault { command: VaultCommand::Init(a) } if a.url.as_deref() == Some("https://example.com/vault.json"))
+        );
 
         let f = Cli::try_parse_from(["dotler", "vault", "init", "--from", "main"]).unwrap();
-        assert!(matches!(f.command, Command::Vault { command: VaultCommand::Init(a) } if a.from.as_deref() == Some("main")));
+        assert!(
+            matches!(f.command, Command::Vault { command: VaultCommand::Init(a) } if a.from.as_deref() == Some("main"))
+        );
 
-        assert!(Cli::try_parse_from(["dotler", "vault", "init", "--git", "gh:u/r", "--url", "https://example.com/v.toml"]).is_err());
-        assert!(Cli::try_parse_from(["dotler", "vault", "init", "--git", "gh:u/r", "--from", "main"]).is_err());
-        assert!(Cli::try_parse_from(["dotler", "vault", "init", "--url", "https://example.com/v.toml", "--from", "main"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "dotler",
+                "vault",
+                "init",
+                "--git",
+                "gh:u/r",
+                "--url",
+                "https://example.com/v.toml"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "dotler", "vault", "init", "--git", "gh:u/r", "--from", "main"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "dotler",
+                "vault",
+                "init",
+                "--url",
+                "https://example.com/v.toml",
+                "--from",
+                "main"
+            ])
+            .is_err()
+        );
     }
 }

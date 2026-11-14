@@ -454,7 +454,6 @@ mod tests {
         ));
     }
 
-
     #[test]
     fn test_path_security_checks_protects_internal_paths() {
         assert!(validate_path_security("~/.config/dotler").is_err());
@@ -467,7 +466,6 @@ mod tests {
         assert!(validate_path_security("~/.gitignore").is_ok());
         assert!(validate_path_security("~/.github").is_ok());
     }
-
 
     #[test]
     fn test_rule_pattern_security_checks() {
@@ -486,5 +484,4 @@ mod tests {
         assert!(validate_rule_pattern("custom.conf").is_ok());
         assert!(validate_rule_pattern("*.conf").is_ok());
     }
-
 }

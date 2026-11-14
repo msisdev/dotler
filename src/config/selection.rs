@@ -12,7 +12,10 @@ pub enum SelectionMode {
 
 impl SelectionMode {
     pub fn is_encrypted(self) -> bool {
-        matches!(self, Self::EncryptedInclude | Self::EncryptedTemplateInclude)
+        matches!(
+            self,
+            Self::EncryptedInclude | Self::EncryptedTemplateInclude
+        )
     }
 
     pub fn is_template(self) -> bool {
@@ -30,7 +33,6 @@ pub struct SelectionRule {
     pub mode: SelectionMode,
     pub line_no: usize,
 }
-
 
 pub fn parse_selection_rules(files_content: &str) -> Result<Vec<SelectionRule>, ConfigError> {
     let mut rules = Vec::new();
@@ -413,7 +415,6 @@ impl GlobPattern {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,16 +427,26 @@ mod tests {
             ("config.json", SelectionMode::PlaintextInclude, 3),
             ("id_ed25519", SelectionMode::EncryptedInclude, 5),
             (".gitconfig", SelectionMode::TemplateInclude, 7),
-            ("credentials.toml", SelectionMode::EncryptedTemplateInclude, 9),
+            (
+                "credentials.toml",
+                SelectionMode::EncryptedTemplateInclude,
+                9,
+            ),
             ("secrets.toml", SelectionMode::EncryptedTemplateInclude, 10),
             ("temp*", SelectionMode::Exclude, 12),
         ];
         assert_eq!(rules.len(), expected.len());
         for (rule, (pat, mode, line_no)) in rules.iter().zip(expected) {
-            assert_eq!(rule, &SelectionRule { pattern: pat.to_string(), mode, line_no });
+            assert_eq!(
+                rule,
+                &SelectionRule {
+                    pattern: pat.to_string(),
+                    mode,
+                    line_no
+                }
+            );
         }
     }
-
 
     #[test]
     fn test_selection_rules_invalid_attribute_error_with_line_number() {
@@ -470,7 +481,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_selection_rules_last_match_wins_precedence() {
         let content = r#"
@@ -493,7 +503,6 @@ mod tests {
         assert_eq!(mode_other, Some(SelectionMode::EncryptedInclude));
     }
 
-
     #[test]
     fn test_directory_prefix_matching_without_wildcard_suffix() {
         let content = "\n*\n!cache\n!logs/\nsecrets enc\nplugins/ enc\n!plugins/disabled\n";
@@ -502,12 +511,21 @@ mod tests {
             ("init.lua", Some(SelectionMode::PlaintextInclude)),
             ("cache/state.json", Some(SelectionMode::Exclude)),
             ("cache/sub/deep.bin", Some(SelectionMode::Exclude)),
-            ("cache_other/state.json", Some(SelectionMode::PlaintextInclude)),
+            (
+                "cache_other/state.json",
+                Some(SelectionMode::PlaintextInclude),
+            ),
             ("logs/app.log", Some(SelectionMode::Exclude)),
             ("logs/2026/11/debug.log", Some(SelectionMode::Exclude)),
             ("secrets/api_key.txt", Some(SelectionMode::EncryptedInclude)),
-            ("secrets/nested/token", Some(SelectionMode::EncryptedInclude)),
-            ("plugins/telescope/init.lua", Some(SelectionMode::EncryptedInclude)),
+            (
+                "secrets/nested/token",
+                Some(SelectionMode::EncryptedInclude),
+            ),
+            (
+                "plugins/telescope/init.lua",
+                Some(SelectionMode::EncryptedInclude),
+            ),
             ("plugins/disabled/init.lua", Some(SelectionMode::Exclude)),
         ] {
             assert_eq!(evaluate_selection(&rules, path), expected, "path: {path}");
@@ -521,10 +539,22 @@ mod tests {
         assert!(!GlobPattern::new("c?t").unwrap().matches("caat"));
         assert!(GlobPattern::new("k[!e]tteh").unwrap().matches("kitteh"));
         assert!(!GlobPattern::new("k[!e]tteh").unwrap().matches("ketteh"));
-        assert!(GlobPattern::new("file[0-9].conf").unwrap().matches("file7.conf"));
-        assert!(!GlobPattern::new("file[0-9].conf").unwrap().matches("filea.conf"));
+        assert!(
+            GlobPattern::new("file[0-9].conf")
+                .unwrap()
+                .matches("file7.conf")
+        );
+        assert!(
+            !GlobPattern::new("file[0-9].conf")
+                .unwrap()
+                .matches("filea.conf")
+        );
         assert!(GlobPattern::new("**/init.lua").unwrap().matches("init.lua"));
-        assert!(GlobPattern::new("**/init.lua").unwrap().matches("a/b/init.lua"));
+        assert!(
+            GlobPattern::new("**/init.lua")
+                .unwrap()
+                .matches("a/b/init.lua")
+        );
 
         assert!(GlobPattern::new("***").is_err());
         assert!(GlobPattern::new("a**b").is_err());

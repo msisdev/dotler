@@ -474,4 +474,3 @@ fn test_remote_git_multi_manifest_bfs_unicode_order_and_explicit_subpath() {
     assert_eq!(gh_sub.clone_url, "https://github.com/owner/repo.git");
     assert_eq!(gh_sub.subpath.as_deref(), Some("configs/linux"));
 }
-

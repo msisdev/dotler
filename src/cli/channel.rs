@@ -191,7 +191,10 @@ pub fn detect_install_method(exe_path: &Path, os_info: &OsInfo) -> InstallMethod
             || candidate.starts_with("/bin/")
             || candidate.starts_with("/sbin/")
         {
-            let distro = os_info.distro.strip_prefix("os-").unwrap_or(os_info.distro.as_str());
+            let distro = os_info
+                .distro
+                .strip_prefix("os-")
+                .unwrap_or(os_info.distro.as_str());
             return match distro {
                 "arch" => InstallMethod::Pacman,
                 "debian" | "ubuntu" => InstallMethod::Apt,
@@ -265,8 +268,17 @@ mod tests {
     #[test]
     fn test_detect_install_method_across_package_managers_and_homebrew_receipt() {
         let os = dummy_os("ubuntu");
-        assert_eq!(detect_install_method(Path::new("/opt/homebrew/Cellar/dotler/0.2.0/bin/dotler"), &os), InstallMethod::HomebrewTap);
-        assert_eq!(detect_install_method(Path::new("/home/linuxbrew/.linuxbrew/bin/dotler"), &os), InstallMethod::HomebrewTap);
+        assert_eq!(
+            detect_install_method(
+                Path::new("/opt/homebrew/Cellar/dotler/0.2.0/bin/dotler"),
+                &os
+            ),
+            InstallMethod::HomebrewTap
+        );
+        assert_eq!(
+            detect_install_method(Path::new("/home/linuxbrew/.linuxbrew/bin/dotler"), &os),
+            InstallMethod::HomebrewTap
+        );
 
         let tmp = tempfile::tempdir().unwrap();
         let keg_dir = tmp.path().join("opt/homebrew/Cellar/dotler/1.0.0");
@@ -274,40 +286,107 @@ mod tests {
         let brew_exe = keg_dir.join("bin/dotler");
         fs::write(&brew_exe, b"bin").unwrap();
 
-        fs::write(keg_dir.join("INSTALL_RECEIPT.json"), r#"{"source":{"tap":"msisdev/tap"}}"#).unwrap();
+        fs::write(
+            keg_dir.join("INSTALL_RECEIPT.json"),
+            r#"{"source":{"tap":"msisdev/tap"}}"#,
+        )
+        .unwrap();
         let method_tap = detect_install_method(&brew_exe, &os);
         assert_eq!(method_tap, InstallMethod::HomebrewTap);
-        assert_eq!(method_tap.upgrade_command_for(false), Some("brew upgrade msisdev/tap/dotler"));
+        assert_eq!(
+            method_tap.upgrade_command_for(false),
+            Some("brew upgrade msisdev/tap/dotler")
+        );
         assert_eq!(
             method_tap.upgrade_command_for(true),
-            Some("brew uninstall msisdev/tap/dotler && brew untap msisdev/tap && brew install dotler")
+            Some(
+                "brew uninstall msisdev/tap/dotler && brew untap msisdev/tap && brew install dotler"
+            )
         );
 
-        fs::write(keg_dir.join("INSTALL_RECEIPT.json"), r#"{"source":{"tap":"homebrew/core"}}"#).unwrap();
+        fs::write(
+            keg_dir.join("INSTALL_RECEIPT.json"),
+            r#"{"source":{"tap":"homebrew/core"}}"#,
+        )
+        .unwrap();
         let method_core = detect_install_method(&brew_exe, &os);
         assert_eq!(method_core, InstallMethod::HomebrewCore);
-        assert_eq!(method_core.upgrade_command_for(true), Some("brew upgrade dotler"));
+        assert_eq!(
+            method_core.upgrade_command_for(true),
+            Some("brew upgrade dotler")
+        );
 
-        assert_eq!(detect_install_method(Path::new("C:\\Users\\alice\\scoop\\apps\\dotler\\current\\dotler.exe"), &os), InstallMethod::Scoop);
-        assert_eq!(detect_install_method(Path::new("C:\\Users\\alice\\AppData\\Local\\Microsoft\\WinGet\\Packages\\msisdev.dotler\\dotler.exe"), &os), InstallMethod::Winget);
-        assert_eq!(detect_install_method(Path::new("/nix/store/abc123-dotler-0.2.0/bin/dotler"), &os), InstallMethod::Nix);
-        assert_eq!(detect_install_method(Path::new("/home/alice/.cargo/bin/dotler"), &os), InstallMethod::Cargo);
-        assert_eq!(detect_install_method(Path::new("/usr/bin/dotler"), &dummy_os("arch")), InstallMethod::Pacman);
-        assert_eq!(detect_install_method(Path::new("/usr/bin/dotler"), &dummy_os("ubuntu")), InstallMethod::Apt);
-        assert_eq!(detect_install_method(Path::new("/usr/bin/dotler"), &dummy_os("fedora")), InstallMethod::Dnf);
-        assert_eq!(detect_install_method(Path::new("/usr/bin/dotler"), &dummy_os("alpine")), InstallMethod::Apk);
-        assert_eq!(detect_install_method(Path::new("/home/alice/.local/bin/dotler"), &os), InstallMethod::Standalone);
+        assert_eq!(
+            detect_install_method(
+                Path::new("C:\\Users\\alice\\scoop\\apps\\dotler\\current\\dotler.exe"),
+                &os
+            ),
+            InstallMethod::Scoop
+        );
+        assert_eq!(
+            detect_install_method(
+                Path::new(
+                    "C:\\Users\\alice\\AppData\\Local\\Microsoft\\WinGet\\Packages\\msisdev.dotler\\dotler.exe"
+                ),
+                &os
+            ),
+            InstallMethod::Winget
+        );
+        assert_eq!(
+            detect_install_method(Path::new("/nix/store/abc123-dotler-0.2.0/bin/dotler"), &os),
+            InstallMethod::Nix
+        );
+        assert_eq!(
+            detect_install_method(Path::new("/home/alice/.cargo/bin/dotler"), &os),
+            InstallMethod::Cargo
+        );
+        assert_eq!(
+            detect_install_method(Path::new("/usr/bin/dotler"), &dummy_os("arch")),
+            InstallMethod::Pacman
+        );
+        assert_eq!(
+            detect_install_method(Path::new("/usr/bin/dotler"), &dummy_os("ubuntu")),
+            InstallMethod::Apt
+        );
+        assert_eq!(
+            detect_install_method(Path::new("/usr/bin/dotler"), &dummy_os("fedora")),
+            InstallMethod::Dnf
+        );
+        assert_eq!(
+            detect_install_method(Path::new("/usr/bin/dotler"), &dummy_os("alpine")),
+            InstallMethod::Apk
+        );
+        assert_eq!(
+            detect_install_method(Path::new("/home/alice/.local/bin/dotler"), &os),
+            InstallMethod::Standalone
+        );
     }
 
     #[test]
     fn test_detect_release_target_matrix() {
         let linux_musl = detect_release_target("linux", "x86_64", None).unwrap();
         assert_eq!(linux_musl.triple, "x86_64-unknown-linux-musl");
-        assert_eq!(linux_musl.archive_name, "dotler-x86_64-unknown-linux-musl.tar.gz");
-        assert_eq!(detect_release_target("linux", "aarch64", Some("gnu")).unwrap().triple, "aarch64-unknown-linux-gnu");
-        assert_eq!(detect_release_target("macos", "aarch64", None).unwrap().triple, "aarch64-apple-darwin");
+        assert_eq!(
+            linux_musl.archive_name,
+            "dotler-x86_64-unknown-linux-musl.tar.gz"
+        );
+        assert_eq!(
+            detect_release_target("linux", "aarch64", Some("gnu"))
+                .unwrap()
+                .triple,
+            "aarch64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            detect_release_target("macos", "aarch64", None)
+                .unwrap()
+                .triple,
+            "aarch64-apple-darwin"
+        );
         let win = detect_release_target("windows", "x86_64", None).unwrap();
-        assert_eq!((win.triple, win.archive_ext), ("x86_64-pc-windows-msvc", "zip"));
+        assert_eq!(
+            (win.triple, win.archive_ext),
+            ("x86_64-pc-windows-msvc", "zip")
+        );
         assert!(detect_release_target("linux", "x86_64", Some("invalid")).is_err());
         assert!(detect_release_target("freebsd", "x86_64", None).is_err());
     }

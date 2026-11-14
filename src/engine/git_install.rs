@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::config::local::{WalkDir, expand_tilde};
 use crate::config::repo::{
     OsInfo, SelectionMode, evaluate_selection, is_symlink, parse_selection_rules,
-    render_home_template, resolve_group_target_path, validate_os_dir_path,
-    validate_os_target_path, validate_path_security,
+    render_home_template, resolve_group_target_path, validate_os_dir_path, validate_os_target_path,
+    validate_path_security,
 };
 use crate::config::state::{
     BACKUPS_DIR_PATH, DotlerLockGuard, InstalledFileRecord, StateDb, write_file_safe,
@@ -494,7 +494,9 @@ fn create_backup_file(
     state: &StateDb,
 ) -> Result<String, EngineError> {
     let backup_root = if let Some(dotler_dir) = state.path().parent() {
-        dotler_dir.join(BACKUPS_DIR_NAME).join(timestamp.to_string())
+        dotler_dir
+            .join(BACKUPS_DIR_NAME)
+            .join(timestamp.to_string())
     } else {
         expand_tilde(BACKUPS_DIR_PATH).join(timestamp.to_string())
     };

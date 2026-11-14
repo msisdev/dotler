@@ -334,9 +334,14 @@ mod tests {
         let vault_key = VaultKey::generate().unwrap();
 
         let slot = VaultSlot::wrap(&passphrase, &vault_key).unwrap();
-        assert!(matches!(slot.unwrap(&wrong_passphrase, None), Err(VaultError::InvalidSecret)));
+        assert!(matches!(
+            slot.unwrap(&wrong_passphrase, None),
+            Err(VaultError::InvalidSecret)
+        ));
 
-        let err = slot.unwrap(&passphrase, Some("0123456789abcdef")).unwrap_err();
+        let err = slot
+            .unwrap(&passphrase, Some("0123456789abcdef"))
+            .unwrap_err();
         assert!(matches!(
             err,
             VaultError::VaultIdMismatch { expected, actual }
@@ -352,17 +357,28 @@ mod tests {
 
         let decoded_slot = VaultSlot::from_base64(&slot.to_base64()).unwrap();
         assert_eq!(slot, decoded_slot);
-        assert_eq!(decoded_slot.unwrap(&passphrase, None).unwrap().expose(), vault_key.expose());
+        assert_eq!(
+            decoded_slot.unwrap(&passphrase, None).unwrap().expose(),
+            vault_key.expose()
+        );
 
-        for bad in [&base64_encode(&[0u8; 87]), &base64_encode(&[0u8; 89]), "not-valid-base64!@#$"] {
-            assert!(matches!(VaultSlot::from_base64(bad), Err(VaultError::InvalidSlotFormat(_))));
+        for bad in [
+            &base64_encode(&[0u8; 87]),
+            &base64_encode(&[0u8; 89]),
+            "not-valid-base64!@#$",
+        ] {
+            assert!(matches!(
+                VaultSlot::from_base64(bad),
+                Err(VaultError::InvalidSlotFormat(_))
+            ));
         }
     }
 
     #[test]
     fn test_encrypted_file_roundtrip_and_zero_length() {
         let vault_key = VaultKey::generate().unwrap();
-        let plaintext = b"export SECRET_KEY=\"sk_live_1234567890\"\nexport DB_PASSWORD=\"supersecret\"";
+        let plaintext =
+            b"export SECRET_KEY=\"sk_live_1234567890\"\nexport DB_PASSWORD=\"supersecret\"";
 
         let enc = vault_key.encrypt_file(plaintext).unwrap();
         assert_eq!(enc.vault_id, vault_key.vault_id_bytes());
@@ -373,13 +389,22 @@ mod tests {
         assert_eq!(serialized.len(), 8 + 24 + plaintext.len() + 16);
         let deserialized = EncryptedFile::from_bytes(&serialized).unwrap();
         assert_eq!(enc, deserialized);
-        assert_eq!(vault_key.decrypt_file(&deserialized).unwrap().expose_secret().as_slice(), plaintext);
+        assert_eq!(
+            vault_key
+                .decrypt_file(&deserialized)
+                .unwrap()
+                .expose_secret()
+                .as_slice(),
+            plaintext
+        );
 
         let empty_enc = vault_key.encrypt_file(b"").unwrap();
         assert_eq!(empty_enc.ciphertext.len(), 16);
         let empty_bytes = empty_enc.to_bytes();
         assert_eq!(empty_bytes.len(), 48);
-        let empty_dec = vault_key.decrypt_file(&EncryptedFile::from_bytes(&empty_bytes).unwrap()).unwrap();
+        let empty_dec = vault_key
+            .decrypt_file(&EncryptedFile::from_bytes(&empty_bytes).unwrap())
+            .unwrap();
         assert_eq!(empty_dec.expose_secret().as_slice(), b"");
     }
 
@@ -389,22 +414,39 @@ mod tests {
         let vault_key2 = VaultKey::generate().unwrap();
         let mut enc = vault_key1.encrypt_file(b"Hello, secret world!").unwrap();
 
-        assert!(matches!(vault_key2.decrypt_file(&enc), Err(VaultError::VaultIdMismatch { .. })));
+        assert!(matches!(
+            vault_key2.decrypt_file(&enc),
+            Err(VaultError::VaultIdMismatch { .. })
+        ));
 
         enc.ciphertext[0] ^= 0x01;
-        assert!(matches!(vault_key1.decrypt_file(&enc), Err(VaultError::DecryptionFailed(_))));
+        assert!(matches!(
+            vault_key1.decrypt_file(&enc),
+            Err(VaultError::DecryptionFailed(_))
+        ));
 
         enc.vault_id[0] ^= 0x01;
-        assert!(matches!(vault_key1.decrypt_file(&enc), Err(VaultError::VaultIdMismatch { .. })));
+        assert!(matches!(
+            vault_key1.decrypt_file(&enc),
+            Err(VaultError::VaultIdMismatch { .. })
+        ));
 
-        assert!(matches!(EncryptedFile::from_bytes(&vec![0u8; 47]), Err(VaultError::InvalidEncFormat(_))));
+        assert!(matches!(
+            EncryptedFile::from_bytes(&[0u8; 47]),
+            Err(VaultError::InvalidEncFormat(_))
+        ));
     }
 
     #[test]
     fn test_rfc4648_base64_vectors_and_non_canonical_rejection() {
         for &(raw, expected_b64) in &[
-            (b"".as_slice(), ""), (b"f", "Zg=="), (b"fo", "Zm8="), (b"foo", "Zm9v"),
-            (b"foob", "Zm9vYg=="), (b"fooba", "Zm9vYmE="), (b"foobar", "Zm9vYmFy"),
+            (b"".as_slice(), ""),
+            (b"f", "Zg=="),
+            (b"fo", "Zm8="),
+            (b"foo", "Zm9v"),
+            (b"foob", "Zm9vYg=="),
+            (b"fooba", "Zm9vYmE="),
+            (b"foobar", "Zm9vYmFy"),
         ] {
             assert_eq!(base64_encode(raw), expected_b64);
             assert_eq!(base64_decode(expected_b64).unwrap(), raw);

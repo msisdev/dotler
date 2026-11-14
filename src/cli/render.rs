@@ -153,13 +153,19 @@ impl InlineRender for crate::engine::sync::FileActionPlan {
 
 impl InlineRender for crate::engine::sync::SyncReport {
     fn render_inline(&self) -> String {
-        format!("☀️ Import done. ({} imported, {} skipped)", self.processed, self.skipped)
+        format!(
+            "☀️ Import done. ({} imported, {} skipped)",
+            self.processed, self.skipped
+        )
     }
 }
 
 impl InlineRender for ExportReport {
     fn render_inline(&self) -> String {
-        format!("☀️ Export done. ({} exported, {} skipped)", self.0.processed, self.0.skipped)
+        format!(
+            "☀️ Export done. ({} exported, {} skipped)",
+            self.0.processed, self.0.skipped
+        )
     }
 }
 
@@ -192,7 +198,10 @@ impl InlineRender for crate::engine::remote::RemoteRepoSummary {
                 out.push_str(&format!("  Vault Configured: {}\n", m.has_vault));
                 out.push_str("  Groups:\n");
                 for g in &m.groups {
-                    out.push_str(&format!("    - {} (targets: {:?})\n", g.name, g.target_paths));
+                    out.push_str(&format!(
+                        "    - {} (targets: {:?})\n",
+                        g.name, g.target_paths
+                    ));
                 }
             }
         }
@@ -272,7 +281,10 @@ impl InlineRender for KeyReport {
 
 impl InlineRender for UpdateReport {
     fn render_inline(&self) -> String {
-        let target = self.target_version.as_deref().unwrap_or(self.version.as_str());
+        let target = self
+            .target_version
+            .as_deref()
+            .unwrap_or(self.version.as_str());
         match self.status.as_str() {
             "updated" => format!("☀️ Update done. (v{} -> v{})", self.version, target),
             "managed_by_package_manager" => {
@@ -310,7 +322,10 @@ impl InlineRender for UpdateReport {
                     target,
                     styled_hint_label()
                 ),
-                None => format!("Update check done. (v{} -> v{} available)", self.version, target),
+                None => format!(
+                    "Update check done. (v{} -> v{} available)",
+                    self.version, target
+                ),
             },
             "cancelled" => String::new(),
             _ => format!("Update check done. (v{}, up to date)", self.version),
@@ -355,7 +370,14 @@ pub(crate) mod tests {
             check_only,
             version: ver.to_string(),
             target_version: Some(target.to_string()),
-            install_method: Some(if cmd.is_some() { "homebrew-tap" } else { "standalone" }.to_string()),
+            install_method: Some(
+                if cmd.is_some() {
+                    "homebrew-tap"
+                } else {
+                    "standalone"
+                }
+                .to_string(),
+            ),
             upgrade_command: cmd.map(str::to_string),
         }
     }
@@ -375,12 +397,25 @@ pub(crate) mod tests {
             "Init done. ('main' at '/home/user/dotfiles', device: default)\nHint: Run 'dotler ai'"
         );
 
-        let check_rep = crate::engine::check::CheckReport { status: "valid".into(), groups_checked: 3 };
+        let check_rep = crate::engine::check::CheckReport {
+            status: "valid".into(),
+            groups_checked: 3,
+        };
         assert_eq!(check_rep.render_inline(), "☀️ Config is ok. (3 groups)");
 
-        let sync_rep = crate::engine::sync::SyncReport { processed: 12, skipped: 3, conflicts: vec![] };
-        assert_eq!(sync_rep.render_inline(), "☀️ Import done. (12 imported, 3 skipped)");
-        assert_eq!(ExportReport(sync_rep).render_inline(), "☀️ Export done. (12 exported, 3 skipped)");
+        let sync_rep = crate::engine::sync::SyncReport {
+            processed: 12,
+            skipped: 3,
+            conflicts: vec![],
+        };
+        assert_eq!(
+            sync_rep.render_inline(),
+            "☀️ Import done. (12 imported, 3 skipped)"
+        );
+        assert_eq!(
+            ExportReport(sync_rep).render_inline(),
+            "☀️ Export done. (12 exported, 3 skipped)"
+        );
 
         let tidy_rep = crate::engine::sync::TidyReport {
             encrypted_in_repo: 2,
@@ -389,30 +424,53 @@ pub(crate) mod tests {
             removed_os_orphans: vec![PathBuf::from("a")],
             untracked_kept_orphans: vec![PathBuf::from("b"), PathBuf::from("c")],
         };
-        assert_eq!(tidy_rep.render_inline(), "☀️ Tidy done. (2 encrypted, 1 decrypted, 3 removed, 1 purged, 2 untracked)");
+        assert_eq!(
+            tidy_rep.render_inline(),
+            "☀️ Tidy done. (2 encrypted, 1 decrypted, 3 removed, 1 purged, 2 untracked)"
+        );
 
         let clone_rep = crate::engine::remote::CloneReport {
             repo_url: "gh:u/r".into(),
             destination: PathBuf::from("/tmp/dots"),
             cloned_groups: vec!["nvim".into(), "zsh".into()],
         };
-        assert_eq!(clone_rep.render_inline(), "☀️ Clone done. (2 groups, '/tmp/dots')");
+        assert_eq!(
+            clone_rep.render_inline(),
+            "☀️ Clone done. (2 groups, '/tmp/dots')"
+        );
 
         let install_rep = crate::engine::remote::InstallReport {
             installed_files: vec![PathBuf::from("a"), PathBuf::from("b")],
             backed_up_files: vec![PathBuf::from("c")],
         };
-        assert_eq!(install_rep.render_inline(), "☀️ Install done. (2 installed, 1 backed up)");
+        assert_eq!(
+            install_rep.render_inline(),
+            "☀️ Install done. (2 installed, 1 backed up)"
+        );
 
         let uninstall_rep = crate::engine::remote::UninstallReport {
             removed_files: vec![PathBuf::from("a")],
             restored_backups: vec![PathBuf::from("b"), PathBuf::from("c")],
         };
-        assert_eq!(uninstall_rep.render_inline(), "☀️ Uninstall done. (1 removed, 2 restored)");
+        assert_eq!(
+            uninstall_rep.render_inline(),
+            "☀️ Uninstall done. (1 removed, 2 restored)"
+        );
 
-        let vinit = VaultInitReport { vault_id: "vid-123".into(), mnemonic: Some("word1 word2".into()), hint: None };
-        assert_eq!(vinit.render_inline(), "Vault init done. (id: vid-123)\n🔑 Recovery mnemonic: word1 word2");
-        let vinit_imp = VaultInitReport { vault_id: "vid-123".into(), mnemonic: None, hint: None };
+        let vinit = VaultInitReport {
+            vault_id: "vid-123".into(),
+            mnemonic: Some("word1 word2".into()),
+            hint: None,
+        };
+        assert_eq!(
+            vinit.render_inline(),
+            "Vault init done. (id: vid-123)\n🔑 Recovery mnemonic: word1 word2"
+        );
+        let vinit_imp = VaultInitReport {
+            vault_id: "vid-123".into(),
+            mnemonic: None,
+            hint: None,
+        };
         assert_eq!(vinit_imp.render_inline(), "Vault init done. (id: vid-123)");
 
         let vpasswd = VaultPasswdReport {
@@ -423,7 +481,10 @@ pub(crate) mod tests {
             already_synced_repos: vec![],
             vault_id: Some("vid-123".into()),
         };
-        assert_eq!(vpasswd.render_inline(), "☀️ Passphrase rotation done. (2 rotated, 1 skipped)");
+        assert_eq!(
+            vpasswd.render_inline(),
+            "☀️ Passphrase rotation done. (2 rotated, 1 skipped)"
+        );
 
         let vrec = VaultRecoverReport {
             vault_id: "vid-999".into(),
@@ -431,19 +492,59 @@ pub(crate) mod tests {
             new_mnemonic: "new1 new2".into(),
             hint: None,
         };
-        assert_eq!(vrec.render_inline(), "☀️ Vault recovery done. (id: vid-999)\n🔑 New recovery mnemonic: new1 new2");
-        assert_eq!(KeyReport { status: "keyring_updated".into() }.render_inline(), "Key set done.");
-        assert_eq!(KeyReport { status: "keyring_deleted".into() }.render_inline(), "Key delete done.");
-
-        assert_eq!(mk_update("up_to_date", true, "0.1.0", "0.1.0", None).render_inline(), "Update check done. (v0.1.0, up to date)");
-        assert_eq!(mk_update("updated", false, "0.1.0", "0.2.0", None).render_inline(), "☀️ Update done. (v0.1.0 -> v0.2.0)");
         assert_eq!(
-            strip_ansi(&mk_update("managed_by_package_manager", false, "0.1.0", "0.2.0", Some("brew upgrade msisdev/tap/dotler")).render_inline()),
+            vrec.render_inline(),
+            "☀️ Vault recovery done. (id: vid-999)\n🔑 New recovery mnemonic: new1 new2"
+        );
+        assert_eq!(
+            KeyReport {
+                status: "keyring_updated".into()
+            }
+            .render_inline(),
+            "Key set done."
+        );
+        assert_eq!(
+            KeyReport {
+                status: "keyring_deleted".into()
+            }
+            .render_inline(),
+            "Key delete done."
+        );
+
+        assert_eq!(
+            mk_update("up_to_date", true, "0.1.0", "0.1.0", None).render_inline(),
+            "Update check done. (v0.1.0, up to date)"
+        );
+        assert_eq!(
+            mk_update("updated", false, "0.1.0", "0.2.0", None).render_inline(),
+            "☀️ Update done. (v0.1.0 -> v0.2.0)"
+        );
+        assert_eq!(
+            strip_ansi(
+                &mk_update(
+                    "managed_by_package_manager",
+                    false,
+                    "0.1.0",
+                    "0.2.0",
+                    Some("brew upgrade msisdev/tap/dotler")
+                )
+                .render_inline()
+            ),
             "Update delegated to homebrew-tap. (v0.1.0 -> v0.2.0)\nHint: Run 'brew upgrade msisdev/tap/dotler' to update, or 'dotler update --force' to replace the binary directly."
         );
-        let migrate_cmd = "brew uninstall msisdev/tap/dotler && brew untap msisdev/tap && brew install dotler";
+        let migrate_cmd =
+            "brew uninstall msisdev/tap/dotler && brew untap msisdev/tap && brew install dotler";
         assert_eq!(
-            strip_ansi(&mk_update("managed_by_package_manager", false, "0.2.0", "1.0.0", Some(migrate_cmd)).render_inline()),
+            strip_ansi(
+                &mk_update(
+                    "managed_by_package_manager",
+                    false,
+                    "0.2.0",
+                    "1.0.0",
+                    Some(migrate_cmd)
+                )
+                .render_inline()
+            ),
             "Update delegated to homebrew-tap. (v0.2.0 -> v1.0.0)\nHint: 'dotler' is now in official homebrew-core! Migrate with 'brew uninstall msisdev/tap/dotler && brew untap msisdev/tap && brew install dotler', or run 'dotler update --force' to replace the binary directly."
         );
     }

@@ -184,39 +184,82 @@ pub fn tidy_groups_with_observer(
                     if !is_enc_ext {
                         require_vault(engine, "encryption")?;
                         let enc_path = group_repo_dir.join(format!("{clean_rel}.enc"));
-                        push_repo_preview(&mut preview_entries, group_name, os_path, &enc_path, PlanActionKind::Overwrite, PlanDirection::EncryptToRepo);
+                        push_repo_preview(
+                            &mut preview_entries,
+                            group_name,
+                            os_path,
+                            &enc_path,
+                            PlanActionKind::Overwrite,
+                            PlanDirection::EncryptToRepo,
+                        );
                         repo_ops.push(PlannedRepoTidyOp {
                             group_name: group_name.clone(),
                             group_base: group_base.clone(),
                             rel_path: clean_rel.to_string(),
-                            kind: RepoTidyKind::Encrypt { plain_path: path.to_path_buf(), enc_path },
+                            kind: RepoTidyKind::Encrypt {
+                                plain_path: path.to_path_buf(),
+                                enc_path,
+                            },
                         });
                     } else {
-                        push_repo_preview(&mut preview_entries, group_name, os_path, path, PlanActionKind::Okay, PlanDirection::EncryptToRepo);
+                        push_repo_preview(
+                            &mut preview_entries,
+                            group_name,
+                            os_path,
+                            path,
+                            PlanActionKind::Okay,
+                            PlanDirection::EncryptToRepo,
+                        );
                     }
                 }
                 Some(m) if m.is_included() => {
                     if is_enc_ext {
                         require_vault(engine, "decryption")?;
                         let plain_path = group_repo_dir.join(clean_rel);
-                        push_repo_preview(&mut preview_entries, group_name, os_path, &plain_path, PlanActionKind::Overwrite, PlanDirection::DecryptInRepo);
+                        push_repo_preview(
+                            &mut preview_entries,
+                            group_name,
+                            os_path,
+                            &plain_path,
+                            PlanActionKind::Overwrite,
+                            PlanDirection::DecryptInRepo,
+                        );
                         repo_ops.push(PlannedRepoTidyOp {
                             group_name: group_name.clone(),
                             group_base: group_base.clone(),
                             rel_path: clean_rel.to_string(),
-                            kind: RepoTidyKind::Decrypt { enc_path: path.to_path_buf(), plain_path },
+                            kind: RepoTidyKind::Decrypt {
+                                enc_path: path.to_path_buf(),
+                                plain_path,
+                            },
                         });
                     } else {
-                        push_repo_preview(&mut preview_entries, group_name, os_path, path, PlanActionKind::Okay, PlanDirection::PlainToRepo);
+                        push_repo_preview(
+                            &mut preview_entries,
+                            group_name,
+                            os_path,
+                            path,
+                            PlanActionKind::Okay,
+                            PlanDirection::PlainToRepo,
+                        );
                     }
                 }
                 _ => {
-                    push_repo_preview(&mut preview_entries, group_name, os_path, path, PlanActionKind::Delete, PlanDirection::PlainToRepo);
+                    push_repo_preview(
+                        &mut preview_entries,
+                        group_name,
+                        os_path,
+                        path,
+                        PlanActionKind::Delete,
+                        PlanDirection::PlainToRepo,
+                    );
                     repo_ops.push(PlannedRepoTidyOp {
                         group_name: group_name.clone(),
                         group_base: group_base.clone(),
                         rel_path: rel_str,
-                        kind: RepoTidyKind::RemoveExcluded { repo_path: path.to_path_buf() },
+                        kind: RepoTidyKind::RemoveExcluded {
+                            repo_path: path.to_path_buf(),
+                        },
                     });
                 }
             }
@@ -250,8 +293,14 @@ pub fn tidy_groups_with_observer(
             continue;
         }
         let orphan_path = PathBuf::from(&rec.target_path);
-        let group_base = orphan_path.parent().map(PathBuf::from).unwrap_or_else(|| expand_tilde("~"));
-        let repo_path = engine.repo_dir.join(&rec.group_name).join(&rec.relative_path);
+        let group_base = orphan_path
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| expand_tilde("~"));
+        let repo_path = engine
+            .repo_dir
+            .join(&rec.group_name)
+            .join(&rec.relative_path);
         let os_action = match policy {
             TidyOrphanPolicy::PurgeFromOs => PlanActionKind::Delete,
             TidyOrphanPolicy::KeepOnOs => PlanActionKind::Untrack,
@@ -390,7 +439,10 @@ fn execute_repo_tidy_op(
     report: &mut TidyReport,
 ) -> Result<Option<u64>, EngineError> {
     match kind {
-        RepoTidyKind::Encrypt { plain_path, enc_path } => {
+        RepoTidyKind::Encrypt {
+            plain_path,
+            enc_path,
+        } => {
             let vault_key = require_vault(engine, "encryption")?;
             let plaintext = fs::read(plain_path)?;
             let len = plaintext.len() as u64;
@@ -400,7 +452,10 @@ fn execute_repo_tidy_op(
             report.encrypted_in_repo += 1;
             Ok(Some(len))
         }
-        RepoTidyKind::Decrypt { enc_path, plain_path } => {
+        RepoTidyKind::Decrypt {
+            enc_path,
+            plain_path,
+        } => {
             let vault_key = require_vault(engine, "decryption")?;
             let raw_enc = fs::read(enc_path)?;
             let enc = EncryptedFile::from_bytes(&raw_enc)?;

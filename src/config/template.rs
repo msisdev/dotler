@@ -2,7 +2,6 @@ use std::path::Path;
 
 use crate::config::ConfigError;
 
-
 fn normalize_home_dir_str(home_dir: &Path) -> String {
     let s = home_dir.to_string_lossy().replace('\\', "/");
     if s == "/" {
@@ -12,7 +11,10 @@ fn normalize_home_dir_str(home_dir: &Path) -> String {
     }
 }
 
-pub fn validate_template_text<'a>(content: &'a [u8], path_label: &str) -> Result<&'a str, ConfigError> {
+pub fn validate_template_text<'a>(
+    content: &'a [u8],
+    path_label: &str,
+) -> Result<&'a str, ConfigError> {
     if content.contains(&0) {
         return Err(ConfigError::InvalidTemplateContent {
             path: path_label.to_string(),
@@ -86,7 +88,6 @@ pub fn unrender_home_template(
     Ok(normalized_text.into_bytes())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +132,4 @@ mod tests {
             Err(ConfigError::InvalidTemplateContent { .. })
         ));
     }
-
 }

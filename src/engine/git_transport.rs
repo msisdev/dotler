@@ -62,10 +62,7 @@ fn http_status_io_error(status: u16) -> std::io::Error {
     std::io::Error::new(kind, format!("HTTP status {status}"))
 }
 
-fn pipe_ureq_headers(
-    headers: &ureq::http::HeaderMap,
-    tx: &mut gix::features::io::pipe::Writer,
-) {
+fn pipe_ureq_headers(headers: &ureq::http::HeaderMap, tx: &mut gix::features::io::pipe::Writer) {
     let mut header_bytes = Vec::new();
     for (name, val) in headers {
         if let Ok(v_str) = val.to_str() {
@@ -101,7 +98,9 @@ impl gix_transport::client::blocking_io::http::Http for UreqGitHttp {
                 req = req.header(k.trim(), v.trim());
             }
         }
-        let res = req.call().map_err(|e| HttpError::InitHttpClient { source: Box::new(e) })?;
+        let res = req.call().map_err(|e| HttpError::InitHttpClient {
+            source: Box::new(e),
+        })?;
         let status = res.status().as_u16();
         if !(200..300).contains(&status) {
             return Err(HttpError::PostBody(http_status_io_error(status)));
@@ -118,7 +117,10 @@ impl gix_transport::client::blocking_io::http::Http for UreqGitHttp {
                 let _ = body_tx.channel.send(Err(e));
             }
         });
-        Ok(GetResponse { headers: headers_rx, body: body_rx })
+        Ok(GetResponse {
+            headers: headers_rx,
+            body: body_rx,
+        })
     }
 
     fn post(
@@ -128,7 +130,11 @@ impl gix_transport::client::blocking_io::http::Http for UreqGitHttp {
         headers: impl IntoIterator<Item = impl AsRef<str>>,
         _body: gix_transport::client::blocking_io::http::PostBodyDataKind,
     ) -> Result<
-        gix_transport::client::blocking_io::http::PostResponse<Self::Headers, Self::ResponseBody, Self::PostBody>,
+        gix_transport::client::blocking_io::http::PostResponse<
+            Self::Headers,
+            Self::ResponseBody,
+            Self::PostBody,
+        >,
         gix_transport::client::blocking_io::http::Error,
     > {
         use gix::features::io::pipe;
@@ -137,7 +143,11 @@ impl gix_transport::client::blocking_io::http::Http for UreqGitHttp {
         let effective_url = self.effective_url(base_url, url.to_owned());
         let header_list: Vec<(String, String)> = headers
             .into_iter()
-            .filter_map(|h| h.as_ref().split_once(':').map(|(k, v)| (k.trim().to_string(), v.trim().to_string())))
+            .filter_map(|h| {
+                h.as_ref()
+                    .split_once(':')
+                    .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+            })
             .collect();
 
         let (post_body_tx, mut post_body_rx) = pipe::unidirectional(0);
@@ -174,7 +184,11 @@ impl gix_transport::client::blocking_io::http::Http for UreqGitHttp {
                 let _ = body_tx.channel.send(Err(e));
             }
         });
-        Ok(PostResponse { post_body: post_body_tx, headers: headers_rx, body: body_rx })
+        Ok(PostResponse {
+            post_body: post_body_tx,
+            headers: headers_rx,
+            body: body_rx,
+        })
     }
 
     fn configure(
@@ -201,12 +215,18 @@ fn peel_commit_tree_id(
     commit_id: gix::ObjectId,
     label: &str,
 ) -> Result<gix::ObjectId, EngineError> {
-    let obj = repo
-        .find_object(commit_id)
-        .map_err(|e| git_err("clone", format!("Failed to find {label} commit {commit_id}: {e}")))?;
-    let tree = obj
-        .peel_to_tree()
-        .map_err(|e| git_err("clone", format!("Failed to peel {label} commit {commit_id} to tree: {e}")))?;
+    let obj = repo.find_object(commit_id).map_err(|e| {
+        git_err(
+            "clone",
+            format!("Failed to find {label} commit {commit_id}: {e}"),
+        )
+    })?;
+    let tree = obj.peel_to_tree().map_err(|e| {
+        git_err(
+            "clone",
+            format!("Failed to peel {label} commit {commit_id} to tree: {e}"),
+        )
+    })?;
     Ok(tree.id)
 }
 
@@ -223,8 +243,8 @@ fn materialize_tree_to_dir(
         .map_err(|e| git_err("checkout", format!("Object is not a git tree: {e}")))?;
 
     for entry_res in tree.iter() {
-        let entry =
-            entry_res.map_err(|e| git_err("checkout", format!("Failed to decode tree entry: {e}")))?;
+        let entry = entry_res
+            .map_err(|e| git_err("checkout", format!("Failed to decode tree entry: {e}")))?;
         let name = std::str::from_utf8(entry.filename())
             .map_err(|_| git_err("checkout", "Tree entry filename is not valid UTF-8"))?;
         if name == ".git" || name.contains('/') || name.contains('\\') || name == ".." {
@@ -247,9 +267,9 @@ fn materialize_tree_to_dir(
                 }
             }
             gix::objs::tree::EntryKind::Link => {
-                let obj = repo
-                    .find_object(entry.oid())
-                    .map_err(|e| git_err("checkout", format!("Failed to read symlink object: {e}")))?;
+                let obj = repo.find_object(entry.oid()).map_err(|e| {
+                    git_err("checkout", format!("Failed to read symlink object: {e}"))
+                })?;
                 let link_target = std::str::from_utf8(&obj.data)
                     .map_err(|_| git_err("checkout", "Symlink target is not valid UTF-8"))?;
                 #[cfg(unix)]
@@ -320,15 +340,29 @@ pub fn fetch_http_text(url: &str, max_bytes: usize) -> Result<String, EngineErro
     let response = agent
         .get(trimmed)
         .header("User-Agent", concat!("dotler/", env!("CARGO_PKG_VERSION")))
-        .header("Accept", "application/toml, application/json, text/plain, */*")
+        .header(
+            "Accept",
+            "application/toml, application/json, text/plain, */*",
+        )
         .call()
-        .map_err(|e| git_err("http-get", format!("HTTP GET request to '{trimmed}' failed: {e}")))?;
+        .map_err(|e| {
+            git_err(
+                "http-get",
+                format!("HTTP GET request to '{trimmed}' failed: {e}"),
+            )
+        })?;
 
-    let mut reader = response.into_body().into_reader().take((max_bytes + 1) as u64);
+    let mut reader = response
+        .into_body()
+        .into_reader()
+        .take((max_bytes + 1) as u64);
     let mut buf = Vec::new();
-    reader
-        .read_to_end(&mut buf)
-        .map_err(|e| git_err("http-get", format!("Failed to read HTTP response body: {e}")))?;
+    reader.read_to_end(&mut buf).map_err(|e| {
+        git_err(
+            "http-get",
+            format!("Failed to read HTTP response body: {e}"),
+        )
+    })?;
     if buf.len() > max_bytes {
         return Err(EngineError::PayloadExceeded {
             size_bytes: buf.len(),
@@ -336,8 +370,7 @@ pub fn fetch_http_text(url: &str, max_bytes: usize) -> Result<String, EngineErro
         });
     }
 
-    String::from_utf8(buf)
-        .map_err(|_| git_err("http-get", "HTTP response body is not valid UTF-8"))
+    String::from_utf8(buf).map_err(|_| git_err("http-get", "HTTP response body is not valid UTF-8"))
 }
 
 /// Pure-Rust Git shallow fetch and checkout executor backed by `gix` and `ureq`.
@@ -357,11 +390,20 @@ impl GitRunner {
             if !local_path.exists() {
                 return Err(git_err(
                     "clone",
-                    format!("Local git repository '{}' does not exist", local_path.display()),
+                    format!(
+                        "Local git repository '{}' does not exist",
+                        local_path.display()
+                    ),
                 ));
             }
             let src_repo = gix::open(local_path).map_err(|e| {
-                git_err("clone", format!("Failed to open git repository '{}': {e}", local_path.display()))
+                git_err(
+                    "clone",
+                    format!(
+                        "Failed to open git repository '{}': {e}",
+                        local_path.display()
+                    ),
+                )
             })?;
             let commit_id = if let Some(b) = branch {
                 let ref_name = format!("refs/heads/{b}");
@@ -385,8 +427,12 @@ impl GitRunner {
         }
 
         fs::create_dir_all(dest)?;
-        let repo = gix::init(dest)
-            .map_err(|e| git_err("clone", format!("Failed to initialize staging repository: {e}")))?;
+        let repo = gix::init(dest).map_err(|e| {
+            git_err(
+                "clone",
+                format!("Failed to initialize staging repository: {e}"),
+            )
+        })?;
 
         let refspec = match branch {
             Some(b) => format!("+refs/heads/{b}:refs/remotes/origin/{b}"),
@@ -401,7 +447,12 @@ impl GitRunner {
 
         let (sanitized_url, version) = remote
             .sanitized_url_and_version(gix::remote::Direction::Fetch)
-            .map_err(|e| git_err("clone", format!("Failed to prepare remote URL '{url}': {e}")))?;
+            .map_err(|e| {
+                git_err(
+                    "clone",
+                    format!("Failed to prepare remote URL '{url}': {e}"),
+                )
+            })?;
 
         let transport = gix_transport::client::blocking_io::http::connect_http(
             UreqGitHttp::default(),

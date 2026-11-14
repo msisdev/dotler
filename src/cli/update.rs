@@ -48,12 +48,18 @@ pub fn verify_sha256_checksum(archive_bytes: &[u8], sha256_text: &str) -> Result
         .to_ascii_lowercase();
 
     if expected.len() != 64 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(update_err("Malformed SHA-256 checksum file in release assets."));
+        return Err(update_err(
+            "Malformed SHA-256 checksum file in release assets.",
+        ));
     }
 
     let mut hasher = Sha256::new();
     hasher.update(archive_bytes);
-    let actual: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let actual: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
 
     if actual != expected {
         return Err(update_err(format!(
@@ -86,7 +92,9 @@ pub fn parse_release_metadata(body: &str) -> Result<ReleaseMetadata, EngineError
             .is_some_and(|b| b.contains(HOMEBREW_CORE_RELEASE_MARKER));
         Ok(ReleaseMetadata {
             version,
-            homebrew_core_available: env_core || parsed.homebrew_core.unwrap_or(false) || body_has_marker,
+            homebrew_core_available: env_core
+                || parsed.homebrew_core.unwrap_or(false)
+                || body_has_marker,
         })
     } else {
         let first_line = trimmed.lines().next().unwrap_or("");
@@ -100,8 +108,11 @@ pub fn parse_release_metadata(body: &str) -> Result<ReleaseMetadata, EngineError
 
 fn fetch_bytes_from_source(source: &str) -> Result<Vec<u8>, EngineError> {
     if let Some(file_path) = source.strip_prefix("file://") {
-        return fs::read(file_path)
-            .map_err(|e| update_err(format!("Failed to read release asset from '{file_path}': {e}")));
+        return fs::read(file_path).map_err(|e| {
+            update_err(format!(
+                "Failed to read release asset from '{file_path}': {e}"
+            ))
+        });
     }
     if Path::new(source).is_absolute() && !source.starts_with("http") {
         return fs::read(source)
@@ -109,7 +120,10 @@ fn fetch_bytes_from_source(source: &str) -> Result<Vec<u8>, EngineError> {
     }
 
     let mut response = ureq::get(source)
-        .header("User-Agent", &format!("dotler/{}", env!("CARGO_PKG_VERSION")))
+        .header(
+            "User-Agent",
+            &format!("dotler/{}", env!("CARGO_PKG_VERSION")),
+        )
         .call()
         .map_err(|e| update_err(format!("Failed to download release asset '{source}': {e}")))?;
 
@@ -118,7 +132,11 @@ fn fetch_bytes_from_source(source: &str) -> Result<Vec<u8>, EngineError> {
         .body_mut()
         .as_reader()
         .read_to_end(&mut buf)
-        .map_err(|e| update_err(format!("Failed to read response stream from '{source}': {e}")))?;
+        .map_err(|e| {
+            update_err(format!(
+                "Failed to read response stream from '{source}': {e}"
+            ))
+        })?;
     Ok(buf)
 }
 
@@ -162,10 +180,17 @@ pub fn resolve_target_release(
 
     let api_url = format!("https://api.github.com/repos/{repo}/releases/latest");
     let mut response = ureq::get(&api_url)
-        .header("User-Agent", &format!("dotler/{}", env!("CARGO_PKG_VERSION")))
+        .header(
+            "User-Agent",
+            &format!("dotler/{}", env!("CARGO_PKG_VERSION")),
+        )
         .header("Accept", "application/vnd.github+json")
         .call()
-        .map_err(|e| update_err(format!("Failed to query latest release from GitHub ('{api_url}'): {e}")))?;
+        .map_err(|e| {
+            update_err(format!(
+                "Failed to query latest release from GitHub ('{api_url}'): {e}"
+            ))
+        })?;
 
     let body = response
         .body_mut()
@@ -189,11 +214,17 @@ fn fetch_release_asset(
         }
         return fetch_bytes_from_source(&format!("{trimmed}/{file_name}"));
     }
-    fetch_bytes_from_source(&format!("https://github.com/{repo}/releases/download/{tag}/{file_name}"))
+    fetch_bytes_from_source(&format!(
+        "https://github.com/{repo}/releases/download/{tag}/{file_name}"
+    ))
 }
 
 fn run_cmd_success(program: &str, args: &[&str]) -> bool {
-    Command::new(program).args(args).status().map(|s| s.success()).unwrap_or(false)
+    Command::new(program)
+        .args(args)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn extract_binary_from_archive(
@@ -217,7 +248,9 @@ fn extract_binary_from_archive(
             return Err(update_err("Failed to extract '.zip' release archive."));
         }
     } else {
-        return Err(update_err(format!("Unsupported archive extension '{archive_ext}'.")));
+        return Err(update_err(format!(
+            "Unsupported archive extension '{archive_ext}'."
+        )));
     }
 
     for bin_name in ["dotler", "dotler.exe"] {
@@ -226,7 +259,9 @@ fn extract_binary_from_archive(
             return Ok(candidate);
         }
     }
-    Err(update_err("Extracted release archive did not contain the 'dotler' binary."))
+    Err(update_err(
+        "Extracted release archive did not contain the 'dotler' binary.",
+    ))
 }
 
 /// Atomically replaces `target_exe` with `extracted_bin` in the same filesystem directory.
@@ -310,8 +345,8 @@ pub fn run_update(
     };
 
     let is_same_version = current_version == target_version;
-    let needs_brew_core_migration =
-        matches!(install_method, InstallMethod::HomebrewTap) && release_meta.homebrew_core_available;
+    let needs_brew_core_migration = matches!(install_method, InstallMethod::HomebrewTap)
+        && release_meta.homebrew_core_available;
 
     if args.check {
         let status = if is_same_version && !needs_brew_core_migration {
@@ -325,7 +360,11 @@ pub fn run_update(
         return Ok(make_report("up_to_date", false, upgrade_cmd));
     }
     if install_method.is_package_manager() && !args.force {
-        return Ok(make_report("managed_by_package_manager", false, upgrade_cmd));
+        return Ok(make_report(
+            "managed_by_package_manager",
+            false,
+            upgrade_cmd,
+        ));
     }
     if (is_interactive || ConfirmPrompt::has_mock_or_env_input()) && !args.yes && !json_mode {
         let mut stderr = std::io::stderr();
@@ -337,8 +376,11 @@ pub fn run_update(
     }
 
     let libc_env = std::env::var("DOTLER_LIBC").ok();
-    let release_target =
-        detect_release_target(std::env::consts::OS, std::env::consts::ARCH, libc_env.as_deref())?;
+    let release_target = detect_release_target(
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        libc_env.as_deref(),
+    )?;
 
     let archive_bytes = fetch_release_asset(
         base_url_override.as_deref(),
@@ -381,9 +423,13 @@ mod tests {
             r#"{"tag_name":"v1.0.0","body":"Notes\n<!-- dotler:homebrew-core -->"}"#,
         )
         .unwrap();
-        assert_eq!((marker.version.as_str(), marker.homebrew_core_available), ("1.0.0", true));
+        assert_eq!(
+            (marker.version.as_str(), marker.homebrew_core_available),
+            ("1.0.0", true)
+        );
 
-        let field = parse_release_metadata(r#"{"tag_name":"v1.0.0","homebrew_core":true}"#).unwrap();
+        let field =
+            parse_release_metadata(r#"{"tag_name":"v1.0.0","homebrew_core":true}"#).unwrap();
         assert!(field.homebrew_core_available);
     }
 
@@ -392,7 +438,11 @@ mod tests {
         let payload = b"dotler-release-binary-payload";
         let mut hasher = Sha256::new();
         hasher.update(payload);
-        let hex: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        let hex: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         let sha_line = format!("{hex}  dotler-x86_64-unknown-linux-musl.tar.gz\n");
 
         assert!(verify_sha256_checksum(payload, &sha_line).is_ok());
@@ -411,8 +461,11 @@ mod tests {
     #[test]
     fn test_extract_and_replace_executable_atomically() {
         let tmp = tempfile::tempdir().unwrap();
-        let (staging, extract_dir, install_dir) =
-            (tmp.path().join("staging"), tmp.path().join("extract"), tmp.path().join("bin"));
+        let (staging, extract_dir, install_dir) = (
+            tmp.path().join("staging"),
+            tmp.path().join("extract"),
+            tmp.path().join("bin"),
+        );
         for d in [&staging, &extract_dir, &install_dir] {
             fs::create_dir_all(d).unwrap();
         }
@@ -422,7 +475,13 @@ mod tests {
 
         let archive_path = tmp.path().join("dotler-test.tar.gz");
         let status = Command::new("tar")
-            .args(["-C", &staging.to_string_lossy(), "-czf", &archive_path.to_string_lossy(), "dotler"])
+            .args([
+                "-C",
+                &staging.to_string_lossy(),
+                "-czf",
+                &archive_path.to_string_lossy(),
+                "dotler",
+            ])
             .status()
             .unwrap();
         assert!(status.success());

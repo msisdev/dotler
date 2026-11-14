@@ -447,4 +447,3 @@ files = "sec.txt enc"
         stderr.contains("Encryption mismatch") || stderr.contains("conflicts with encryption rule")
     );
 }
-

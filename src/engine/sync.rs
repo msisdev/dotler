@@ -312,7 +312,9 @@ fn can_skip_import(
             && let Ok(enc_file) = EncryptedFile::from_bytes(&enc_bytes)
             && let Ok(decrypted) = vault_key.decrypt_file(&enc_file)
         {
-            return Ok(blake3::hash(decrypted.expose_secret()).to_hex().to_string() == repo_payload_hash);
+            return Ok(
+                blake3::hash(decrypted.expose_secret()).to_hex().to_string() == repo_payload_hash
+            );
         }
         return Ok(false);
     }
@@ -461,12 +463,18 @@ mod tests {
             .import_files_with_observer(&plans, &lock, false, &mut obs)
             .unwrap();
         assert_eq!(imp_rep.processed, 0);
-        assert_eq!(fs::read(repo_dir.join("shell/.bashrc")).unwrap(), b"repo content\n");
+        assert_eq!(
+            fs::read(repo_dir.join("shell/.bashrc")).unwrap(),
+            b"repo content\n"
+        );
 
         let exp_rep = engine
             .export_files_with_observer(&plans, &lock, true, false, &mut obs)
             .unwrap();
         assert_eq!(exp_rep.processed, 0);
-        assert_eq!(fs::read(home_dir.join(".bashrc")).unwrap(), b"local content\n");
+        assert_eq!(
+            fs::read(home_dir.join(".bashrc")).unwrap(),
+            b"local content\n"
+        );
     }
 }

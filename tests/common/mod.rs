@@ -227,7 +227,11 @@ pub type AgentTestSandbox = CliTestSandbox;
 impl CliTestSandbox {
     pub fn new() -> Self {
         let toml = "[shell]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nos-bsd = \"~\"\nfiles = \"\"\"\n*\n\"\"\"\n";
-        Self::with_seed(toml, Some(("shell/sample.sh", "#!/bin/sh\necho ok\n")), true)
+        Self::with_seed(
+            toml,
+            Some(("shell/sample.sh", "#!/bin/sh\necho ok\n")),
+            true,
+        )
     }
 
     pub fn new_agent() -> Self {
@@ -256,13 +260,35 @@ impl CliTestSandbox {
             fs::create_dir_all(target.parent().unwrap()).unwrap();
             fs::write(target, body).unwrap();
         }
-        Command::new("git").args(["-C", wt, "config", "user.name", "Tester"]).status().unwrap();
-        Command::new("git").args(["-C", wt, "config", "user.email", "test@example.com"]).status().unwrap();
-        Command::new("git").args(["-C", wt, "add", "."]).status().unwrap();
-        Command::new("git").args(["-C", wt, "commit", "-m", "Seed remote repo"]).status().unwrap();
-        Command::new("git").args(["clone", "--bare", wt, bare_git_dir.to_str().unwrap()]).status().unwrap();
+        Command::new("git")
+            .args(["-C", wt, "config", "user.name", "Tester"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", wt, "config", "user.email", "test@example.com"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", wt, "add", "."])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", wt, "commit", "-m", "Seed remote repo"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["clone", "--bare", wt, bare_git_dir.to_str().unwrap()])
+            .status()
+            .unwrap();
 
-        Self { _root: root, home_dir, dotler_dir, repo_dir, bare_git_dir, mock_keyring }
+        Self {
+            _root: root,
+            home_dir,
+            dotler_dir,
+            repo_dir,
+            bare_git_dir,
+            mock_keyring,
+        }
     }
 
     pub fn cmd(&self) -> Command {
@@ -292,13 +318,16 @@ impl CliTestSandbox {
     }
 
     pub fn spawn_mcp(&self) -> Child {
-        self.mcp_cmd().spawn().expect("Failed to spawn dotler mcp process")
+        self.mcp_cmd()
+            .spawn()
+            .expect("Failed to spawn dotler mcp process")
     }
 
     pub fn spawn_mcp_with_passphrase(&self, pass: &str) -> Child {
         let mut cmd = self.mcp_cmd();
         cmd.env("DOTLER_PASSPHRASE", pass);
-        cmd.spawn().expect("Failed to spawn dotler mcp process with passphrase")
+        cmd.spawn()
+            .expect("Failed to spawn dotler mcp process with passphrase")
     }
 
     fn mcp_cmd(&self) -> Command {

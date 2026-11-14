@@ -165,7 +165,12 @@ where
     if json_mode {
         let mut obs = NoopObserver;
         let report = op(&mut obs)?;
-        return Ok(render_success_to(stdout, command_name, &to_render(report), true));
+        return Ok(render_success_to(
+            stdout,
+            command_name,
+            &to_render(report),
+            true,
+        ));
     }
 
     let mut obs = TuiObserver::new(stdout, command_name, view_all, yes, is_interactive);
@@ -197,6 +202,9 @@ mod tests {
         assert!(!obs.confirm_plan(&[entry], true).unwrap());
         assert!(!obs.approved);
         assert_eq!(map_badge(PlanActionKind::Create), BadgeOp::Create);
-        assert_eq!(map_arrow(PlanDirection::DecryptToOs), PreviewArrow::DecryptToOs);
+        assert_eq!(
+            map_arrow(PlanDirection::DecryptToOs),
+            PreviewArrow::DecryptToOs
+        );
     }
 }

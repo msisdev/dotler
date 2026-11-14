@@ -2,7 +2,9 @@ use std::fs;
 
 use crate::config::ConfigError;
 use crate::config::repo::{GroupConfig, RepoConfig};
-use crate::config::selection::{SelectionMode, SelectionRule, evaluate_selection, parse_selection_rules};
+use crate::config::selection::{
+    SelectionMode, SelectionRule, evaluate_selection, parse_selection_rules,
+};
 
 pub const RECOGNIZED_OS_KEYS: &[&str] = &[
     "os-arch",
@@ -18,7 +20,6 @@ pub const RECOGNIZED_OS_KEYS: &[&str] = &[
     "os-win",
     "os-bsd",
 ];
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OsInfo {
@@ -81,7 +82,6 @@ impl OsInfo {
     }
 }
 
-
 pub fn resolve_group_target_path(
     group: &GroupConfig,
     devices: &[String],
@@ -109,7 +109,6 @@ pub fn resolve_group_target_path(
     None
 }
 
-
 struct ActiveGroup<'a> {
     name: &'a str,
     base: String,
@@ -128,7 +127,9 @@ fn collision(path: impl Into<String>, group1: &str, group2: &str) -> ConfigError
 }
 
 fn clean_rule_pattern(rule: &SelectionRule) -> &str {
-    rule.pattern.trim_start_matches("./").trim_start_matches('/')
+    rule.pattern
+        .trim_start_matches("./")
+        .trim_start_matches('/')
 }
 
 fn is_included(rules: &[SelectionRule], path: &str) -> bool {
@@ -322,25 +323,40 @@ mod tests {
 
     #[test]
     fn test_device_os_cascading_custom_device_first() {
-        let res = resolve_with_paths(&[("laptop", "~/laptop/path"), ("os-arch", "~/arch/path"), ("os-nux", "~/linux/path")]);
+        let res = resolve_with_paths(&[
+            ("laptop", "~/laptop/path"),
+            ("os-arch", "~/arch/path"),
+            ("os-nux", "~/linux/path"),
+        ]);
         assert_eq!(res.as_deref(), Some("~/laptop/path"));
     }
 
     #[test]
     fn test_device_os_cascading_distro_fallback() {
-        let res = resolve_with_paths(&[("desktop", "~/desktop/path"), ("os-arch", "~/arch/path"), ("os-nux", "~/linux/path")]);
+        let res = resolve_with_paths(&[
+            ("desktop", "~/desktop/path"),
+            ("os-arch", "~/arch/path"),
+            ("os-nux", "~/linux/path"),
+        ]);
         assert_eq!(res.as_deref(), Some("~/arch/path"));
     }
 
     #[test]
     fn test_device_os_cascading_family_fallback() {
-        let res = resolve_with_paths(&[("desktop", "~/desktop/path"), ("os-debian", "~/debian/path"), ("os-nux", "~/linux/path")]);
+        let res = resolve_with_paths(&[
+            ("desktop", "~/desktop/path"),
+            ("os-debian", "~/debian/path"),
+            ("os-nux", "~/linux/path"),
+        ]);
         assert_eq!(res.as_deref(), Some("~/linux/path"));
     }
 
     #[test]
     fn test_device_os_cascading_skip_when_unmatched() {
-        assert_eq!(resolve_with_paths(&[("workstation", "~/work/path"), ("os-mac", "~/mac/path")]), None);
+        assert_eq!(
+            resolve_with_paths(&[("workstation", "~/work/path"), ("os-mac", "~/mac/path")]),
+            None
+        );
     }
 
     #[test]
@@ -355,7 +371,9 @@ mod tests {
         let repo = RepoConfig::parse(
             "[nvim]\nfiles = \"conf\"\nos-nux = \"~/.config/app\"\n[vim]\nfiles = \"conf\"\nos-nux = \"~/.config/app\"\n",
         ).expect("valid syntax");
-        let err = repo.detect_cross_group_collisions(&[], &OsInfo::new("arch", "nux")).expect_err("collision must be detected");
+        let err = repo
+            .detect_cross_group_collisions(&[], &OsInfo::new("arch", "nux"))
+            .expect_err("collision must be detected");
         assert!(matches!(
             err,
             ConfigError::CrossGroupFileCollision { path, group1, group2 }
@@ -368,7 +386,10 @@ mod tests {
         let repo = RepoConfig::parse(
             "[zsh]\nfiles = \".zshrc\"\nos-nux = \"~\"\n[git]\nfiles = \".gitconfig\"\nos-nux = \"~\"\n",
         ).expect("valid syntax");
-        assert!(repo.detect_cross_group_collisions(&[], &OsInfo::new("arch", "nux")).is_ok());
+        assert!(
+            repo.detect_cross_group_collisions(&[], &OsInfo::new("arch", "nux"))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -376,8 +397,12 @@ mod tests {
         let repo = RepoConfig::parse(
             "[all_conf]\nfiles = \"*.conf\"\nos-nux = \"~/.config/app\"\n[app_conf]\nfiles = \"custom.conf\"\nos-nux = \"~/.config/app\"\n",
         ).expect("valid syntax");
-        let err = repo.detect_cross_group_collisions(&[], &OsInfo::new("arch", "nux")).expect_err("overlap must collide");
-        assert!(matches!(err, ConfigError::CrossGroupFileCollision { path, .. } if path == "~/.config/app/custom.conf"));
+        let err = repo
+            .detect_cross_group_collisions(&[], &OsInfo::new("arch", "nux"))
+            .expect_err("overlap must collide");
+        assert!(
+            matches!(err, ConfigError::CrossGroupFileCollision { path, .. } if path == "~/.config/app/custom.conf")
+        );
     }
 
     #[test]
@@ -385,15 +410,24 @@ mod tests {
         let repo = RepoConfig::parse(
             "[all_conf]\nfiles = \"*.conf\\n!custom.conf\"\nos-nux = \"~/.config/app\"\n[app_conf]\nfiles = \"custom.conf\"\nos-nux = \"~/.config/app\"\n",
         ).expect("valid syntax");
-        assert!(repo.detect_cross_group_collisions(&[], &OsInfo::new("arch", "nux")).is_ok());
+        assert!(
+            repo.detect_cross_group_collisions(&[], &OsInfo::new("arch", "nux"))
+                .is_ok()
+        );
     }
 
     #[test]
     fn test_standalone_directory_include_rule_and_cross_group_collision() {
         let os_info = OsInfo::new("arch", "nux");
         let rules = parse_selection_rules("lua\nlua/plugins/").expect("rules should parse");
-        assert_eq!(evaluate_selection(&rules, "lua/init.lua"), Some(SelectionMode::PlaintextInclude));
-        assert_eq!(evaluate_selection(&rules, "lua/plugins/lsp.lua"), Some(SelectionMode::PlaintextInclude));
+        assert_eq!(
+            evaluate_selection(&rules, "lua/init.lua"),
+            Some(SelectionMode::PlaintextInclude)
+        );
+        assert_eq!(
+            evaluate_selection(&rules, "lua/plugins/lsp.lua"),
+            Some(SelectionMode::PlaintextInclude)
+        );
         assert_eq!(evaluate_selection(&rules, "other/file.lua"), None);
 
         for toml in [
@@ -402,7 +436,10 @@ mod tests {
             "[g1]\nos-nux = \"~/.config/nvim\"\nfiles = \"lua\"\n[g2]\nos-nux = \"~/.config/nvim/lua\"\nfiles = \"*\"\n",
         ] {
             let repo = RepoConfig::parse(toml).expect("valid syntax");
-            assert!(matches!(repo.detect_cross_group_collisions(&[], &os_info), Err(ConfigError::CrossGroupFileCollision { .. })));
+            assert!(matches!(
+                repo.detect_cross_group_collisions(&[], &os_info),
+                Err(ConfigError::CrossGroupFileCollision { .. })
+            ));
         }
 
         let sep = RepoConfig::parse(

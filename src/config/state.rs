@@ -9,9 +9,8 @@ use crate::config::StateError;
 pub const STATE_DB_PATH: &str = "~/.config/dotler/state.db";
 pub const STATE_DB_SCHEMA_VERSION: u32 = 1;
 pub use crate::config::lock::{
-    ATOMIC_REPLACE_RETRIES, DOTLER_LOCK_PATH, DOTLER_LOCK_POLL_INTERVAL_MS,
-    DOTLER_LOCK_TIMEOUT_MS, DotlerLock, DotlerLockGuard, TMP_FILE_PREFIX, get_lock,
-    write_file_safe,
+    ATOMIC_REPLACE_RETRIES, DOTLER_LOCK_PATH, DOTLER_LOCK_POLL_INTERVAL_MS, DOTLER_LOCK_TIMEOUT_MS,
+    DotlerLock, DotlerLockGuard, TMP_FILE_PREFIX, get_lock, write_file_safe,
 };
 pub const BACKUPS_DIR_PATH: &str = "~/.config/dotler/backups";
 pub const SQLITE_JOURNAL_MODE: &str = "WAL";
@@ -246,7 +245,8 @@ impl StateDb {
         };
         let mut stmt = conn.prepare(sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(filter), map_synced_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StateError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
     }
 
     pub fn remove_synced_file(&self, target_path: &str) -> Result<bool, StateError> {
@@ -342,7 +342,8 @@ impl StateDb {
         };
         let mut stmt = conn.prepare(sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(filter), map_installed_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StateError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::from)
     }
 
     pub fn remove_installed_file(
@@ -367,7 +368,13 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    fn synced_rec(target: &str, repo: &str, group: &str, rel: &str, hash: &str) -> SyncedFileRecord {
+    fn synced_rec(
+        target: &str,
+        repo: &str,
+        group: &str,
+        rel: &str,
+        hash: &str,
+    ) -> SyncedFileRecord {
         SyncedFileRecord {
             target_path: target.to_string(),
             repo_label: repo.to_string(),
@@ -419,12 +426,19 @@ mod tests {
         {
             let guard = db.conn.lock().unwrap();
             let conn = guard.as_ref().expect("connection initialized");
-            let mode: String = conn.query_row("PRAGMA journal_mode;", [], |r| r.get(0)).unwrap();
+            let mode: String = conn
+                .query_row("PRAGMA journal_mode;", [], |r| r.get(0))
+                .unwrap();
             assert_eq!(mode.to_uppercase(), "WAL");
-            let user_version: u32 = conn.query_row("PRAGMA user_version;", [], |r| r.get(0)).unwrap();
+            let user_version: u32 = conn
+                .query_row("PRAGMA user_version;", [], |r| r.get(0))
+                .unwrap();
             assert_eq!(user_version, STATE_DB_SCHEMA_VERSION);
         }
-        assert_eq!(db.schema_version().expect("schema_version"), STATE_DB_SCHEMA_VERSION);
+        assert_eq!(
+            db.schema_version().expect("schema_version"),
+            STATE_DB_SCHEMA_VERSION
+        );
     }
 
     #[test]
@@ -444,15 +458,27 @@ mod tests {
             ).expect("seed legacy v0 db");
         }
         let db = StateDb::open(&db_path).expect("open legacy v0 db");
-        assert_eq!(db.schema_version().expect("schema_version"), STATE_DB_SCHEMA_VERSION);
-        assert_eq!(db.get_synced_file("/home/user/.gitconfig").unwrap().unwrap().file_hash, "legacy_hash");
+        assert_eq!(
+            db.schema_version().expect("schema_version"),
+            STATE_DB_SCHEMA_VERSION
+        );
+        assert_eq!(
+            db.get_synced_file("/home/user/.gitconfig")
+                .unwrap()
+                .unwrap()
+                .file_hash,
+            "legacy_hash"
+        );
     }
 
     #[test]
     fn test_state_db_rejects_future_unsupported_schema_version() {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("state.db");
-        Connection::open(&db_path).unwrap().execute_batch("PRAGMA user_version = 2;").unwrap();
+        Connection::open(&db_path)
+            .unwrap()
+            .execute_batch("PRAGMA user_version = 2;")
+            .unwrap();
         let err = match StateDb::open(&db_path) {
             Err(e) => e,
             Ok(_) => panic!("opening state.db with future user_version must fail"),
@@ -468,7 +494,10 @@ mod tests {
     #[test]
     fn test_state_db_open_error_propagation_on_invalid_target() {
         let dir = tempdir().expect("tempdir");
-        assert!(matches!(StateDb::open(dir.path()), Err(StateError::Sqlite(_) | StateError::Io(_))));
+        assert!(matches!(
+            StateDb::open(dir.path()),
+            Err(StateError::Sqlite(_) | StateError::Io(_))
+        ));
     }
 
     #[test]
@@ -483,11 +512,22 @@ mod tests {
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         );
         db.upsert_synced_file(&record).expect("upsert");
-        assert_eq!(db.get_synced_file("/home/user/.config/nvim/init.lua").unwrap(), Some(record));
+        assert_eq!(
+            db.get_synced_file("/home/user/.config/nvim/init.lua")
+                .unwrap(),
+            Some(record)
+        );
         assert_eq!(db.list_synced_files(Some("main")).unwrap().len(), 1);
         assert_eq!(db.list_synced_files(Some("other")).unwrap().len(), 0);
-        assert!(db.remove_synced_file("/home/user/.config/nvim/init.lua").unwrap());
-        assert!(db.get_synced_file("/home/user/.config/nvim/init.lua").unwrap().is_none());
+        assert!(
+            db.remove_synced_file("/home/user/.config/nvim/init.lua")
+                .unwrap()
+        );
+        assert!(
+            db.get_synced_file("/home/user/.config/nvim/init.lua")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -496,11 +536,23 @@ mod tests {
         let db = StateDb::open(&dir.path().join("state.db")).expect("open");
         let backup = "/home/user/.config/dotler/backups/zshrc.bak";
         db.upsert_installed_file(&installed_rec(
-            "/home/user/.zshrc", "https://github.com/example/dots.git", "zsh", ".zshrc", "hash_v1", Some(backup),
-        )).expect("initial install");
+            "/home/user/.zshrc",
+            "https://github.com/example/dots.git",
+            "zsh",
+            ".zshrc",
+            "hash_v1",
+            Some(backup),
+        ))
+        .expect("initial install");
         db.upsert_installed_file(&installed_rec(
-            "/home/user/.zshrc", "https://github.com/example/dots.git", "zsh", ".zshrc", "hash_v2", None,
-        )).expect("reinstall");
+            "/home/user/.zshrc",
+            "https://github.com/example/dots.git",
+            "zsh",
+            ".zshrc",
+            "hash_v2",
+            None,
+        ))
+        .expect("reinstall");
         let fetched = db.get_installed_file("/home/user/.zshrc").unwrap().unwrap();
         assert_eq!(fetched.file_hash, "hash_v2");
         assert_eq!(fetched.backup_path.as_deref(), Some(backup));
@@ -510,7 +562,14 @@ mod tests {
     fn test_synced_and_installed_tables_are_isolated() {
         let dir = tempdir().expect("tempdir");
         let db = StateDb::open(&dir.path().join("state.db")).expect("open");
-        db.upsert_synced_file(&synced_rec("/home/user/.bashrc", "personal", "bash", ".bashrc", "personal_hash")).unwrap();
+        db.upsert_synced_file(&synced_rec(
+            "/home/user/.bashrc",
+            "personal",
+            "bash",
+            ".bashrc",
+            "personal_hash",
+        ))
+        .unwrap();
         db.upsert_installed_file(&installed_rec(
             "/home/user/.bashrc",
             "https://github.com/community/dots.git",
@@ -518,10 +577,27 @@ mod tests {
             ".bashrc",
             "community_hash",
             Some("/home/user/.config/dotler/backups/bashrc.bak"),
-        )).unwrap();
-        assert_eq!(db.get_synced_file("/home/user/.bashrc").unwrap().unwrap().file_hash, "personal_hash");
-        assert!(db.remove_installed_file("/home/user/.bashrc").unwrap().is_some());
-        assert_eq!(db.get_synced_file("/home/user/.bashrc").unwrap().unwrap().file_hash, "personal_hash");
+        ))
+        .unwrap();
+        assert_eq!(
+            db.get_synced_file("/home/user/.bashrc")
+                .unwrap()
+                .unwrap()
+                .file_hash,
+            "personal_hash"
+        );
+        assert!(
+            db.remove_installed_file("/home/user/.bashrc")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            db.get_synced_file("/home/user/.bashrc")
+                .unwrap()
+                .unwrap()
+                .file_hash,
+            "personal_hash"
+        );
     }
 
     #[test]
@@ -533,9 +609,12 @@ mod tests {
             ("/home/user/orphaned.txt", "main", "orphaned.txt", "h2"),
             ("/home/user/other_repo.txt", "other", "other_repo.txt", "h3"),
         ] {
-            db.upsert_synced_file(&synced_rec(path, repo, "docs", rel, hash)).unwrap();
+            db.upsert_synced_file(&synced_rec(path, repo, "docs", rel, hash))
+                .unwrap();
         }
-        let orphaned = db.find_orphaned_synced_files("main", &["/home/user/active.txt".to_string()]).unwrap();
+        let orphaned = db
+            .find_orphaned_synced_files("main", &["/home/user/active.txt".to_string()])
+            .unwrap();
         assert_eq!(orphaned, vec!["/home/user/orphaned.txt".to_string()]);
     }
 }

@@ -489,4 +489,3 @@ files = "*"
     assert!(!internal_repo.join("shell").join(".git").exists());
     assert!(!internal_repo.join("shell").join("dotfiles").exists());
 }
-

@@ -6,7 +6,9 @@ use std::process::Command;
 
 use common::{ChallengeSandbox, MockGitRepo};
 use dotler::engine::EngineError;
-use dotler::engine::remote::{clone_repo, install_remote, list_remote, parse_url, uninstall_remote};
+use dotler::engine::remote::{
+    clone_repo, install_remote, list_remote, parse_url, uninstall_remote,
+};
 
 // ============================================================================
 // Suite 3: WAL Recovery, Backup Preservation & Uninstall Idempotency

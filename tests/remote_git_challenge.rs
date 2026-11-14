@@ -365,4 +365,3 @@ files = "state.db"
     assert_eq!(err.exit_code(), 3);
     assert_eq!(err.error_code(), "SECURITY_BLOCKED");
 }
-

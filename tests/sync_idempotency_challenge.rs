@@ -412,4 +412,3 @@ file_c.txt
     // file_b must still have local edits
     assert_eq!(fs::read(&target_b).unwrap(), b"local_b_edit");
 }
-

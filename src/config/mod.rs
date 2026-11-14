@@ -119,10 +119,9 @@ impl std::fmt::Display for ConfigError {
                 f,
                 "Invalid selection attribute '{attribute}' at line {line_no}. {hint}"
             ),
-            Self::InvalidTemplateContent { path, reason } => write!(
-                f,
-                "Invalid template content in '{path}': {reason}"
-            ),
+            Self::InvalidTemplateContent { path, reason } => {
+                write!(f, "Invalid template content in '{path}': {reason}")
+            }
             Self::UnknownOsKey { key, hint } => write!(f, "Unknown OS key '{key}'. {hint}"),
             Self::MissingVaultConfig => write!(
                 f,

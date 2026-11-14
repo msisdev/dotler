@@ -430,4 +430,3 @@ fn test_binary_boundary_slot_internal_corruption() {
         Err(VaultError::VaultIdMismatch { .. })
     ));
 }
-

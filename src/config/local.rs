@@ -366,14 +366,16 @@ devices = ["laptop"]
         assert!(config.validate().is_ok());
     }
 
-fn local_with_repos(repos: &[(&str, &str)], default_repo: Option<&str>) -> LocalConfig {
-    let mut cfg = LocalConfig::default();
-    cfg.default_repo = default_repo.map(str::to_string);
-    for &(k, v) in repos {
-        cfg.repos.insert(k.to_string(), v.to_string());
+    fn local_with_repos(repos: &[(&str, &str)], default_repo: Option<&str>) -> LocalConfig {
+        let mut cfg = LocalConfig {
+            default_repo: default_repo.map(str::to_string),
+            ..Default::default()
+        };
+        for &(k, v) in repos {
+            cfg.repos.insert(k.to_string(), v.to_string());
+        }
+        cfg
     }
-    cfg
-}
 
     #[test]
     fn test_validate_default_devices_rejects_invalid_names() {
@@ -391,7 +393,10 @@ fn local_with_repos(repos: &[(&str, &str)], default_repo: Option<&str>) -> Local
                 default_devices: devices.into_iter().map(str::to_string).collect(),
                 ..Default::default()
             };
-            assert!(matches!(config.validate(), Err(ConfigError::InvalidDeviceName { .. })));
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::InvalidDeviceName { .. })
+            ));
         }
     }
 
@@ -401,7 +406,9 @@ fn local_with_repos(repos: &[(&str, &str)], default_repo: Option<&str>) -> Local
             default_repo: Some("nonexistent".to_string()),
             ..Default::default()
         };
-        let err = config.validate().expect_err("default_repo not in repos must fail");
+        let err = config
+            .validate()
+            .expect_err("default_repo not in repos must fail");
         assert!(matches!(err, ConfigError::InvalidDefaultRepo { label } if label == "nonexistent"));
     }
 
@@ -428,36 +435,53 @@ fn local_with_repos(repos: &[(&str, &str)], default_repo: Option<&str>) -> Local
     #[test]
     fn test_resolve_repo_explicit_valid() {
         let cfg = local_with_repos(&[("myrepo", "~/my-dots")], None);
-        assert_eq!(cfg.resolve_repo(Some("myrepo")).unwrap(), ("myrepo".to_string(), expand_tilde("~/my-dots")));
+        assert_eq!(
+            cfg.resolve_repo(Some("myrepo")).unwrap(),
+            ("myrepo".to_string(), expand_tilde("~/my-dots"))
+        );
     }
 
     #[test]
     fn test_resolve_repo_explicit_unknown() {
-        let err = LocalConfig::default().resolve_repo(Some("missing")).expect_err("should fail");
+        let err = LocalConfig::default()
+            .resolve_repo(Some("missing"))
+            .expect_err("should fail");
         assert!(matches!(err, ConfigError::UnknownRepoLabel { label } if label == "missing"));
     }
 
     #[test]
     fn test_resolve_repo_default_configured() {
         let cfg = local_with_repos(&[("repo1", "~/dots1"), ("repo2", "~/dots2")], Some("repo2"));
-        assert_eq!(cfg.resolve_repo(None).unwrap(), ("repo2".to_string(), expand_tilde("~/dots2")));
+        assert_eq!(
+            cfg.resolve_repo(None).unwrap(),
+            ("repo2".to_string(), expand_tilde("~/dots2"))
+        );
     }
 
     #[test]
     fn test_resolve_repo_single_repo_auto_inference() {
         let cfg = local_with_repos(&[("only-one", "~/only-dots")], None);
-        assert_eq!(cfg.resolve_repo(None).unwrap(), ("only-one".to_string(), expand_tilde("~/only-dots")));
+        assert_eq!(
+            cfg.resolve_repo(None).unwrap(),
+            ("only-one".to_string(), expand_tilde("~/only-dots"))
+        );
     }
 
     #[test]
     fn test_resolve_repo_ambiguous_when_multiple_and_no_default() {
         let cfg = local_with_repos(&[("repo1", "~/dots1"), ("repo2", "~/dots2")], None);
-        assert!(matches!(cfg.resolve_repo(None), Err(ConfigError::AmbiguousDefaultRepo)));
+        assert!(matches!(
+            cfg.resolve_repo(None),
+            Err(ConfigError::AmbiguousDefaultRepo)
+        ));
     }
 
     #[test]
     fn test_resolve_repo_no_repos_configured() {
-        assert!(matches!(LocalConfig::default().resolve_repo(None), Err(ConfigError::NoReposConfigured)));
+        assert!(matches!(
+            LocalConfig::default().resolve_repo(None),
+            Err(ConfigError::NoReposConfigured)
+        ));
     }
 
     #[test]

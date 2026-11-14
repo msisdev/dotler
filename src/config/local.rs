@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::state::write_file_safe;
+use crate::config::lock::write_file_safe;
 use crate::config::{ConfigError, StateError};
 
 pub const LOCAL_CONFIG_DIR: &str = "~/.config/dotler";
@@ -23,116 +23,7 @@ pub fn expand_tilde(path: &str) -> PathBuf {
     }
 }
 
-pub struct WalkEntry {
-    path: PathBuf,
-    file_name: std::ffi::OsString,
-    file_type: fs::FileType,
-    depth: usize,
-}
-
-impl WalkEntry {
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub fn file_name(&self) -> &std::ffi::OsStr {
-        &self.file_name
-    }
-
-    pub fn file_type(&self) -> fs::FileType {
-        self.file_type
-    }
-
-    pub fn depth(&self) -> usize {
-        self.depth
-    }
-}
-
-pub struct WalkDir {
-    root: PathBuf,
-    min_depth: usize,
-}
-
-impl WalkDir {
-    pub fn new(root: impl AsRef<Path>) -> Self {
-        Self {
-            root: root.as_ref().to_path_buf(),
-            min_depth: 0,
-        }
-    }
-
-    pub fn min_depth(mut self, depth: usize) -> Self {
-        self.min_depth = depth;
-        self
-    }
-
-    pub fn filter_entry<P>(self, mut predicate: P) -> std::vec::IntoIter<std::io::Result<WalkEntry>>
-    where
-        P: FnMut(&WalkEntry) -> bool,
-    {
-        let mut out = Vec::new();
-        Self::collect_entries(&self.root, 0, self.min_depth, &mut predicate, &mut out);
-        out.into_iter()
-    }
-
-    fn collect_entries<P>(
-        path: &Path,
-        depth: usize,
-        min_depth: usize,
-        predicate: &mut P,
-        out: &mut Vec<std::io::Result<WalkEntry>>,
-    ) where
-        P: FnMut(&WalkEntry) -> bool,
-    {
-        let meta = match fs::symlink_metadata(path) {
-            Ok(m) => m,
-            Err(e) => {
-                out.push(Err(e));
-                return;
-            }
-        };
-        let file_type = meta.file_type();
-        let file_name = path
-            .file_name()
-            .map(|n| n.to_os_string())
-            .unwrap_or_else(|| path.as_os_str().to_os_string());
-        let entry = WalkEntry {
-            path: path.to_path_buf(),
-            file_name,
-            file_type,
-            depth,
-        };
-        if !predicate(&entry) {
-            return;
-        }
-        let is_real_dir = file_type.is_dir() && !file_type.is_symlink();
-        if depth >= min_depth {
-            out.push(Ok(entry));
-        }
-        if is_real_dir {
-            match fs::read_dir(path) {
-                Ok(rd) => {
-                    let mut children: Vec<PathBuf> =
-                        rd.filter_map(|r| r.ok().map(|e| e.path())).collect();
-                    children.sort();
-                    for child in children {
-                        Self::collect_entries(&child, depth + 1, min_depth, predicate, out);
-                    }
-                }
-                Err(e) => out.push(Err(e)),
-            }
-        }
-    }
-}
-
-impl IntoIterator for WalkDir {
-    type Item = std::io::Result<WalkEntry>;
-    type IntoIter = std::vec::IntoIter<std::io::Result<WalkEntry>>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.filter_entry(|_| true)
-    }
-}
+pub use crate::config::path_security::{WalkDir, WalkEntry};
 
 /// Searches `start_dir` and its parent directories upward for a `dotler.toml` manifest.
 /// Returns the directory containing the nearest `dotler.toml`, if found.
@@ -475,92 +366,33 @@ devices = ["laptop"]
         assert!(config.validate().is_ok());
     }
 
-    #[test]
-    fn test_validate_default_devices_reject_empty() {
-        let config = LocalConfig {
-            default_devices: vec!["".to_string()],
-            ..Default::default()
-        };
-        let err = config.validate().expect_err("empty device name must fail");
-        assert!(matches!(err, ConfigError::InvalidDeviceName { .. }));
+fn local_with_repos(repos: &[(&str, &str)], default_repo: Option<&str>) -> LocalConfig {
+    let mut cfg = LocalConfig::default();
+    cfg.default_repo = default_repo.map(str::to_string);
+    for &(k, v) in repos {
+        cfg.repos.insert(k.to_string(), v.to_string());
     }
+    cfg
+}
 
     #[test]
-    fn test_validate_default_devices_reject_duplicates() {
-        let config = LocalConfig {
-            default_devices: vec!["laptop".to_string(), "laptop".to_string()],
-            ..Default::default()
-        };
-        let err = config
-            .validate()
-            .expect_err("duplicate device names must fail");
-        assert!(matches!(err, ConfigError::InvalidDeviceName { .. }));
-    }
-
-    #[test]
-    fn test_validate_default_devices_reject_whitespace() {
-        let config = LocalConfig {
-            default_devices: vec!["my laptop".to_string()],
-            ..Default::default()
-        };
-        let err = config
-            .validate()
-            .expect_err("device with whitespace must fail");
-        assert!(matches!(err, ConfigError::InvalidDeviceName { .. }));
-    }
-
-    #[test]
-    fn test_validate_default_devices_reject_slashes() {
-        let config1 = LocalConfig {
-            default_devices: vec!["dev/1".to_string()],
-            ..Default::default()
-        };
-        let err = config1
-            .validate()
-            .expect_err("device with forward slash must fail");
-        assert!(matches!(err, ConfigError::InvalidDeviceName { .. }));
-
-        let config2 = LocalConfig {
-            default_devices: vec!["dev\\1".to_string()],
-            ..Default::default()
-        };
-        let err = config2
-            .validate()
-            .expect_err("device with backslash must fail");
-        assert!(matches!(err, ConfigError::InvalidDeviceName { .. }));
-    }
-
-    #[test]
-    fn test_validate_default_devices_reject_reserved_os_prefix() {
-        let config = LocalConfig {
-            default_devices: vec!["os-nux".to_string()],
-            ..Default::default()
-        };
-        let err = config
-            .validate()
-            .expect_err("device with 'os-' prefix must fail");
-        assert!(matches!(err, ConfigError::InvalidDeviceName { .. }));
-    }
-
-    #[test]
-    fn test_validate_default_devices_reject_reserved_names() {
-        let config1 = LocalConfig {
-            default_devices: vec!["files".to_string()],
-            ..Default::default()
-        };
-        let err = config1
-            .validate()
-            .expect_err("reserved device 'files' must fail");
-        assert!(matches!(err, ConfigError::InvalidDeviceName { .. }));
-
-        let config2 = LocalConfig {
-            default_devices: vec!["vault".to_string()],
-            ..Default::default()
-        };
-        let err = config2
-            .validate()
-            .expect_err("reserved device 'vault' must fail");
-        assert!(matches!(err, ConfigError::InvalidDeviceName { .. }));
+    fn test_validate_default_devices_rejects_invalid_names() {
+        for devices in [
+            vec![""],
+            vec!["laptop", "laptop"],
+            vec!["my laptop"],
+            vec!["dev/1"],
+            vec!["dev\\1"],
+            vec!["os-nux"],
+            vec!["files"],
+            vec!["vault"],
+        ] {
+            let config = LocalConfig {
+                default_devices: devices.into_iter().map(str::to_string).collect(),
+                ..Default::default()
+            };
+            assert!(matches!(config.validate(), Err(ConfigError::InvalidDeviceName { .. })));
+        }
     }
 
     #[test]
@@ -569,131 +401,63 @@ devices = ["laptop"]
             default_repo: Some("nonexistent".to_string()),
             ..Default::default()
         };
-        let err = config
-            .validate()
-            .expect_err("default_repo not in repos must fail");
+        let err = config.validate().expect_err("default_repo not in repos must fail");
         assert!(matches!(err, ConfigError::InvalidDefaultRepo { label } if label == "nonexistent"));
     }
 
     #[test]
     fn test_validate_repos_rejects_invalid_label_or_path() {
-        let mut config = LocalConfig::default();
-        config.repos.insert(
-            "bad label with spaces".to_string(),
-            "~/dotfiles".to_string(),
-        );
-        let err = config.validate().expect_err("invalid label must fail");
-        assert!(matches!(err, ConfigError::InvalidRepoLabel { .. }));
-
-        let mut config2 = LocalConfig::default();
-        config2
-            .repos
-            .insert("valid".to_string(), "/etc/dotfiles".to_string());
-        let err2 = config2
-            .validate()
-            .expect_err("path not starting with ~ must fail");
-        assert!(matches!(err2, ConfigError::InvalidHomePath { .. }));
-
-        let mut config3 = LocalConfig::default();
-        config3
-            .repos
-            .insert("valid".to_string(), "~/dotfiles/../escape".to_string());
-        let err3 = config3.validate().expect_err("path with .. must fail");
-        assert!(matches!(err3, ConfigError::HardBlockedPath { .. }));
-
-        let mut config4 = LocalConfig::default();
-        config4
-            .repos
-            .insert("valid".to_string(), "~/.config/dotler".to_string());
-        let err4 = config4
-            .validate()
-            .expect_err("path inside ~/.config/dotler must fail");
-        assert!(matches!(err4, ConfigError::HardBlockedPath { .. }));
-
-        let mut config5 = LocalConfig::default();
-        config5
-            .repos
-            .insert("valid".to_string(), "~/repo/.git".to_string());
-        let err5 = config5
-            .validate()
-            .expect_err("path targeting .git must fail");
-        assert!(matches!(err5, ConfigError::HardBlockedPath { .. }));
+        for (label, path, kind) in [
+            ("bad label with spaces", "~/dotfiles", "label"),
+            ("valid", "/etc/dotfiles", "home"),
+            ("valid", "~/dotfiles/../escape", "blocked"),
+            ("valid", "~/.config/dotler", "blocked"),
+            ("valid", "~/repo/.git", "blocked"),
+        ] {
+            let err = local_with_repos(&[(label, path)], None)
+                .validate()
+                .expect_err("invalid repo config must fail");
+            match kind {
+                "label" => assert!(matches!(err, ConfigError::InvalidRepoLabel { .. })),
+                "home" => assert!(matches!(err, ConfigError::InvalidHomePath { .. })),
+                _ => assert!(matches!(err, ConfigError::HardBlockedPath { .. })),
+            }
+        }
     }
 
     #[test]
     fn test_resolve_repo_explicit_valid() {
-        let mut config = LocalConfig::default();
-        config
-            .repos
-            .insert("myrepo".to_string(), "~/my-dots".to_string());
-
-        let (label, path) = config.resolve_repo(Some("myrepo")).expect("should resolve");
-        assert_eq!(label, "myrepo");
-        assert_eq!(path, expand_tilde("~/my-dots"));
+        let cfg = local_with_repos(&[("myrepo", "~/my-dots")], None);
+        assert_eq!(cfg.resolve_repo(Some("myrepo")).unwrap(), ("myrepo".to_string(), expand_tilde("~/my-dots")));
     }
 
     #[test]
     fn test_resolve_repo_explicit_unknown() {
-        let config = LocalConfig::default();
-        let err = config
-            .resolve_repo(Some("missing"))
-            .expect_err("should fail");
+        let err = LocalConfig::default().resolve_repo(Some("missing")).expect_err("should fail");
         assert!(matches!(err, ConfigError::UnknownRepoLabel { label } if label == "missing"));
     }
 
     #[test]
     fn test_resolve_repo_default_configured() {
-        let mut config = LocalConfig::default();
-        config
-            .repos
-            .insert("repo1".to_string(), "~/dots1".to_string());
-        config
-            .repos
-            .insert("repo2".to_string(), "~/dots2".to_string());
-        config.default_repo = Some("repo2".to_string());
-
-        let (label, path) = config.resolve_repo(None).expect("should resolve default");
-        assert_eq!(label, "repo2");
-        assert_eq!(path, expand_tilde("~/dots2"));
+        let cfg = local_with_repos(&[("repo1", "~/dots1"), ("repo2", "~/dots2")], Some("repo2"));
+        assert_eq!(cfg.resolve_repo(None).unwrap(), ("repo2".to_string(), expand_tilde("~/dots2")));
     }
 
     #[test]
     fn test_resolve_repo_single_repo_auto_inference() {
-        let mut config = LocalConfig::default();
-        config
-            .repos
-            .insert("only-one".to_string(), "~/only-dots".to_string());
-
-        let (label, path) = config
-            .resolve_repo(None)
-            .expect("single repo should auto-resolve");
-        assert_eq!(label, "only-one");
-        assert_eq!(path, expand_tilde("~/only-dots"));
+        let cfg = local_with_repos(&[("only-one", "~/only-dots")], None);
+        assert_eq!(cfg.resolve_repo(None).unwrap(), ("only-one".to_string(), expand_tilde("~/only-dots")));
     }
 
     #[test]
     fn test_resolve_repo_ambiguous_when_multiple_and_no_default() {
-        let mut config = LocalConfig::default();
-        config
-            .repos
-            .insert("repo1".to_string(), "~/dots1".to_string());
-        config
-            .repos
-            .insert("repo2".to_string(), "~/dots2".to_string());
-
-        let err = config
-            .resolve_repo(None)
-            .expect_err("ambiguous repos must fail");
-        assert!(matches!(err, ConfigError::AmbiguousDefaultRepo));
+        let cfg = local_with_repos(&[("repo1", "~/dots1"), ("repo2", "~/dots2")], None);
+        assert!(matches!(cfg.resolve_repo(None), Err(ConfigError::AmbiguousDefaultRepo)));
     }
 
     #[test]
     fn test_resolve_repo_no_repos_configured() {
-        let config = LocalConfig::default();
-        let err = config
-            .resolve_repo(None)
-            .expect_err("empty repos must fail");
-        assert!(matches!(err, ConfigError::NoReposConfigured));
+        assert!(matches!(LocalConfig::default().resolve_repo(None), Err(ConfigError::NoReposConfigured)));
     }
 
     #[test]

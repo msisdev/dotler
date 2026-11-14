@@ -1,24 +1,22 @@
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::config::{LockError, StateError};
+use crate::config::StateError;
 
 pub const STATE_DB_PATH: &str = "~/.config/dotler/state.db";
 pub const STATE_DB_SCHEMA_VERSION: u32 = 1;
-pub const DOTLER_LOCK_PATH: &str = "~/.config/dotler/dotler.lock";
+pub use crate::config::lock::{
+    ATOMIC_REPLACE_RETRIES, DOTLER_LOCK_PATH, DOTLER_LOCK_POLL_INTERVAL_MS,
+    DOTLER_LOCK_TIMEOUT_MS, DotlerLock, DotlerLockGuard, TMP_FILE_PREFIX, get_lock,
+    write_file_safe,
+};
 pub const BACKUPS_DIR_PATH: &str = "~/.config/dotler/backups";
 pub const SQLITE_JOURNAL_MODE: &str = "WAL";
 pub const SQLITE_SYNCHRONOUS: &str = "NORMAL";
 pub const SQLITE_BUSY_TIMEOUT_MS: u64 = 5000;
-pub const DOTLER_LOCK_TIMEOUT_MS: u64 = 5000;
-pub const DOTLER_LOCK_POLL_INTERVAL_MS: u64 = 50;
-pub const TMP_FILE_PREFIX: &str = ".dotler-tmp-";
-pub const ATOMIC_REPLACE_RETRIES: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncedFileRecord {
@@ -160,6 +158,29 @@ pub fn get_state_db(db_path: PathBuf) -> crate::config::Resource<StateDb, StateE
     crate::config::Resource::new(move || StateDb::open(&db_path), |_| Ok(()))
 }
 
+fn map_synced_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncedFileRecord> {
+    Ok(SyncedFileRecord {
+        target_path: row.get(0)?,
+        repo_label: row.get(1)?,
+        group_name: row.get(2)?,
+        relative_path: row.get(3)?,
+        file_hash: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
+fn map_installed_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstalledFileRecord> {
+    Ok(InstalledFileRecord {
+        target_path: row.get(0)?,
+        repo_url: row.get(1)?,
+        group_name: row.get(2)?,
+        relative_path: row.get(3)?,
+        file_hash: row.get(4)?,
+        updated_at: row.get(5)?,
+        backup_path: row.get(6)?,
+    })
+}
+
 impl StateDb {
     pub fn upsert_synced_file(&self, record: &SyncedFileRecord) -> Result<(), StateError> {
         let guard = self.ensure_conn()?;
@@ -193,25 +214,14 @@ impl StateDb {
         let Some(conn) = guard.as_ref() else {
             return Ok(None);
         };
-        let mut stmt = conn.prepare(
+        conn.query_row(
             "SELECT target_path, repo_label, group_name, relative_path, file_hash, updated_at
              FROM synced_files WHERE target_path = ?1;",
-        )?;
-
-        let record = stmt
-            .query_row(params![target_path], |row| {
-                Ok(SyncedFileRecord {
-                    target_path: row.get(0)?,
-                    repo_label: row.get(1)?,
-                    group_name: row.get(2)?,
-                    relative_path: row.get(3)?,
-                    file_hash: row.get(4)?,
-                    updated_at: row.get(5)?,
-                })
-            })
-            .optional()?;
-
-        Ok(record)
+            params![target_path],
+            map_synced_row,
+        )
+        .optional()
+        .map_err(StateError::from)
     }
 
     pub fn list_synced_files(
@@ -222,49 +232,21 @@ impl StateDb {
         let Some(conn) = guard.as_ref() else {
             return Ok(Vec::new());
         };
-        let mut records = Vec::new();
-
-        if let Some(label) = repo_label {
-            let mut stmt = conn.prepare(
+        let (sql, filter): (&str, Vec<&str>) = match repo_label {
+            Some(label) => (
                 "SELECT target_path, repo_label, group_name, relative_path, file_hash, updated_at
                  FROM synced_files WHERE repo_label = ?1 ORDER BY target_path ASC;",
-            )?;
-            let rows = stmt.query_map(params![label], |row| {
-                Ok(SyncedFileRecord {
-                    target_path: row.get(0)?,
-                    repo_label: row.get(1)?,
-                    group_name: row.get(2)?,
-                    relative_path: row.get(3)?,
-                    file_hash: row.get(4)?,
-                    updated_at: row.get(5)?,
-                })
-            })?;
-
-            for row in rows {
-                records.push(row?);
-            }
-        } else {
-            let mut stmt = conn.prepare(
+                vec![label],
+            ),
+            None => (
                 "SELECT target_path, repo_label, group_name, relative_path, file_hash, updated_at
                  FROM synced_files ORDER BY target_path ASC;",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok(SyncedFileRecord {
-                    target_path: row.get(0)?,
-                    repo_label: row.get(1)?,
-                    group_name: row.get(2)?,
-                    relative_path: row.get(3)?,
-                    file_hash: row.get(4)?,
-                    updated_at: row.get(5)?,
-                })
-            })?;
-
-            for row in rows {
-                records.push(row?);
-            }
-        }
-
-        Ok(records)
+                Vec::new(),
+            ),
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(filter), map_synced_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StateError::from)
     }
 
     pub fn remove_synced_file(&self, target_path: &str) -> Result<bool, StateError> {
@@ -287,14 +269,11 @@ impl StateDb {
         let records = self.list_synced_files(Some(repo_label))?;
         let active_set: std::collections::HashSet<&str> =
             active_target_paths.iter().map(String::as_str).collect();
-
-        let orphaned = records
+        Ok(records
             .into_iter()
             .map(|r| r.target_path)
             .filter(|p| !active_set.contains(p.as_str()))
-            .collect();
-
-        Ok(orphaned)
+            .collect())
     }
 
     pub fn upsert_installed_file(&self, record: &InstalledFileRecord) -> Result<(), StateError> {
@@ -331,26 +310,14 @@ impl StateDb {
         let Some(conn) = guard.as_ref() else {
             return Ok(None);
         };
-        let mut stmt = conn.prepare(
+        conn.query_row(
             "SELECT target_path, repo_url, group_name, relative_path, file_hash, updated_at, backup_path
              FROM installed_files WHERE target_path = ?1;",
-        )?;
-
-        let record = stmt
-            .query_row(params![target_path], |row| {
-                Ok(InstalledFileRecord {
-                    target_path: row.get(0)?,
-                    repo_url: row.get(1)?,
-                    group_name: row.get(2)?,
-                    relative_path: row.get(3)?,
-                    file_hash: row.get(4)?,
-                    updated_at: row.get(5)?,
-                    backup_path: row.get(6)?,
-                })
-            })
-            .optional()?;
-
-        Ok(record)
+            params![target_path],
+            map_installed_row,
+        )
+        .optional()
+        .map_err(StateError::from)
     }
 
     pub fn list_installed_files(
@@ -361,51 +328,21 @@ impl StateDb {
         let Some(conn) = guard.as_ref() else {
             return Ok(Vec::new());
         };
-        let mut records = Vec::new();
-
-        if let Some(url) = repo_url {
-            let mut stmt = conn.prepare(
+        let (sql, filter): (&str, Vec<&str>) = match repo_url {
+            Some(url) => (
                 "SELECT target_path, repo_url, group_name, relative_path, file_hash, updated_at, backup_path
                  FROM installed_files WHERE repo_url = ?1 ORDER BY target_path ASC;",
-            )?;
-            let rows = stmt.query_map(params![url], |row| {
-                Ok(InstalledFileRecord {
-                    target_path: row.get(0)?,
-                    repo_url: row.get(1)?,
-                    group_name: row.get(2)?,
-                    relative_path: row.get(3)?,
-                    file_hash: row.get(4)?,
-                    updated_at: row.get(5)?,
-                    backup_path: row.get(6)?,
-                })
-            })?;
-
-            for row in rows {
-                records.push(row?);
-            }
-        } else {
-            let mut stmt = conn.prepare(
+                vec![url],
+            ),
+            None => (
                 "SELECT target_path, repo_url, group_name, relative_path, file_hash, updated_at, backup_path
                  FROM installed_files ORDER BY target_path ASC;",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok(InstalledFileRecord {
-                    target_path: row.get(0)?,
-                    repo_url: row.get(1)?,
-                    group_name: row.get(2)?,
-                    relative_path: row.get(3)?,
-                    file_hash: row.get(4)?,
-                    updated_at: row.get(5)?,
-                    backup_path: row.get(6)?,
-                })
-            })?;
-
-            for row in rows {
-                records.push(row?);
-            }
-        }
-
-        Ok(records)
+                Vec::new(),
+            ),
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(filter), map_installed_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StateError::from)
     }
 
     pub fn remove_installed_file(
@@ -413,144 +350,16 @@ impl StateDb {
         target_path: &str,
     ) -> Result<Option<InstalledFileRecord>, StateError> {
         let existing = self.get_installed_file(target_path)?;
-        if existing.is_some() {
-            let guard = self.open_existing_conn()?;
-            if let Some(conn) = guard.as_ref() {
-                conn.execute(
-                    "DELETE FROM installed_files WHERE target_path = ?1;",
-                    params![target_path],
-                )?;
-            }
+        if existing.is_some()
+            && let Some(conn) = self.open_existing_conn()?.as_ref()
+        {
+            conn.execute(
+                "DELETE FROM installed_files WHERE target_path = ?1;",
+                params![target_path],
+            )?;
         }
         Ok(existing)
     }
-}
-
-pub struct DotlerLock {
-    pub lock_path: PathBuf,
-}
-
-impl DotlerLock {
-    pub fn new(lock_path: PathBuf) -> Self {
-        Self { lock_path }
-    }
-
-    pub fn acquire(
-        &self,
-        timeout: Duration,
-        poll_interval: Duration,
-    ) -> Result<DotlerLockGuard, LockError> {
-        if let Some(parent) = self.lock_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&self.lock_path)?;
-
-        let start = Instant::now();
-
-        loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(DotlerLockGuard { file }),
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    if start.elapsed() >= timeout {
-                        return Err(LockError::Timeout {
-                            timeout_ms: timeout.as_millis() as u64,
-                        });
-                    }
-                    std::thread::sleep(poll_interval);
-                }
-                Err(std::fs::TryLockError::Error(e)) => return Err(LockError::Io(e)),
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct DotlerLockGuard {
-    #[allow(dead_code)]
-    file: File,
-}
-
-impl Drop for DotlerLockGuard {
-    fn drop(&mut self) {
-        // No-Unlink on Unlock invariant:
-        // Lock file is never removed from disk. Closing the file descriptor
-        // upon Drop releases the kernel lock cleanly while preventing ghost inode race conditions.
-    }
-}
-
-/// Creates a lazy [`Resource`] for `~/.config/dotler/dotler.lock`.
-///
-/// - `.get()` acquires an exclusive kernel file lock with a 5000ms timeout and 50ms poll interval on first access.
-/// - `.set()` is a no-op since [`DotlerLockGuard`] releases its lock automatically on [`Drop`].
-pub fn get_lock(lock_path: PathBuf) -> crate::config::Resource<DotlerLockGuard, LockError> {
-    crate::config::Resource::new(
-        move || {
-            DotlerLock::new(lock_path.clone()).acquire(
-                Duration::from_millis(DOTLER_LOCK_TIMEOUT_MS),
-                Duration::from_millis(DOTLER_LOCK_POLL_INTERVAL_MS),
-            )
-        },
-        |_guard| Ok(()),
-    )
-}
-
-/// Writes `content` to `dest` atomically by creating a `.dotler-tmp-*` file
-/// in the same parent directory, syncing to disk (`fsync`), preserving permissions
-/// when replacing an existing file, and renaming into place with bounded retries.
-pub fn write_file_safe(dest: &Path, content: &[u8]) -> Result<(), StateError> {
-    let parent = match dest.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
-    fs::create_dir_all(parent)?;
-
-    let rand_id: u64 = crate::crypto::random_u64();
-    let tmp_path = parent.join(format!("{TMP_FILE_PREFIX}{rand_id:016x}"));
-
-    {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp_path)?;
-        if let Err(e) = file.write_all(content).and_then(|()| file.sync_all()) {
-            drop(file);
-            let _ = fs::remove_file(&tmp_path);
-            return Err(StateError::Io(e));
-        }
-    }
-
-    #[cfg(unix)]
-    if let Ok(metadata) = fs::metadata(dest) {
-        let _ = fs::set_permissions(&tmp_path, metadata.permissions());
-    }
-
-    let mut attempts = 0;
-    loop {
-        match fs::rename(&tmp_path, dest) {
-            Ok(()) => break,
-            Err(e) => {
-                attempts += 1;
-                if attempts >= ATOMIC_REPLACE_RETRIES {
-                    let _ = fs::remove_file(&tmp_path);
-                    return Err(StateError::AtomicReplaceFailed(format!(
-                        "Failed to rename {} to {}: {}",
-                        tmp_path.display(),
-                        dest.display(),
-                        e
-                    )));
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -558,385 +367,175 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn synced_rec(target: &str, repo: &str, group: &str, rel: &str, hash: &str) -> SyncedFileRecord {
+        SyncedFileRecord {
+            target_path: target.to_string(),
+            repo_label: repo.to_string(),
+            group_name: group.to_string(),
+            relative_path: rel.to_string(),
+            file_hash: hash.to_string(),
+            updated_at: 1700000000,
+        }
+    }
+
+    fn installed_rec(
+        target: &str,
+        url: &str,
+        group: &str,
+        rel: &str,
+        hash: &str,
+        backup: Option<&str>,
+    ) -> InstalledFileRecord {
+        InstalledFileRecord {
+            target_path: target.to_string(),
+            repo_url: url.to_string(),
+            group_name: group.to_string(),
+            relative_path: rel.to_string(),
+            file_hash: hash.to_string(),
+            updated_at: 1700000000,
+            backup_path: backup.map(str::to_string),
+        }
+    }
+
     #[test]
     fn test_state_db_initialization_schema_and_pragmas() {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("state.db");
-
         let db = StateDb::open(&db_path).expect("open should succeed");
-        // Write-On-Demand: opening a non-existent state.db or querying it must NOT create the file
         assert!(!db_path.exists());
         assert!(db.list_synced_files(None).expect("list empty").is_empty());
         assert!(!db_path.exists());
 
-        // First write creates state.db on disk and configures WAL mode
-        let record = SyncedFileRecord {
-            target_path: "/home/user/.zshrc".to_string(),
-            repo_label: "main".to_string(),
-            group_name: "zsh".to_string(),
-            relative_path: ".zshrc".to_string(),
-            file_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                .to_string(),
-            updated_at: 1700000000,
-        };
+        let record = synced_rec(
+            "/home/user/.zshrc",
+            "main",
+            "zsh",
+            ".zshrc",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        );
         db.upsert_synced_file(&record).expect("upsert");
         assert!(db_path.exists());
 
-        // Verify journal mode is WAL and schema user_version is set
         {
             let guard = db.conn.lock().unwrap();
             let conn = guard.as_ref().expect("connection initialized");
-            let mode: String = conn
-                .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
-                .expect("pragma journal_mode");
+            let mode: String = conn.query_row("PRAGMA journal_mode;", [], |r| r.get(0)).unwrap();
             assert_eq!(mode.to_uppercase(), "WAL");
-            let user_version: u32 = conn
-                .query_row("PRAGMA user_version;", [], |row| row.get(0))
-                .expect("pragma user_version");
+            let user_version: u32 = conn.query_row("PRAGMA user_version;", [], |r| r.get(0)).unwrap();
             assert_eq!(user_version, STATE_DB_SCHEMA_VERSION);
         }
-        assert_eq!(
-            db.schema_version().expect("schema_version"),
-            STATE_DB_SCHEMA_VERSION
-        );
+        assert_eq!(db.schema_version().expect("schema_version"), STATE_DB_SCHEMA_VERSION);
     }
 
     #[test]
     fn test_state_db_upgrades_legacy_zero_version_and_preserves_records() {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("state.db");
-
         {
-            let raw_conn = Connection::open(&db_path).expect("open raw sqlite");
-            raw_conn
-                .execute_batch(
-                    "CREATE TABLE synced_files (
-                        target_path   TEXT PRIMARY KEY NOT NULL,
-                        repo_label    TEXT NOT NULL,
-                        group_name    TEXT NOT NULL,
-                        relative_path TEXT NOT NULL,
-                        file_hash     TEXT NOT NULL,
-                        updated_at    INTEGER NOT NULL
-                    );
-                    INSERT INTO synced_files (target_path, repo_label, group_name, relative_path, file_hash, updated_at)
-                    VALUES ('/home/user/.gitconfig', 'main', 'git', '.gitconfig', 'legacy_hash', 1700000000);
-                    PRAGMA user_version = 0;",
-                )
-                .expect("seed legacy v0 db");
+            let raw = Connection::open(&db_path).expect("open raw sqlite");
+            raw.execute_batch(
+                "CREATE TABLE synced_files (
+                    target_path TEXT PRIMARY KEY NOT NULL, repo_label TEXT NOT NULL,
+                    group_name TEXT NOT NULL, relative_path TEXT NOT NULL,
+                    file_hash TEXT NOT NULL, updated_at INTEGER NOT NULL
+                );
+                INSERT INTO synced_files VALUES ('/home/user/.gitconfig', 'main', 'git', '.gitconfig', 'legacy_hash', 1700000000);
+                PRAGMA user_version = 0;",
+            ).expect("seed legacy v0 db");
         }
-
         let db = StateDb::open(&db_path).expect("open legacy v0 db");
-        assert_eq!(
-            db.schema_version().expect("schema_version"),
-            STATE_DB_SCHEMA_VERSION
-        );
-        let record = db
-            .get_synced_file("/home/user/.gitconfig")
-            .expect("query")
-            .expect("legacy record preserved");
-        assert_eq!(record.file_hash, "legacy_hash");
+        assert_eq!(db.schema_version().expect("schema_version"), STATE_DB_SCHEMA_VERSION);
+        assert_eq!(db.get_synced_file("/home/user/.gitconfig").unwrap().unwrap().file_hash, "legacy_hash");
     }
 
     #[test]
     fn test_state_db_rejects_future_unsupported_schema_version() {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("state.db");
-
-        {
-            let raw_conn = Connection::open(&db_path).expect("open raw sqlite");
-            raw_conn
-                .execute_batch("PRAGMA user_version = 2;")
-                .expect("set future user_version");
-        }
-
+        Connection::open(&db_path).unwrap().execute_batch("PRAGMA user_version = 2;").unwrap();
         let err = match StateDb::open(&db_path) {
             Err(e) => e,
             Ok(_) => panic!("opening state.db with future user_version must fail"),
         };
-        match err {
-            StateError::UnsupportedSchemaVersion {
-                found,
-                max_supported,
-            } => {
-                assert_eq!(found, 2);
-                assert_eq!(max_supported, STATE_DB_SCHEMA_VERSION);
-                assert_eq!(err.exit_code(), 2);
-            }
-            other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
-        }
+        assert!(matches!(
+            err,
+            StateError::UnsupportedSchemaVersion { found: 2, max_supported }
+                if max_supported == STATE_DB_SCHEMA_VERSION
+        ));
+        assert_eq!(err.exit_code(), 2);
     }
 
     #[test]
     fn test_state_db_open_error_propagation_on_invalid_target() {
         let dir = tempdir().expect("tempdir");
-        match StateDb::open(dir.path()) {
-            Err(err) => assert!(matches!(err, StateError::Sqlite(_) | StateError::Io(_))),
-            Ok(_) => panic!("opening directory as state.db must fail"),
-        }
+        assert!(matches!(StateDb::open(dir.path()), Err(StateError::Sqlite(_) | StateError::Io(_))));
     }
 
     #[test]
     fn test_synced_files_crud() {
         let dir = tempdir().expect("tempdir");
-        let db_path = dir.path().join("state.db");
-        let db = StateDb::open(&db_path).expect("open");
-
-        let record = SyncedFileRecord {
-            target_path: "/home/user/.config/nvim/init.lua".to_string(),
-            repo_label: "main".to_string(),
-            group_name: "nvim".to_string(),
-            relative_path: "init.lua".to_string(),
-            file_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                .to_string(),
-            updated_at: 1700000000,
-        };
-
+        let db = StateDb::open(&dir.path().join("state.db")).expect("open");
+        let record = synced_rec(
+            "/home/user/.config/nvim/init.lua",
+            "main",
+            "nvim",
+            "init.lua",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        );
         db.upsert_synced_file(&record).expect("upsert");
-
-        let fetched = db
-            .get_synced_file("/home/user/.config/nvim/init.lua")
-            .expect("get")
-            .expect("should exist");
-        assert_eq!(fetched, record);
-
-        let list = db.list_synced_files(Some("main")).expect("list");
-        assert_eq!(list.len(), 1);
-
-        let list_other = db.list_synced_files(Some("other")).expect("list");
-        assert_eq!(list_other.len(), 0);
-
-        let removed = db
-            .remove_synced_file("/home/user/.config/nvim/init.lua")
-            .expect("remove");
-        assert!(removed);
-
-        let missing = db
-            .get_synced_file("/home/user/.config/nvim/init.lua")
-            .expect("get");
-        assert!(missing.is_none());
+        assert_eq!(db.get_synced_file("/home/user/.config/nvim/init.lua").unwrap(), Some(record));
+        assert_eq!(db.list_synced_files(Some("main")).unwrap().len(), 1);
+        assert_eq!(db.list_synced_files(Some("other")).unwrap().len(), 0);
+        assert!(db.remove_synced_file("/home/user/.config/nvim/init.lua").unwrap());
+        assert!(db.get_synced_file("/home/user/.config/nvim/init.lua").unwrap().is_none());
     }
 
     #[test]
     fn test_installed_files_preserves_original_backup_path_on_reinstall() {
         let dir = tempdir().expect("tempdir");
-        let db_path = dir.path().join("state.db");
-        let db = StateDb::open(&db_path).expect("open");
-
-        let initial_record = InstalledFileRecord {
-            target_path: "/home/user/.zshrc".to_string(),
-            repo_url: "https://github.com/example/dots.git".to_string(),
-            group_name: "zsh".to_string(),
-            relative_path: ".zshrc".to_string(),
-            file_hash: "hash_v1".to_string(),
-            updated_at: 1700000000,
-            backup_path: Some("/home/user/.config/dotler/backups/zshrc.bak".to_string()),
-        };
-
-        db.upsert_installed_file(&initial_record)
-            .expect("initial install");
-
-        // Reinstall with a new hash, but None for backup_path
-        let reinstall_record = InstalledFileRecord {
-            target_path: "/home/user/.zshrc".to_string(),
-            repo_url: "https://github.com/example/dots.git".to_string(),
-            group_name: "zsh".to_string(),
-            relative_path: ".zshrc".to_string(),
-            file_hash: "hash_v2".to_string(),
-            updated_at: 1700000500,
-            backup_path: None,
-        };
-
-        db.upsert_installed_file(&reinstall_record)
-            .expect("reinstall");
-
-        let fetched = db
-            .get_installed_file("/home/user/.zshrc")
-            .expect("get")
-            .expect("exists");
+        let db = StateDb::open(&dir.path().join("state.db")).expect("open");
+        let backup = "/home/user/.config/dotler/backups/zshrc.bak";
+        db.upsert_installed_file(&installed_rec(
+            "/home/user/.zshrc", "https://github.com/example/dots.git", "zsh", ".zshrc", "hash_v1", Some(backup),
+        )).expect("initial install");
+        db.upsert_installed_file(&installed_rec(
+            "/home/user/.zshrc", "https://github.com/example/dots.git", "zsh", ".zshrc", "hash_v2", None,
+        )).expect("reinstall");
+        let fetched = db.get_installed_file("/home/user/.zshrc").unwrap().unwrap();
         assert_eq!(fetched.file_hash, "hash_v2");
-        assert_eq!(
-            fetched.backup_path,
-            Some("/home/user/.config/dotler/backups/zshrc.bak".to_string()),
-            "original backup_path must be preserved on reinstallation"
-        );
+        assert_eq!(fetched.backup_path.as_deref(), Some(backup));
     }
 
     #[test]
     fn test_synced_and_installed_tables_are_isolated() {
         let dir = tempdir().expect("tempdir");
-        let db_path = dir.path().join("state.db");
-        let db = StateDb::open(&db_path).expect("open");
-
-        let synced_record = SyncedFileRecord {
-            target_path: "/home/user/.bashrc".to_string(),
-            repo_label: "personal".to_string(),
-            group_name: "bash".to_string(),
-            relative_path: ".bashrc".to_string(),
-            file_hash: "personal_hash".to_string(),
-            updated_at: 1700000000,
-        };
-        db.upsert_synced_file(&synced_record)
-            .expect("upsert synced");
-
-        let installed_record = InstalledFileRecord {
-            target_path: "/home/user/.bashrc".to_string(),
-            repo_url: "https://github.com/community/dots.git".to_string(),
-            group_name: "bash".to_string(),
-            relative_path: ".bashrc".to_string(),
-            file_hash: "community_hash".to_string(),
-            updated_at: 1700000100,
-            backup_path: Some("/home/user/.config/dotler/backups/bashrc.bak".to_string()),
-        };
-        db.upsert_installed_file(&installed_record)
-            .expect("upsert installed");
-
-        // Verify synced file still intact
-        let synced = db
-            .get_synced_file("/home/user/.bashrc")
-            .expect("get synced")
-            .expect("synced must exist");
-        assert_eq!(synced.file_hash, "personal_hash");
-
-        // Remove installed file and verify synced record is unaffected
-        let removed = db
-            .remove_installed_file("/home/user/.bashrc")
-            .expect("remove");
-        assert!(removed.is_some());
-
-        let synced_after = db
-            .get_synced_file("/home/user/.bashrc")
-            .expect("get synced")
-            .expect("synced must still exist");
-        assert_eq!(synced_after.file_hash, "personal_hash");
+        let db = StateDb::open(&dir.path().join("state.db")).expect("open");
+        db.upsert_synced_file(&synced_rec("/home/user/.bashrc", "personal", "bash", ".bashrc", "personal_hash")).unwrap();
+        db.upsert_installed_file(&installed_rec(
+            "/home/user/.bashrc",
+            "https://github.com/community/dots.git",
+            "bash",
+            ".bashrc",
+            "community_hash",
+            Some("/home/user/.config/dotler/backups/bashrc.bak"),
+        )).unwrap();
+        assert_eq!(db.get_synced_file("/home/user/.bashrc").unwrap().unwrap().file_hash, "personal_hash");
+        assert!(db.remove_installed_file("/home/user/.bashrc").unwrap().is_some());
+        assert_eq!(db.get_synced_file("/home/user/.bashrc").unwrap().unwrap().file_hash, "personal_hash");
     }
 
     #[test]
     fn test_find_orphaned_synced_files() {
         let dir = tempdir().expect("tempdir");
-        let db_path = dir.path().join("state.db");
-        let db = StateDb::open(&db_path).expect("open");
-
-        db.upsert_synced_file(&SyncedFileRecord {
-            target_path: "/home/user/active.txt".to_string(),
-            repo_label: "main".to_string(),
-            group_name: "docs".to_string(),
-            relative_path: "active.txt".to_string(),
-            file_hash: "h1".to_string(),
-            updated_at: 100,
-        })
-        .expect("upsert");
-
-        db.upsert_synced_file(&SyncedFileRecord {
-            target_path: "/home/user/orphaned.txt".to_string(),
-            repo_label: "main".to_string(),
-            group_name: "docs".to_string(),
-            relative_path: "orphaned.txt".to_string(),
-            file_hash: "h2".to_string(),
-            updated_at: 100,
-        })
-        .expect("upsert");
-
-        db.upsert_synced_file(&SyncedFileRecord {
-            target_path: "/home/user/other_repo.txt".to_string(),
-            repo_label: "other".to_string(),
-            group_name: "docs".to_string(),
-            relative_path: "other_repo.txt".to_string(),
-            file_hash: "h3".to_string(),
-            updated_at: 100,
-        })
-        .expect("upsert");
-
-        let active = vec!["/home/user/active.txt".to_string()];
-        let orphaned = db
-            .find_orphaned_synced_files("main", &active)
-            .expect("orphaned query");
+        let db = StateDb::open(&dir.path().join("state.db")).expect("open");
+        for (path, repo, rel, hash) in [
+            ("/home/user/active.txt", "main", "active.txt", "h1"),
+            ("/home/user/orphaned.txt", "main", "orphaned.txt", "h2"),
+            ("/home/user/other_repo.txt", "other", "other_repo.txt", "h3"),
+        ] {
+            db.upsert_synced_file(&synced_rec(path, repo, "docs", rel, hash)).unwrap();
+        }
+        let orphaned = db.find_orphaned_synced_files("main", &["/home/user/active.txt".to_string()]).unwrap();
         assert_eq!(orphaned, vec!["/home/user/orphaned.txt".to_string()]);
-    }
-
-    #[test]
-    fn test_dotler_lock_acquire_and_drop_no_unlink() {
-        let dir = tempdir().expect("tempdir");
-        let lock_path = dir.path().join("dotler.lock");
-        let lock = DotlerLock::new(lock_path.clone());
-
-        {
-            let _guard = lock
-                .acquire(Duration::from_millis(500), Duration::from_millis(10))
-                .expect("lock acquire");
-            assert!(lock_path.exists());
-        }
-
-        // Invariant: No-Unlink on Unlock
-        assert!(
-            lock_path.exists(),
-            "dotler.lock must remain on disk after unlock"
-        );
-
-        // Immediate re-acquire must succeed
-        let guard2 = lock
-            .acquire(Duration::from_millis(500), Duration::from_millis(10))
-            .expect("re-acquire");
-        drop(guard2);
-        assert!(lock_path.exists());
-    }
-
-    #[test]
-    fn test_dotler_lock_timeout_on_contention() {
-        let dir = tempdir().expect("tempdir");
-        let lock_path = dir.path().join("dotler.lock");
-        let lock1 = DotlerLock::new(lock_path.clone());
-        let lock2 = DotlerLock::new(lock_path.clone());
-
-        let _guard = lock1
-            .acquire(Duration::from_millis(1000), Duration::from_millis(10))
-            .expect("lock1 acquire");
-
-        // Attempting to acquire lock2 with short timeout should fail with Timeout
-        let err = lock2
-            .acquire(Duration::from_millis(150), Duration::from_millis(20))
-            .expect_err("contention must time out");
-
-        match err {
-            LockError::Timeout { timeout_ms } => {
-                assert!(timeout_ms >= 150);
-            }
-            other => panic!("expected LockError::Timeout, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_shared_write_file_safe_creates_overwrites_and_preserves_permissions() {
-        let dir = tempdir().expect("tempdir");
-        let target = dir.path().join("nested").join("config.toml");
-
-        write_file_safe(&target, b"first = 1\n").expect("initial atomic write");
-        assert_eq!(fs::read_to_string(&target).unwrap(), "first = 1\n");
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
-        }
-
-        write_file_safe(&target, b"second = 2\n").expect("overwrite atomic write");
-        assert_eq!(fs::read_to_string(&target).unwrap(), "second = 2\n");
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "existing file permissions must be preserved");
-        }
-
-        let parent = target.parent().unwrap();
-        let leftovers: Vec<_> = fs::read_dir(parent)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().starts_with(TMP_FILE_PREFIX))
-            .collect();
-        assert!(
-            leftovers.is_empty(),
-            "write_file_safe must leave zero temporary staging files"
-        );
     }
 }

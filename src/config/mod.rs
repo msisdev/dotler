@@ -1,7 +1,15 @@
+pub mod cascade;
 pub mod local;
+pub mod lock;
+pub mod path_security;
 pub mod repo;
-pub mod resource;
+pub mod selection;
 pub mod state;
+pub mod template;
+
+pub mod resource {
+    pub use crate::core::resource::Resource;
+}
 
 pub use local::{
     LOCAL_CONFIG_DIR, LOCAL_CONFIG_FILE, LocalConfig, RESERVED_OS_PREFIX, find_ancestor_repo_dir,

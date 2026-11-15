@@ -87,8 +87,8 @@ fn test_tamper_ciphertext_multi_bit_flips() {
 
     let mut tampered = original_enc.clone();
     // Invert all bits in first 4 bytes of ciphertext
-    for i in 0..4 {
-        tampered.ciphertext[i] ^= 0xFF;
+    for byte in tampered.ciphertext.iter_mut().take(4) {
+        *byte ^= 0xFF;
     }
 
     let result = vault_key.decrypt_file(&tampered);

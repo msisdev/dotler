@@ -19,8 +19,9 @@ pub use commands::{Cli, Command, GitCommand, KeyCommand, VaultCommand, dispatch}
 pub use output::{
     CliError, EXIT_AUTH_OR_LOCK_ERROR, EXIT_CONFIG_OR_ARGS_ERROR, EXIT_SECURITY_BLOCKED,
     EXIT_SUCCESS, EXIT_SYNC_CONFLICT, ExportReport, InlineRender, JsonEnvelope, JsonErrorPayload,
-    KeyReport, UpdateReport, VaultInitReport, VaultPasswdReport, VaultRecoverReport,
-    render_engine_error, render_error, render_error_to, render_success, render_success_to,
+    KeyLsReport, KeyRepoStatusEntry, KeyReport, UpdateReport, VaultImportReport, VaultInitReport,
+    VaultPasswdReport, VaultRecoverReport, render_engine_error, render_error, render_error_to,
+    render_success, render_success_to,
 };
 
 /// Public entry point for executing the CLI application.

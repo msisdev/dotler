@@ -361,7 +361,7 @@ fn test_e2e_vault_init_import_from_git_url_and_local_sources() {
         "New vault init must include recovery mnemonic"
     );
 
-    // 2. Import vault into second repo via `--from origin` (registered repo label)
+    // 2. Import vault into second repo via `vault import --file origin` (registered repo label)
     fs::create_dir_all(&repo_from_label).unwrap();
     assert_eq!(
         run_dotler(
@@ -375,7 +375,7 @@ fn test_e2e_vault_init_import_from_git_url_and_local_sources() {
     );
     let from_out = run_dotler(
         &repo_from_label,
-        &["vault", "init", "--from", "origin", "--json"],
+        &["vault", "import", "--file", "origin", "--json"],
         Some("master-shared-pass-777"),
     );
     assert_eq!(from_out.status.code(), Some(0));
@@ -385,6 +385,7 @@ fn test_e2e_vault_init_import_from_git_url_and_local_sources() {
         from_json["data"].get("mnemonic").is_none(),
         "Imported vault must omit recovery mnemonic"
     );
+    assert_eq!(from_json["data"]["rekeyed_files"], 0);
     assert_eq!(from_json["data"]["hint"], "shared-hint");
 
     // Wrong passphrase must fail with exit code 4
@@ -393,7 +394,7 @@ fn test_e2e_vault_init_import_from_git_url_and_local_sources() {
     run_dotler(&repo_wrong, &["init", "--label", "wrong", "--json"], None);
     let wrong_out = run_dotler(
         &repo_wrong,
-        &["vault", "init", "--from", "origin", "--json"],
+        &["vault", "import", "--file", "origin", "--json"],
         Some("wrong-passphrase"),
     );
     assert_eq!(wrong_out.status.code(), Some(4));
@@ -422,7 +423,7 @@ fn test_e2e_vault_init_import_from_git_url_and_local_sources() {
     let file_url = format!("file://{}", json_file.display());
     let url_out = run_dotler(
         &repo_from_url,
-        &["vault", "init", "--url", &file_url, "--json"],
+        &["vault", "import", "--url", &file_url, "--json"],
         Some("master-shared-pass-777"),
     );
     assert_eq!(url_out.status.code(), Some(0));
@@ -483,12 +484,172 @@ fn test_e2e_vault_init_import_from_git_url_and_local_sources() {
     let git_url = format!("file://{}", bare_git.display());
     let git_out = run_dotler(
         &repo_from_git,
-        &["vault", "init", "--git", &git_url, "--json"],
+        &["vault", "import", "--git", &git_url, "--json"],
         Some("master-shared-pass-777"),
     );
     assert_eq!(git_out.status.code(), Some(0));
     let git_json: serde_json::Value = serde_json::from_slice(&git_out.stdout).unwrap();
     assert_eq!(git_json["data"]["vault_id"], origin_vault_id);
+
+    // 5. Importing onto an ALREADY-initialized repo with .enc files automatically re-keys them
+    let repo_existing = home_dir.join("repo_existing");
+    fs::create_dir_all(repo_existing.join("sec")).unwrap();
+    assert_eq!(
+        run_dotler(
+            &repo_existing,
+            &["init", "--label", "existing", "--json"],
+            None
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    fs::write(
+        repo_existing.join("dotler.toml"),
+        "[sec]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nfiles = \"secret.txt enc\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        run_dotler(
+            &repo_existing,
+            &["vault", "init", "--json"],
+            Some("existing-old-pass-123"),
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    let existing_cfg_before =
+        dotler::config::RepoConfig::load(&repo_existing.join("dotler.toml")).unwrap();
+    let old_vault_id = existing_cfg_before.vault.as_ref().unwrap().vault_id.clone();
+    assert_ne!(old_vault_id, origin_vault_id);
+
+    let os_secret = home_dir.join("secret.txt");
+    fs::write(&os_secret, b"REKEY_ME_ON_VAULT_IMPORT\n").unwrap();
+    assert_eq!(
+        run_dotler(
+            &repo_existing,
+            &["import", "-y", "--json"],
+            Some("existing-old-pass-123"),
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+
+    // Run `dotler vault import --file origin` (different passphrase via DOTLER_PASSPHRASE vs keyring/existing)
+    // Put existing-old-pass in OS keyring via `key set` first, then supply origin pass via DOTLER_PASSPHRASE.
+    let key_set_child = Command::new(env!("CARGO_BIN_EXE_dotler"))
+        .env("HOME", &home_dir)
+        .env("DOTLER_MOCK_KEYRING", "1")
+        .env_remove("DOTLER_PASSPHRASE")
+        .current_dir(&repo_existing)
+        .args(["key", "set", "--password-stdin", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let mut child = key_set_child;
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"existing-old-pass-123\n")
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0));
+    }
+
+    // Notice DOTLER_MOCK_KEYRING starts fresh per process, so let's test in-memory re-keying when both vaults
+    // use DOTLER_PASSPHRASE or via in-process test, AND test cross-vault mismatch detection with `dotler check`.
+    let rekey_same_pw_repo = home_dir.join("repo_rekey_same");
+    fs::create_dir_all(rekey_same_pw_repo.join("sec")).unwrap();
+    run_dotler(
+        &rekey_same_pw_repo,
+        &["init", "--label", "rekey_same", "--json"],
+        None,
+    );
+    fs::write(
+        rekey_same_pw_repo.join("dotler.toml"),
+        "[sec]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nfiles = \"secret.txt enc\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        run_dotler(
+            &rekey_same_pw_repo,
+            &["vault", "init", "--json"],
+            Some("master-shared-pass-777"),
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run_dotler(
+            &rekey_same_pw_repo,
+            &["import", "-y", "--json"],
+            Some("master-shared-pass-777"),
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    let enc_before =
+        EncryptedFile::from_bytes(&fs::read(rekey_same_pw_repo.join("sec/secret.txt.enc")).unwrap())
+            .unwrap();
+    assert_ne!(
+        dotler::config::RepoConfig::load(&rekey_same_pw_repo.join("dotler.toml"))
+            .unwrap()
+            .vault
+            .unwrap()
+            .vault_id,
+        origin_vault_id
+    );
+
+    let rekey_out = run_dotler(
+        &rekey_same_pw_repo,
+        &["vault", "import", "--file", "origin", "--json"],
+        Some("master-shared-pass-777"),
+    );
+    assert_eq!(
+        rekey_out.status.code(),
+        Some(0),
+        "vault import rekeying stderr: {}",
+        String::from_utf8_lossy(&rekey_out.stderr)
+    );
+    let rekey_json: serde_json::Value = serde_json::from_slice(&rekey_out.stdout).unwrap();
+    assert_eq!(rekey_json["data"]["vault_id"], origin_vault_id);
+    assert_eq!(rekey_json["data"]["rekeyed_files"], 1);
+
+    let enc_after =
+        EncryptedFile::from_bytes(&fs::read(rekey_same_pw_repo.join("sec/secret.txt.enc")).unwrap())
+            .unwrap();
+    assert_ne!(enc_before.vault_id, enc_after.vault_id);
+    assert_eq!(
+        dotler::config::RepoConfig::load(&rekey_same_pw_repo.join("dotler.toml"))
+            .unwrap()
+            .vault
+            .unwrap()
+            .vault_id,
+        origin_vault_id
+    );
+    assert_eq!(
+        run_dotler(&rekey_same_pw_repo, &["check", "--json"], None)
+            .status
+            .code(),
+        Some(0)
+    );
+
+    // 6. Test `dotler key ls --json`
+    let key_ls_out = run_dotler(&repo_origin, &["key", "ls", "--json"], None);
+    assert_eq!(key_ls_out.status.code(), Some(0));
+    let key_ls_json: serde_json::Value = serde_json::from_slice(&key_ls_out.stdout).unwrap();
+    assert_eq!(key_ls_json["command"], "key ls");
+    assert_eq!(key_ls_json["data"]["use_keyring"], true);
+    assert!(!key_ls_json["data"]["repos"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -596,7 +757,7 @@ fn test_e2e_multi_vault_keyring_isolation_shared_init_and_fallback() {
     assert_eq!(
         run_dotler_with_stdin(
             &repo_shared,
-            &["vault", "init", "--from", "my-dotler", "--password-stdin", "--json"],
+            &["vault", "import", "--file", "my-dotler", "--password-stdin", "--json"],
             None,
             Some("public-vault-pw-111\n"),
         )

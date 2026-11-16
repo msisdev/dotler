@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 
 pub use crate::cli::render::{
-    ExportReport, InlineRender, KeyReport, UpdateReport, VaultInitReport, VaultRecoverReport,
-    styled_error_label, styled_hint_label,
+    ExportReport, InlineRender, KeyLsReport, KeyRepoStatusEntry, KeyReport, UpdateReport,
+    VaultImportReport, VaultInitReport, VaultRecoverReport, styled_error_label, styled_hint_label,
 };
 pub use crate::core::vault_loader::VaultPasswdReport;
 
@@ -250,6 +250,14 @@ impl CliError {
             }
             CliError::Vault(crate::crypto::vault::VaultError::InvalidSecret) => {
                 "Passphrase authentication failed. Verify passphrase or use 'dotler vault recover'.".to_string()
+            }
+            CliError::Vault(crate::crypto::vault::VaultError::VaultIdMismatch {
+                expected,
+                actual,
+            }) => {
+                format!(
+                    "Encrypted file vault_id ('{actual}') does not match dotler.toml ('{expected}'). Run 'dotler key ls' to inspect repository vaults or 'dotler vault import --file <repo>' to unify vault keys."
+                )
             }
             CliError::Keyring(
                 crate::crypto::keyring::KeyringError::PassphraseRequiredInNonInteractiveMode,

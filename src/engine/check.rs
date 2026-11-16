@@ -203,6 +203,29 @@ pub fn run_check(
                             "Repository file '{clean_rel}' format conflicts with encryption rule in dotler.toml. Run 'dotler tidy' to reconcile format."
                         ),
                     });
+                } else if mode.is_encrypted() && is_enc_file {
+                    let bytes = fs::read(entry.path())?;
+                    let enc_file = crate::crypto::vault::EncryptedFile::from_bytes(&bytes)
+                        .map_err(|_| EngineError::EncryptionMismatch {
+                            path: entry.path().to_path_buf(),
+                            reason: format!(
+                                "Repository file '{rel_str}' is not a valid .enc archive. Run 'dotler import --force' to re-encrypt."
+                            ),
+                        })?;
+                    let file_vid = crate::crypto::vault::bytes_to_hex(&enc_file.vault_id);
+                    let expected_vid = repo_cfg
+                        .vault
+                        .as_ref()
+                        .map(|v| v.vault_id.as_str())
+                        .unwrap_or("");
+                    if !expected_vid.is_empty() && file_vid != expected_vid {
+                        return Err(EngineError::EncryptionMismatch {
+                            path: entry.path().to_path_buf(),
+                            reason: format!(
+                                "Repository file '{rel_str}' is encrypted with vault '{file_vid}', which does not match dotler.toml vault '{expected_vid}'. Run 'dotler vault import --file <repo>' to align vault keys or 'dotler import --force' to re-encrypt."
+                            ),
+                        });
+                    }
                 } else if mode == SelectionMode::TemplateInclude && !is_enc_file {
                     let bytes = fs::read(entry.path())?;
                     render_home_template(&bytes, &home_dir, &clean_rel)?;
@@ -277,5 +300,28 @@ files = ".bashrc"
         let err2 = run_check(&ctx, None, &lock).unwrap_err();
         assert_eq!(err2.error_code(), "ENCRYPTION_MISMATCH");
         assert_eq!(err2.exit_code(), 1);
+
+        // Static .enc header vault_id mismatch check
+        let pass_a = crate::crypto::SecretString::new("vault-a-pass-123".to_string());
+        let pass_b = crate::crypto::SecretString::new("vault-b-pass-456".to_string());
+        let (vcfg_a, _, _) = crate::crypto::vault::init_vault(&pass_a).unwrap();
+        let (_, vkey_b, _) = crate::crypto::vault::init_vault(&pass_b).unwrap();
+        let enc_b = vkey_b.encrypt_file(b"TOKEN=other_vault").unwrap().to_bytes();
+
+        let _ = fs::remove_file(repo_dir.join("g1/.bashrc.enc"));
+        fs::write(
+            repo_dir.join("dotler.toml"),
+            format!(
+                "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[g1]\nos-nux = \"~\"\nos-mac = \"~\"\nfiles = \".secret enc\"\n",
+                vcfg_a.vault_id, vcfg_a.password_slot, vcfg_a.recovery_slot
+            ),
+        )
+        .unwrap();
+        fs::write(repo_dir.join("g1/.secret.enc"), enc_b).unwrap();
+
+        let err3 = run_check(&ctx, None, &lock).unwrap_err();
+        assert_eq!(err3.error_code(), "ENCRYPTION_MISMATCH");
+        assert_eq!(err3.exit_code(), 1);
+        assert!(err3.hint().contains("vault import"));
     }
 }

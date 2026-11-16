@@ -354,6 +354,10 @@ pub fn update_vault_manifest_section(
     new_cfg: &VaultConfig,
 ) -> String {
     let mut updated = manifest_str.replace(
+        &format!("vault_id = \"{}\"", old_cfg.vault_id),
+        &format!("vault_id = \"{}\"", new_cfg.vault_id),
+    );
+    updated = updated.replace(
         &format!("password_slot = \"{}\"", old_cfg.password_slot),
         &format!("password_slot = \"{}\"", new_cfg.password_slot),
     );

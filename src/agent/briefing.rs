@@ -114,8 +114,8 @@ MCP Equivalent Tools:
 
 ## 4. Security Guardrails & Prohibitions (Zero Secret Leakage)
 - ZERO SECRET LEAKAGE: NEVER prompt the user in chat for master passphrases or 12-word recovery mnemonics!
-- If `keyring_ready` is false and an encrypted group needs synchronization, instruct the user to run `dotler key set` once in their local terminal.
-- `dotler vault passwd` rotates the passphrase across all matching locally registered repositories and updates the OS keyring in one shot.
+- If `keyring_ready` is false and an encrypted group needs synchronization, instruct the user to run `dotler key set` once in their local terminal (or run `dotler key ls` to inspect vault IDs and keyring readiness across repositories).
+- `dotler vault import --file <repo>` aligns an existing repository with another vault (automatically re-keying existing `.enc` files), and `dotler vault passwd` rotates the passphrase across all matching locally registered repositories and updates the OS keyring in one shot.
 - Symbolic links are strictly prohibited inside the repository (exit code 3). On the OS side, symlinks pointing to regular files inside `~` are dereferenced on `import` and materialized into standalone regular files on `export`.
 - Directory traversal (`..`), symlinks escaping `~`, and environment variable expansions are blocked by path safety invariants (exit code 3).
 - Never overwrite locally modified files without explicit `--force` user authorization.

@@ -247,11 +247,15 @@ impl EngineError {
                     path.display()
                 )
             }
-            EngineError::EncryptionMismatch { path, .. } => {
-                format!(
-                    "File '{}' has mismatched encryption state. Run 'dotler tidy' to reconcile format with dotler.toml.",
-                    path.display()
-                )
+            EngineError::EncryptionMismatch { path, reason } => {
+                if reason.contains("vault import") || reason.contains("import --force") {
+                    reason.clone()
+                } else {
+                    format!(
+                        "File '{}' has mismatched encryption state. Run 'dotler tidy' to reconcile format with dotler.toml.",
+                        path.display()
+                    )
+                }
             }
             EngineError::HardBlockedPath { path, .. } => {
                 format!(
@@ -297,6 +301,14 @@ impl EngineError {
             }
             EngineError::State(e) => format!("Database operation failed: {e}"),
             EngineError::Crypto(e) => format!("Cryptographic operation failed: {e}"),
+            EngineError::Vault(crate::crypto::vault::VaultError::VaultIdMismatch {
+                expected,
+                actual,
+            }) => {
+                format!(
+                    "Encrypted file vault_id ('{actual}') does not match dotler.toml ('{expected}'). Run 'dotler key ls' to inspect repository vaults or 'dotler vault import --file <repo>' to unify vault keys."
+                )
+            }
             EngineError::Vault(e) => format!("Vault operation failed: {e}"),
             EngineError::Lock(e) => format!("Lock operation failed: {e}"),
             EngineError::Io(e) => format!("I/O operation failed: {e}"),

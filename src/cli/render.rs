@@ -37,6 +37,16 @@ pub struct VaultInitReport {
     pub hint: Option<String>,
 }
 
+/// Summary report returned by `vault import`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultImportReport {
+    pub vault_id: String,
+    #[serde(default)]
+    pub rekeyed_files: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
 /// Summary report returned by `vault recover`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VaultRecoverReport {
@@ -51,6 +61,26 @@ pub struct VaultRecoverReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyReport {
     pub status: String,
+}
+
+/// Per-repository vault and keyring status entry returned by `key ls`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyRepoStatusEntry {
+    pub label: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_hint: Option<String>,
+    pub keyring_status: String,
+}
+
+/// Summary report returned by `key ls`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyLsReport {
+    pub use_keyring: bool,
+    pub default_slot_set: bool,
+    pub repos: Vec<KeyRepoStatusEntry>,
 }
 
 /// Summary report returned by `update`.
@@ -251,6 +281,19 @@ impl InlineRender for VaultInitReport {
     }
 }
 
+impl InlineRender for VaultImportReport {
+    fn render_inline(&self) -> String {
+        if self.rekeyed_files > 0 {
+            format!(
+                "☀️ Vault import done. (id: {}, {} re-keyed)",
+                self.vault_id, self.rekeyed_files
+            )
+        } else {
+            format!("Vault import done. (id: {})", self.vault_id)
+        }
+    }
+}
+
 impl InlineRender for VaultPasswdReport {
     fn render_inline(&self) -> String {
         format!(
@@ -276,6 +319,28 @@ impl InlineRender for KeyReport {
             "keyring_deleted" => "Key delete done.".to_string(),
             _ => "Key set done.".to_string(),
         }
+    }
+}
+
+impl InlineRender for KeyLsReport {
+    fn render_inline(&self) -> String {
+        let default_state = if self.default_slot_set { "set" } else { "empty" };
+        let mut out = format!(
+            "Default keyring slot: {default_state} (use_keyring: {})",
+            self.use_keyring
+        );
+        if self.repos.is_empty() {
+            out.push_str("\n  (no repositories registered)");
+            return out;
+        }
+        for repo in &self.repos {
+            let vid = repo.vault_id.as_deref().unwrap_or("none");
+            out.push_str(&format!(
+                "\n  {}  vault_id: {}  keyring: {}",
+                repo.label, vid, repo.keyring_status
+            ));
+        }
+        out
     }
 }
 

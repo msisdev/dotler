@@ -4,7 +4,7 @@ Dotler includes a pure-Rust remote Git and HTTP engine (`gix` + `ureq`). You can
 
 ## 1. Supported URL Formats & Provider Prefixes
 
-Both `dotler git <ls|clone|install>` and `dotler vault init --git <url>` share the same URL parser. You can pass full URLs or provider prefixes (both shorthand and full names are supported):
+Both `dotler git <ls|clone|install>` and `dotler vault import --git <url>` share the same URL parser. You can pass full URLs or provider prefixes (both shorthand and full names are supported):
 
 | Provider | Shorthand Prefix | Full Name Prefix | Example | Expands To |
 | :--- | :--- | :--- | :--- | :--- |

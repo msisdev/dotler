@@ -16,9 +16,9 @@ dotler vault init
 
 > **Important**: Store your 12-word recovery mnemonic in a safe place. If you forget your passphrase, `dotler vault recover` is the only way to unlock the vault.
 
-## 2. Share the Same Vault Across Repositories & Devices
+## 2. Share or Align a Vault Across Repositories & Devices (`vault import`)
 
-If you maintain multiple dotler repositories (for example, a public repository and a private work repository, or repositories on separate machines) and want them to share the exact same vault (`vault_id`, `password_slot`, and `recovery_slot`), initialize the new repository's vault from an existing source:
+If you maintain multiple dotler repositories (for example, a public repository and a private work repository, or repositories on separate machines) and want them to share the exact same vault (`vault_id`, `password_slot`, and `recovery_slot`), import the existing vault configuration into the target repository:
 
 ### From a Remote Git Repository (`--git`)
 
@@ -26,11 +26,11 @@ Fetches `dotler.toml` from a remote Git repository without requiring `git` to be
 
 ```sh
 # Using shorthand or full provider prefix
-dotler vault init --git gh:username/dotfiles
-dotler vault init --git github:username/dotfiles
+dotler vault import --git gh:username/dotfiles
+dotler vault import --git github:username/dotfiles
 
 # Or a full HTTPS URL (with optional subdirectory path)
-dotler vault init --git https://github.com/username/dotfiles/work
+dotler vault import --git https://github.com/username/dotfiles/work
 ```
 
 ### From an HTTP / Self-Hosted Endpoint (`--url`)
@@ -39,10 +39,10 @@ Fetches vault metadata via `HTTP GET`. Parses as **TOML first** (such as a raw `
 
 ```sh
 # Raw dotler.toml over HTTPS
-dotler vault init --url https://raw.githubusercontent.com/username/dotfiles/main/dotler.toml
+dotler vault import --url https://raw.githubusercontent.com/username/dotfiles/main/dotler.toml
 
 # Or a minimal self-hosted JSON endpoint
-dotler vault init --url https://vault.example.com/dotler-vault.json
+dotler vault import --url https://vault.example.com/dotler-vault.json
 ```
 
 Minimal TOML or JSON payloads only need `password_slot` and `recovery_slot` (`vault_id` is verified if present, or derived automatically from the unwrapped key once your passphrase is verified):
@@ -55,20 +55,20 @@ Minimal TOML or JSON payloads only need `password_slot` and `recovery_slot` (`va
 }
 ```
 
-### From a Local Repository Label or File Path (`--from`)
+### From a Local Repository Label or File Path (`--file`)
 
-Reads vault metadata from another repository registered in `~/.config/dotler/config.toml` or from a local TOML/JSON file or directory path:
+Reads vault metadata from another repository registered in `~/.config/dotler/config.toml` or from a local TOML/JSON file or directory path (`--from` is also accepted as a compatibility alias):
 
 ```sh
 # Registered repository label
-dotler vault init --from main
+dotler vault import --file main
 
 # Local directory or file path (TOML or JSON)
-dotler vault init --from ~/other-dotfiles
-dotler vault init --from ./vault.json
+dotler vault import --file ~/other-dotfiles
+dotler vault import --file ./vault.json
 ```
 
-In all three modes (`--git`, `--url`, `--from`), any `[<group>]` sections in the source file are ignored, and your passphrase is verified against `password_slot` before writing the vault configuration to the target `dotler.toml`.
+In all three modes (`--git`, `--url`, `--file`), any `[<group>]` sections in the source file are ignored, and your passphrase is verified against `password_slot` before writing the vault configuration to the target `dotler.toml`. If the target repository already has `.enc` files encrypted under a different vault, `dotler vault import` automatically decrypts them with the previous vault key and re-encrypts them in memory under the newly imported vault before atomically updating `dotler.toml`.
 
 ## 3. Encrypting & Decrypting Files
 
@@ -90,14 +90,20 @@ hosts.yml enc
 
 ## 4. OS Keyring Integration
 
-Store your master passphrase in your operating system's native credential manager (macOS Keychain, Linux Secret Service / Keyutils, Windows Credential Manager) so `import`, `export`, and `tidy` run without prompting every time:
+Store your master passphrase in your operating system's native credential manager (macOS Keychain, Linux Secret Service / Keyutils, Windows Credential Manager) so `import`, `export`, and `tidy` run without prompting every time. Keys are isolated per `vault_id` (so multiple independent repositories with distinct passphrases coexist without conflict), with automatic fallback to the global `default` slot:
 
 ```sh
-# Save passphrase to OS keyring
+# Inspect vault_id and OS keyring readiness across registered repositories
+dotler key ls
+
+# Save passphrase to OS keyring (scoped to the active repository's vault_id, or default slot outside a repo)
 dotler key set
 
-# Remove passphrase from OS keyring
+# Remove passphrase for the active repository's vault_id from OS keyring
 dotler key del
+
+# Remove all dotler keyring entries across all registered vaults and the default slot
+dotler key del --all
 ```
 
 ## 5. Passphrase Rotation & Mnemonic Recovery

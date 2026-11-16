@@ -44,7 +44,7 @@ hosts.yml enc
 """
 ```
 - Protect your files with a passphrase (`dotler vault init`).
-- Share the same vault across multiple repositories or devices via `dotler vault init --git`, `--url` (TOML or JSON), or `--from`.
+- Share or align a vault across multiple repositories or devices via `dotler vault import --git`, `--url` (TOML or JSON), or `--file`.
 - Mark files with the `enc` attribute in `./dotler.toml` so `dotler import` and `dotler export` encrypt and decrypt them automatically.
 - Mark UTF-8 text files with the `tmpl` attribute (or `enc tmpl`) for reversible `{{ $HOME }}` <-> OS home directory substitution across machines.
 

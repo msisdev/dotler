@@ -581,3 +581,196 @@ files = "!*"
     assert!(!group_base.join("lua").exists());
     assert!(group_base.is_dir());
 }
+
+#[test]
+fn test_wildcard_import_prunes_deleted_and_renamed_files_without_export_resurrection() {
+    let sandbox = SyncTestSandbox::new();
+    let lock = sandbox.acquire_lock();
+    let (vault_cfg, vault_key) = sandbox.create_vault("wildcard-prune-pass");
+
+    let toml = format!(
+        r#"
+vault_id = "{}"
+password_slot = "{}"
+recovery_slot = "{}"
+
+[notes]
+os-nux = "~/.config/notes"
+os-mac = "~/.config/notes"
+os-win = "~/.config/notes"
+os-bsd = "~/.config/notes"
+files = "*"
+
+[secrets]
+os-nux = "~/.config/secrets"
+os-mac = "~/.config/secrets"
+os-win = "~/.config/secrets"
+os-bsd = "~/.config/secrets"
+files = "* enc"
+"#,
+        vault_cfg.vault_id, vault_cfg.password_slot, vault_cfg.recovery_slot
+    );
+    sandbox.write_dotler_toml(&toml);
+    let config = RepoConfig::parse(&toml).unwrap();
+
+    sandbox.write_home_file(".config/notes/old.md", b"# old\n");
+    sandbox.write_home_file(".config/notes/nested/moved.md", b"# moved\n");
+    sandbox.write_home_file(".config/secrets/old.key", b"old-secret\n");
+
+    let engine = sandbox.sync_engine(&config, Some(&vault_key));
+    let initial_plans = engine.plan(None, &lock).unwrap();
+    let initial_imp = engine.import_files(&initial_plans, &lock, false).unwrap();
+    assert_eq!(initial_imp.processed, 3);
+    assert!(sandbox.repo_dir.join("notes/old.md").is_file());
+    assert!(sandbox.repo_dir.join("notes/nested/moved.md").is_file());
+    assert!(sandbox.repo_dir.join("secrets/old.key.enc").is_file());
+
+    // Delete old.md and old.key, rename nested/moved.md -> renamed.md, and add un-exported remote file.
+    fs::remove_file(sandbox.home_dir.join(".config/notes/old.md")).unwrap();
+    fs::remove_file(sandbox.home_dir.join(".config/notes/nested/moved.md")).unwrap();
+    fs::remove_file(sandbox.home_dir.join(".config/secrets/old.key")).unwrap();
+    sandbox.write_home_file(".config/notes/renamed.md", b"# moved\n");
+    sandbox.write_repo_file("notes/from_other_device.md", b"# remote\n");
+
+    let plans = engine.plan(None, &lock).unwrap();
+    let imp_report = engine.import_files(&plans, &lock, false).unwrap();
+    assert_eq!(imp_report.processed, 4);
+
+    assert!(!sandbox.repo_dir.join("notes/old.md").exists());
+    assert!(!sandbox.repo_dir.join("notes/nested/moved.md").exists());
+    assert!(!sandbox.repo_dir.join("notes/nested").exists());
+    assert!(!sandbox.repo_dir.join("secrets/old.key.enc").exists());
+    assert!(sandbox.repo_dir.join("notes/renamed.md").is_file());
+    assert!(
+        sandbox
+            .repo_dir
+            .join("notes/from_other_device.md")
+            .is_file()
+    );
+
+    assert!(
+        sandbox
+            .state_db
+            .get_synced_file(
+                &sandbox
+                    .home_dir
+                    .join(".config/notes/old.md")
+                    .to_string_lossy()
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        sandbox
+            .state_db
+            .get_synced_file(
+                &sandbox
+                    .home_dir
+                    .join(".config/secrets/old.key")
+                    .to_string_lossy()
+            )
+            .unwrap()
+            .is_none()
+    );
+
+    // Subsequent export must deploy from_other_device.md and never resurrect deleted files.
+    let exp_plans = engine.plan(None, &lock).unwrap();
+    let exp_report = engine
+        .export_files(&exp_plans, &lock, false, false)
+        .unwrap();
+    assert_eq!(exp_report.processed, 1);
+    assert!(
+        sandbox
+            .home_dir
+            .join(".config/notes/from_other_device.md")
+            .is_file()
+    );
+    assert!(!sandbox.home_dir.join(".config/notes/old.md").exists());
+    assert!(
+        !sandbox
+            .home_dir
+            .join(".config/notes/nested/moved.md")
+            .exists()
+    );
+    assert!(!sandbox.home_dir.join(".config/secrets/old.key").exists());
+}
+
+#[test]
+fn test_wildcard_tidy_prunes_locally_deleted_repo_copies_and_preserves_remote_additions() {
+    let sandbox = SyncTestSandbox::new();
+    let lock = sandbox.acquire_lock();
+    let (vault_cfg, vault_key) = sandbox.create_vault("wildcard-tidy-prune");
+
+    let toml = format!(
+        r#"
+vault_id = "{}"
+password_slot = "{}"
+recovery_slot = "{}"
+
+[notes]
+os-nux = "~/.config/notes"
+os-mac = "~/.config/notes"
+os-win = "~/.config/notes"
+os-bsd = "~/.config/notes"
+files = "*"
+
+[secrets]
+os-nux = "~/.config/secrets"
+os-mac = "~/.config/secrets"
+os-win = "~/.config/secrets"
+os-bsd = "~/.config/secrets"
+files = "* enc"
+"#,
+        vault_cfg.vault_id, vault_cfg.password_slot, vault_cfg.recovery_slot
+    );
+    sandbox.write_dotler_toml(&toml);
+    let config = RepoConfig::parse(&toml).unwrap();
+
+    sandbox.write_home_file(".config/notes/keep.md", b"# keep\n");
+    sandbox.write_home_file(".config/notes/deep/deleted.md", b"# gone\n");
+    sandbox.write_home_file(".config/secrets/gone.key", b"gone-secret\n");
+
+    let engine = sandbox.sync_engine(&config, Some(&vault_key));
+    let plans = engine.plan(None, &lock).unwrap();
+    assert_eq!(
+        engine.import_files(&plans, &lock, false).unwrap().processed,
+        3
+    );
+
+    // Delete files locally and simulate an un-exported file added from another device.
+    fs::remove_file(sandbox.home_dir.join(".config/notes/deep/deleted.md")).unwrap();
+    fs::remove_file(sandbox.home_dir.join(".config/secrets/gone.key")).unwrap();
+    sandbox.write_repo_file("notes/remote_new.md", b"# new from remote\n");
+
+    let tidy_report = engine
+        .tidy(None, &lock, TidyOrphanPolicy::KeepOnOs, false)
+        .unwrap();
+    assert_eq!(tidy_report.removed_from_repo, 2);
+    assert!(tidy_report.untracked_kept_orphans.is_empty());
+
+    assert!(!sandbox.repo_dir.join("notes/deep/deleted.md").exists());
+    assert!(!sandbox.repo_dir.join("notes/deep").exists());
+    assert!(!sandbox.repo_dir.join("secrets/gone.key.enc").exists());
+    assert!(sandbox.repo_dir.join("notes/keep.md").is_file());
+    assert!(sandbox.repo_dir.join("notes/remote_new.md").is_file());
+
+    // Subsequent export must deploy remote_new.md without resurrecting deleted files.
+    let exp_plans = engine.plan(None, &lock).unwrap();
+    let exp_report = engine
+        .export_files(&exp_plans, &lock, false, false)
+        .unwrap();
+    assert_eq!(exp_report.processed, 1);
+    assert!(
+        sandbox
+            .home_dir
+            .join(".config/notes/remote_new.md")
+            .is_file()
+    );
+    assert!(
+        !sandbox
+            .home_dir
+            .join(".config/notes/deep/deleted.md")
+            .exists()
+    );
+    assert!(!sandbox.home_dir.join(".config/secrets/gone.key").exists());
+}

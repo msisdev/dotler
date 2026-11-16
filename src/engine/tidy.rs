@@ -62,6 +62,10 @@ enum RepoTidyKind {
     RemoveExcluded {
         repo_path: PathBuf,
     },
+    RemoveDeleted {
+        repo_path: PathBuf,
+        target_path_str: String,
+    },
 }
 
 struct PlannedOrphanOp {
@@ -133,8 +137,13 @@ pub fn tidy_groups_with_observer(
 
     let mut preview_entries: Vec<PlanPreviewEntry> = Vec::new();
     let mut repo_ops: Vec<PlannedRepoTidyOp> = Vec::new();
+    let synced_keys: HashSet<(String, String)> = all_synced
+        .iter()
+        .map(|r| (r.group_name.clone(), r.target_path.clone()))
+        .collect();
+    let mut pruned_repo_targets: HashSet<String> = HashSet::new();
 
-    // 1. Scan repository groups for in-repo format reconciliation
+    // 1. Scan repository groups for in-repo format reconciliation and locally deleted files
     for (group_name, group_cfg) in &engine.repo_config.groups {
         if !group_filters.is_empty() && !group_filters.iter().any(|f| f == group_name) {
             continue;
@@ -146,7 +155,12 @@ pub fn tidy_groups_with_observer(
             continue;
         }
 
-        let group_base = engine.group_base_for(group_name);
+        let resolved_target_base =
+            resolve_group_target_path(group_cfg, &engine.devices, &engine.os_info)
+                .map(|s| engine.expand_target_base(&s));
+        let group_base = resolved_target_base
+            .clone()
+            .unwrap_or_else(|| engine.effective_home_dir());
 
         let rules = parse_selection_rules(&group_cfg.files)?;
 
@@ -176,7 +190,40 @@ pub fn tidy_groups_with_observer(
             };
 
             let os_path = group_base.join(clean_rel);
+            let os_path_str = os_path.to_string_lossy().to_string();
             let mode = evaluate_selection(&rules, clean_rel);
+            if mode.is_some_and(|m| m.is_included())
+                && resolved_target_base.is_some()
+                && !os_path.exists()
+                && !is_symlink(&os_path)
+                && synced_keys.contains(&(group_name.clone(), os_path_str.clone()))
+            {
+                let direction = if is_enc_ext {
+                    PlanDirection::EncryptToRepo
+                } else {
+                    PlanDirection::PlainToRepo
+                };
+                push_repo_preview(
+                    &mut preview_entries,
+                    group_name,
+                    os_path,
+                    path,
+                    PlanActionKind::Delete,
+                    direction,
+                );
+                repo_ops.push(PlannedRepoTidyOp {
+                    group_name: group_name.clone(),
+                    group_base: group_base.clone(),
+                    rel_path: rel_str,
+                    kind: RepoTidyKind::RemoveDeleted {
+                        repo_path: path.to_path_buf(),
+                        target_path_str: os_path_str.clone(),
+                    },
+                });
+                pruned_repo_targets.insert(os_path_str);
+                continue;
+            }
+
             match mode {
                 Some(m) if m.is_encrypted() => {
                     if !is_enc_ext {
@@ -278,7 +325,10 @@ pub fn tidy_groups_with_observer(
 
     let active_target_paths: HashSet<String> = plans
         .iter()
-        .filter(|p| p.status != FileSyncStatus::Orphaned)
+        .filter(|p| {
+            p.status != FileSyncStatus::Orphaned
+                && !(p.status == FileSyncStatus::MissingLocally && !p.repo_file_path.is_file())
+        })
         .map(|p| p.target_os_path.to_string_lossy().to_string())
         .collect();
 
@@ -287,7 +337,9 @@ pub fn tidy_groups_with_observer(
         if !group_filters.is_empty() && !group_filters.iter().any(|g| g == &rec.group_name) {
             continue;
         }
-        if active_target_paths.contains(&rec.target_path) {
+        if pruned_repo_targets.contains(&rec.target_path)
+            || active_target_paths.contains(&rec.target_path)
+        {
             continue;
         }
         let orphan_path = PathBuf::from(&rec.target_path);
@@ -421,7 +473,9 @@ fn summarize_tidy_dry_run(
         match op.kind {
             RepoTidyKind::Encrypt { .. } => sim.encrypted_in_repo += 1,
             RepoTidyKind::Decrypt { .. } => sim.decrypted_in_repo += 1,
-            RepoTidyKind::RemoveExcluded { .. } => sim.removed_from_repo += 1,
+            RepoTidyKind::RemoveExcluded { .. } | RepoTidyKind::RemoveDeleted { .. } => {
+                sim.removed_from_repo += 1
+            }
         }
     }
     for op in orphan_ops {
@@ -515,6 +569,19 @@ fn execute_repo_tidy_op(
             let _ = fs::remove_file(repo_path);
             let group_repo_dir = engine.repo_dir.join(group_name);
             prune_empty_parent_dirs(repo_path, &group_repo_dir);
+            report.removed_from_repo += 1;
+            Ok(None)
+        }
+        RepoTidyKind::RemoveDeleted {
+            repo_path,
+            target_path_str,
+        } => {
+            if repo_path.is_file() {
+                fs::remove_file(repo_path)?;
+            }
+            let group_repo_dir = engine.repo_dir.join(group_name);
+            prune_empty_parent_dirs(repo_path, &group_repo_dir);
+            engine.state_db.remove_synced_file(target_path_str)?;
             report.removed_from_repo += 1;
             Ok(None)
         }
@@ -677,5 +744,134 @@ mod tests {
         assert!(!os_base.join("lua/legacy").exists());
         assert!(!os_base.join("lua").exists());
         assert!(os_base.is_dir());
+    }
+
+    struct RejectTidyObserver;
+    impl CommandObserver for RejectTidyObserver {
+        fn confirm_plan(&mut self, _: &[PlanPreviewEntry], _: bool) -> Result<bool, EngineError> {
+            Ok(false)
+        }
+        fn on_file_progress(&mut self, _: &str, _: &Path, _: &str, _: Option<u64>) {}
+        fn finish_progress(&mut self) {}
+    }
+
+    #[test]
+    fn tidy_prunes_locally_deleted_repo_files_and_preserves_unexported_files() {
+        let env = TidyTestEnv::new();
+        let notes_os = env.home_dir.join(".config/notes");
+        fs::create_dir_all(&notes_os).unwrap();
+        fs::write(notes_os.join("keep.md"), b"keep\n").unwrap();
+
+        let keep_repo = env.repo_dir.join("notes/keep.md");
+        let deleted_repo = env.repo_dir.join("notes/nested/deleted.md");
+        let remote_repo = env.repo_dir.join("notes/remote.md");
+        fs::create_dir_all(deleted_repo.parent().unwrap()).unwrap();
+        fs::write(&keep_repo, b"keep\n").unwrap();
+        fs::write(&deleted_repo, b"deleted\n").unwrap();
+        fs::write(&remote_repo, b"unexported\n").unwrap();
+
+        let pass = SecretString::new("tidy-deleted-enc-pass".to_string());
+        let (vcfg, vkey, _) = init_vault(&pass).unwrap();
+        let sec_os = env.home_dir.join(".config/sec");
+        fs::create_dir_all(&sec_os).unwrap();
+        let enc_repo = env.repo_dir.join("sec/old.key.enc");
+        fs::create_dir_all(enc_repo.parent().unwrap()).unwrap();
+        let enc_bytes = vkey.encrypt_file(b"secret").unwrap().to_bytes();
+        fs::write(&enc_repo, &enc_bytes).unwrap();
+
+        // Record keep.md, nested/deleted.md, and old.key as previously synced; leave remote.md unrecorded.
+        for (target, group, rel) in [
+            (notes_os.join("keep.md"), "notes", "keep.md"),
+            (
+                notes_os.join("nested/deleted.md"),
+                "notes",
+                "nested/deleted.md",
+            ),
+            (sec_os.join("old.key"), "sec", "old.key"),
+        ] {
+            env.state_db
+                .upsert_synced_file(&SyncedFileRecord {
+                    target_path: target.to_string_lossy().to_string(),
+                    repo_label: "main".to_string(),
+                    group_name: group.to_string(),
+                    relative_path: rel.to_string(),
+                    file_hash: "aa".to_string(),
+                    updated_at: 10,
+                })
+                .unwrap();
+        }
+
+        let toml = format!(
+            "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[notes]\nos-nux = \"~/.config/notes\"\nos-mac = \"~/.config/notes\"\nos-win = \"~/.config/notes\"\nos-bsd = \"~/.config/notes\"\nfiles = \"*\"\n\n[sec]\nos-nux = \"~/.config/sec\"\nos-mac = \"~/.config/sec\"\nos-win = \"~/.config/sec\"\nos-bsd = \"~/.config/sec\"\nfiles = \"* enc\"\n",
+            vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
+        );
+        let repo_cfg = RepoConfig::parse(&toml).unwrap();
+        let engine = SyncEngine::new(
+            "main",
+            &env.repo_dir,
+            &repo_cfg,
+            &env.state_db,
+            vec![],
+            OsInfo::detect(),
+            None,
+        )
+        .with_home_dir(&env.home_dir);
+
+        // Dry-run and cancellation must preserve all repo files and DB records.
+        let dry_rep = engine
+            .tidy(None, &env.lock, TidyOrphanPolicy::KeepOnOs, true)
+            .unwrap();
+        assert_eq!(dry_rep.removed_from_repo, 2);
+        assert!(deleted_repo.is_file());
+        assert!(enc_repo.is_file());
+
+        let mut rej_obs = RejectTidyObserver;
+        let rej_rep = tidy_groups_with_observer(
+            &engine,
+            &[],
+            &env.lock,
+            TidyOrphanPolicy::KeepOnOs,
+            false,
+            &mut rej_obs,
+        )
+        .unwrap();
+        assert_eq!(rej_rep.removed_from_repo, 0);
+        assert!(deleted_repo.is_file());
+        assert!(enc_repo.is_file());
+
+        // Real tidy removes locally deleted plain and .enc copies, prunes empty subdirs,
+        // clears synced_files records, and preserves un-exported remote.md.
+        let rep = engine
+            .tidy(None, &env.lock, TidyOrphanPolicy::KeepOnOs, false)
+            .unwrap();
+        assert_eq!(rep.removed_from_repo, 2);
+        assert!(rep.untracked_kept_orphans.is_empty());
+        assert!(rep.removed_os_orphans.is_empty());
+
+        assert!(!deleted_repo.exists());
+        assert!(!env.repo_dir.join("notes/nested").exists());
+        assert!(!enc_repo.exists());
+        assert!(env.repo_dir.join("sec").is_dir());
+        assert!(keep_repo.is_file());
+        assert!(remote_repo.is_file());
+
+        assert!(
+            env.state_db
+                .get_synced_file(&notes_os.join("nested/deleted.md").to_string_lossy())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            env.state_db
+                .get_synced_file(&sec_os.join("old.key").to_string_lossy())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            env.state_db
+                .get_synced_file(&notes_os.join("keep.md").to_string_lossy())
+                .unwrap()
+                .is_some()
+        );
     }
 }

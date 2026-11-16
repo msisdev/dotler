@@ -113,7 +113,7 @@ pub fn list_tools() -> Vec<McpToolDefinition> {
         },
         McpToolDefinition {
             name: "dotler_import".to_string(),
-            description: "Ingest matching dotfiles from OS paths into repository, re-encrypting encrypted files using OS Keyring master key.".to_string(),
+            description: "Ingest matching dotfiles from OS paths into repository (re-encrypting encrypted files using OS Keyring master key) and prune repository copies of tracked files deleted locally (preserving un-exported remote additions).".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -140,7 +140,7 @@ pub fn list_tools() -> Vec<McpToolDefinition> {
         },
         McpToolDefinition {
             name: "dotler_tidy".to_string(),
-            description: "Reconcile in-repo file formats (plain vs .enc) and clean up untracked orphans (safely keeps OS files by default).".to_string(),
+            description: "Reconcile in-repo file formats (plain vs .enc), prune repository copies of tracked files deleted locally, and clean up untracked orphans (safely keeps OS files by default).".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

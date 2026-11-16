@@ -95,9 +95,9 @@ hosts.yml enc
 Always follow the deterministic 5-step agent execution loop:
 1. Inspect or edit `dotler.toml` and dotfiles.
 2. Statically validate configuration: `dotler check --json`
-3. Reconcile formats and clean orphans: `dotler tidy --json` (use `dotler tidy --purge --json` to permanently delete orphaned OS files)
+3. Reconcile formats, prune locally deleted repo copies, and clean orphans: `dotler tidy --json` (use `dotler tidy --purge --json` to permanently delete orphaned OS files)
 4. Pre-simulate operations without disk modification:
-   - For collection: `dotler import --dry-run --json`
+   - For collection & deletion pruning: `dotler import --dry-run --json`
    - For deployment: `dotler export --dry-run --json`
 5. Perform atomic synchronized operations:
    - `dotler import --json`
@@ -107,9 +107,9 @@ MCP Equivalent Tools:
 - `dotler_briefing`: Fetch this briefing and environment status.
 - `dotler_check`: Perform static manifest and path safety checks.
 - `dotler_status`: Reconcile 3-way synchronization state.
-- `dotler_import`: Ingest OS files into repository with atomic staging.
+- `dotler_import`: Ingest OS files into repository and prune tracked files deleted locally with atomic staging.
 - `dotler_export`: Deploy repository files with conflict protection.
-- `dotler_tidy`: Reconcile file formats and clean untracked orphans (`purge: false` by default).
+- `dotler_tidy`: Reconcile file formats, prune locally deleted tracked files from repository, and clean untracked orphans (`purge: false` by default).
 - `dotler_git_ls`: Inspect remote Git repositories before cloning.
 
 ## 4. Security Guardrails & Prohibitions (Zero Secret Leakage)

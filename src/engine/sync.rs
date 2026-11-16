@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::local::expand_tilde;
 use crate::config::repo::{
-    OsInfo, RepoConfig, is_symlink, resolve_group_target_path, unrender_home_template,
-    validate_os_target_path,
+    OsInfo, RepoConfig, is_symlink, prune_empty_parent_dirs, resolve_group_target_path,
+    unrender_home_template, validate_os_target_path,
 };
 pub use crate::config::state::{ATOMIC_REPLACE_RETRIES, TMP_FILE_PREFIX, write_file_safe};
 use crate::config::state::{DotlerLockGuard, StateDb, SyncedFileRecord};
@@ -47,10 +47,19 @@ pub struct SyncEngine<'a> {
 
 struct PreparedImport<'p> {
     plan: &'p FileActionPlan,
-    repo_payload_bytes: Vec<u8>,
-    os_hash: String,
-    file_size: u64,
-    can_skip: bool,
+    op: PreparedImportOp,
+}
+
+enum PreparedImportOp {
+    Write {
+        repo_payload_bytes: Vec<u8>,
+        os_hash: String,
+        file_size: u64,
+        can_skip: bool,
+    },
+    PruneDeleted {
+        repo_paths_to_remove: Vec<PathBuf>,
+    },
 }
 
 impl<'a> SyncEngine<'a> {
@@ -178,6 +187,47 @@ impl<'a> SyncEngine<'a> {
                 });
             }
             if !plan.target_os_path.is_file() {
+                if !plan.target_os_path.exists()
+                    && !is_symlink(&plan.target_os_path)
+                    && plan.status == FileSyncStatus::MissingLocally
+                    && plan.db_hash.is_some()
+                {
+                    let (plain_path, enc_path) = repo_paths_for_plan(plan);
+                    let mut repo_paths_to_remove = Vec::new();
+                    for candidate in [&plan.repo_file_path, &plain_path, &enc_path] {
+                        if is_symlink(candidate) {
+                            return Err(EngineError::HardBlockedPath {
+                                path: candidate.clone(),
+                                reason: "symbolic links are prohibited inside a dotler repository"
+                                    .to_string(),
+                            });
+                        }
+                        if candidate.is_file() && !repo_paths_to_remove.contains(candidate) {
+                            repo_paths_to_remove.push(candidate.clone());
+                        }
+                    }
+                    if !repo_paths_to_remove.is_empty() {
+                        let direction = if plan.is_encrypted {
+                            PlanDirection::EncryptToRepo
+                        } else {
+                            PlanDirection::PlainToRepo
+                        };
+                        preview_entries.push(PlanPreviewEntry {
+                            group_name: plan.group_name.clone(),
+                            os_path: plan.target_os_path.clone(),
+                            os_action: PlanActionKind::Okay,
+                            repo_path: repo_paths_to_remove[0].clone(),
+                            repo_action: PlanActionKind::Delete,
+                            direction,
+                        });
+                    }
+                    prepared.push(PreparedImport {
+                        plan,
+                        op: PreparedImportOp::PruneDeleted {
+                            repo_paths_to_remove,
+                        },
+                    });
+                }
                 continue;
             }
 
@@ -218,10 +268,12 @@ impl<'a> SyncEngine<'a> {
             });
             prepared.push(PreparedImport {
                 plan,
-                repo_payload_bytes,
-                os_hash,
-                file_size,
-                can_skip,
+                op: PreparedImportOp::Write {
+                    repo_payload_bytes,
+                    os_hash,
+                    file_size,
+                    can_skip,
+                },
             });
         }
 
@@ -230,10 +282,15 @@ impl<'a> SyncEngine<'a> {
         if dry_run {
             let mut sim = SyncReport::default();
             for item in &prepared {
-                if item.can_skip {
-                    sim.skipped += 1;
-                } else {
-                    sim.processed += 1;
+                match &item.op {
+                    PreparedImportOp::Write { can_skip: true, .. } => sim.skipped += 1,
+                    PreparedImportOp::Write {
+                        can_skip: false, ..
+                    } => sim.processed += 1,
+                    PreparedImportOp::PruneDeleted {
+                        repo_paths_to_remove,
+                    } if !repo_paths_to_remove.is_empty() => sim.processed += 1,
+                    PreparedImportOp::PruneDeleted { .. } => {}
                 }
             }
             return Ok(sim);
@@ -245,22 +302,56 @@ impl<'a> SyncEngine<'a> {
         let mut report = SyncReport::default();
         for item in prepared {
             let plan = item.plan;
-            if item.can_skip {
-                self.record_synced_file(plan, item.os_hash)?;
-                report.skipped += 1;
-                continue;
-            }
-            write_import_payload(self, plan, &item.repo_payload_bytes)?;
-            self.record_synced_file(plan, item.os_hash)?;
+            match item.op {
+                PreparedImportOp::Write {
+                    repo_payload_bytes,
+                    os_hash,
+                    file_size,
+                    can_skip,
+                } => {
+                    if can_skip {
+                        self.record_synced_file(plan, os_hash)?;
+                        report.skipped += 1;
+                        continue;
+                    }
+                    write_import_payload(self, plan, &repo_payload_bytes)?;
+                    self.record_synced_file(plan, os_hash)?;
 
-            report.processed += 1;
-            let group_base = self.group_base_for(&plan.group_name);
-            observer.on_file_progress(
-                &plan.group_name,
-                &group_base,
-                &plan.relative_path,
-                Some(item.file_size),
-            );
+                    report.processed += 1;
+                    let group_base = self.group_base_for(&plan.group_name);
+                    observer.on_file_progress(
+                        &plan.group_name,
+                        &group_base,
+                        &plan.relative_path,
+                        Some(file_size),
+                    );
+                }
+                PreparedImportOp::PruneDeleted {
+                    repo_paths_to_remove,
+                } => {
+                    let has_repo_files = !repo_paths_to_remove.is_empty();
+                    let group_repo_dir = self.repo_dir.join(&plan.group_name);
+                    for repo_path in &repo_paths_to_remove {
+                        if repo_path.is_file() {
+                            fs::remove_file(repo_path)?;
+                        }
+                        prune_empty_parent_dirs(repo_path, &group_repo_dir);
+                    }
+                    self.state_db
+                        .remove_synced_file(&plan.target_os_path.to_string_lossy())?;
+
+                    if has_repo_files {
+                        report.processed += 1;
+                        let group_base = self.group_base_for(&plan.group_name);
+                        observer.on_file_progress(
+                            &plan.group_name,
+                            &group_base,
+                            &plan.relative_path,
+                            None,
+                        );
+                    }
+                }
+            }
         }
 
         if has_updates {
@@ -289,6 +380,21 @@ impl<'a> SyncEngine<'a> {
         dry_run: bool,
     ) -> Result<TidyReport, EngineError> {
         crate::engine::tidy::tidy_groups(self, group_filters, lock, policy, dry_run)
+    }
+}
+
+fn repo_paths_for_plan(plan: &FileActionPlan) -> (PathBuf, PathBuf) {
+    if plan.is_encrypted {
+        let plain = plan
+            .repo_file_path
+            .to_str()
+            .and_then(|s| s.strip_suffix(".enc"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| plan.repo_file_path.with_extension(""));
+        (plain, plan.repo_file_path.clone())
+    } else {
+        let enc = PathBuf::from(format!("{}.enc", plan.repo_file_path.display()));
+        (plan.repo_file_path.clone(), enc)
     }
 }
 
@@ -476,5 +582,119 @@ mod tests {
             fs::read(home_dir.join(".bashrc")).unwrap(),
             b"local content\n"
         );
+    }
+
+    struct CaptureApproveObserver {
+        entries: Vec<PlanPreviewEntry>,
+    }
+    impl CommandObserver for CaptureApproveObserver {
+        fn confirm_plan(
+            &mut self,
+            entries: &[PlanPreviewEntry],
+            _dry_run: bool,
+        ) -> Result<bool, EngineError> {
+            self.entries = entries.to_vec();
+            Ok(true)
+        }
+        fn on_file_progress(&mut self, _: &str, _: &Path, _: &str, _: Option<u64>) {}
+        fn finish_progress(&mut self) {}
+    }
+
+    #[test]
+    fn import_prunes_locally_deleted_files_and_preserves_unexported_remote_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let repo_dir = tmp.path().join("repo");
+        let notes_dir = home_dir.join(".config").join("notes");
+        fs::create_dir_all(notes_dir.join("sub")).unwrap();
+        fs::create_dir_all(repo_dir.join("notes")).unwrap();
+
+        fs::write(notes_dir.join("keep.md"), b"keep\n").unwrap();
+        fs::write(notes_dir.join("sub/old.md"), b"old\n").unwrap();
+
+        let toml = "[notes]\nos-nux = \"~/.config/notes\"\nos-mac = \"~/.config/notes\"\nos-win = \"~/.config/notes\"\nos-bsd = \"~/.config/notes\"\nfiles = \"*\"\n";
+        let repo_cfg = RepoConfig::parse(toml).unwrap();
+        let state_db = StateDb::open(&tmp.path().join("state.db")).unwrap();
+        let lock = DotlerLock::new(tmp.path().join("dotler.lock"))
+            .acquire(Duration::from_millis(500), Duration::from_millis(10))
+            .unwrap();
+
+        let engine = SyncEngine::new(
+            "main",
+            &repo_dir,
+            &repo_cfg,
+            &state_db,
+            vec![],
+            OsInfo::detect(),
+            None,
+        )
+        .with_home_dir(&home_dir);
+
+        // Initial import populates repo and state.db.
+        let initial_plans = engine.plan(None, &lock).unwrap();
+        let initial_rep = engine.import_files(&initial_plans, &lock, false).unwrap();
+        assert_eq!(initial_rep.processed, 2);
+
+        // Locally rename sub/old.md -> sub/new.md, and add un-exported remote file in repo.
+        fs::remove_file(notes_dir.join("sub/old.md")).unwrap();
+        fs::write(notes_dir.join("sub/new.md"), b"new\n").unwrap();
+        fs::write(repo_dir.join("notes/remote.md"), b"from another device\n").unwrap();
+
+        let plans = engine.plan(None, &lock).unwrap();
+
+        // Dry-run and observer rejection must not mutate repo or state.db.
+        let dry_rep = engine.import_files(&plans, &lock, true).unwrap();
+        assert_eq!(dry_rep.processed, 2);
+        assert_eq!(dry_rep.skipped, 1);
+        assert!(repo_dir.join("notes/sub/old.md").is_file());
+        assert!(
+            state_db
+                .get_synced_file(&notes_dir.join("sub/old.md").to_string_lossy())
+                .unwrap()
+                .is_some()
+        );
+
+        let mut reject_obs = RejectObserver;
+        let rej_rep = engine
+            .import_files_with_observer(&plans, &lock, false, &mut reject_obs)
+            .unwrap();
+        assert_eq!(rej_rep.processed, 0);
+        assert!(repo_dir.join("notes/sub/old.md").is_file());
+
+        // Approved import collects sub/new.md, prunes sub/old.md + DB record, preserves remote.md.
+        let mut cap_obs = CaptureApproveObserver {
+            entries: Vec::new(),
+        };
+        let imp_rep = engine
+            .import_files_with_observer(&plans, &lock, false, &mut cap_obs)
+            .unwrap();
+        assert_eq!(imp_rep.processed, 2);
+        assert_eq!(imp_rep.skipped, 1);
+
+        let delete_entry = cap_obs
+            .entries
+            .iter()
+            .find(|e| e.repo_path == repo_dir.join("notes/sub/old.md"))
+            .expect("preview must include delete entry for locally deleted file");
+        assert_eq!(delete_entry.repo_action, PlanActionKind::Delete);
+
+        assert!(!repo_dir.join("notes/sub/old.md").exists());
+        assert!(repo_dir.join("notes/sub/new.md").is_file());
+        assert!(repo_dir.join("notes/remote.md").is_file());
+        assert!(
+            state_db
+                .get_synced_file(&notes_dir.join("sub/old.md").to_string_lossy())
+                .unwrap()
+                .is_none()
+        );
+
+        // Subsequent export deploys remote.md and never resurrects sub/old.md.
+        let exp_plans = engine.plan(None, &lock).unwrap();
+        let exp_rep = engine
+            .export_files(&exp_plans, &lock, false, false)
+            .unwrap();
+        assert_eq!(exp_rep.processed, 1);
+        assert!(notes_dir.join("remote.md").is_file());
+        assert!(!notes_dir.join("sub/old.md").exists());
     }
 }

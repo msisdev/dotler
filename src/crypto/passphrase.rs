@@ -28,7 +28,23 @@ impl OsKeyring {
         is_interactive: bool,
         stdin_passphrase: Option<&str>,
     ) -> Result<ResolvedPassphrase, KeyringError> {
-        // Tier 1: OS Keyring
+        Self::resolve_for_vault(None, is_interactive, stdin_passphrase)
+    }
+
+    pub fn resolve_for_vault(
+        vault_id: Option<&str>,
+        is_interactive: bool,
+        stdin_passphrase: Option<&str>,
+    ) -> Result<ResolvedPassphrase, KeyringError> {
+        // Tier 1: Vault-specific OS Keyring slot, then default fallback slot
+        if let Some(vid) = vault_id.map(str::trim).filter(|s| !s.is_empty())
+            && let Ok(Some(secret)) = Self::get_for_vault(vid)
+        {
+            return Ok(ResolvedPassphrase {
+                secret,
+                source: PassphraseSource::OsKeyring,
+            });
+        }
         if let Ok(Some(secret)) = Self::get() {
             return Ok(ResolvedPassphrase {
                 secret,
@@ -190,10 +206,31 @@ pub fn get_password(
     is_interactive: bool,
     stdin_passphrase: Option<String>,
 ) -> crate::config::Resource<SecretString, KeyringError> {
+    get_password_for_vault(None, use_keyring, hint, is_interactive, stdin_passphrase)
+}
+
+/// Creates a lazy [`Resource`](crate::config::Resource) scoped to an optional `vault_id`
+/// for resolving (vault slot then default fallback) or storing the vault passphrase.
+pub fn get_password_for_vault(
+    vault_id: Option<String>,
+    use_keyring: bool,
+    hint: Option<String>,
+    is_interactive: bool,
+    stdin_passphrase: Option<String>,
+) -> crate::config::Resource<SecretString, KeyringError> {
+    let loader_vid = vault_id.clone();
+    let saver_vid = vault_id;
     crate::config::Resource::new(
         move || {
-            if use_keyring && let Ok(Some(secret)) = OsKeyring::get() {
-                return Ok(secret);
+            if use_keyring {
+                if let Some(vid) = loader_vid.as_deref().map(str::trim).filter(|s| !s.is_empty())
+                    && let Ok(Some(secret)) = OsKeyring::get_for_vault(vid)
+                {
+                    return Ok(secret);
+                }
+                if let Ok(Some(secret)) = OsKeyring::get() {
+                    return Ok(secret);
+                }
             }
             if let Some(ref pass) = stdin_passphrase {
                 let trimmed = pass.trim_end_matches(['\r', '\n']);
@@ -218,7 +255,7 @@ pub fn get_password(
         },
         move |secret: &SecretString| {
             if use_keyring {
-                OsKeyring::set(secret)
+                OsKeyring::set_with_fallback(saver_vid.as_deref(), secret)
             } else {
                 Ok(())
             }
@@ -251,6 +288,22 @@ mod tests {
         let resolved = OsKeyring::resolve(false, Some("stdin-pw")).unwrap();
         assert_eq!(resolved.source, PassphraseSource::OsKeyring);
         assert_eq!(resolved.secret.expose_secret(), "tier1-keyring-pw");
+    }
+
+    #[test]
+    fn test_passphrase_supply_tier1_vault_specific_and_default_fallback() {
+        let _guard = MockKeyringGuard::new();
+        OsKeyring::set(&SecretString::new("default-fallback-pw".to_string())).unwrap();
+        OsKeyring::set_for_vault("vault-alpha", &SecretString::new("alpha-only-pw".to_string()))
+            .unwrap();
+
+        let alpha = OsKeyring::resolve_for_vault(Some("vault-alpha"), false, None).unwrap();
+        assert_eq!(alpha.source, PassphraseSource::OsKeyring);
+        assert_eq!(alpha.secret.expose_secret(), "alpha-only-pw");
+
+        let beta = OsKeyring::resolve_for_vault(Some("vault-beta"), false, None).unwrap();
+        assert_eq!(beta.source, PassphraseSource::OsKeyring);
+        assert_eq!(beta.secret.expose_secret(), "default-fallback-pw");
     }
 
     #[test]

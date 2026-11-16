@@ -389,10 +389,10 @@ pub struct VaultRecoverArgs {
 
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum KeyCommand {
-    /// Store default passphrase in OS keyring
+    /// Store passphrase in OS keyring (scoped to active repository vault when available)
     Set(KeySetArgs),
 
-    /// Delete default passphrase from OS keyring
+    /// Delete passphrase from OS keyring
     Del(KeyDelArgs),
 }
 
@@ -403,7 +403,14 @@ pub struct KeySetArgs {
 }
 
 #[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
-pub struct KeyDelArgs {}
+pub struct KeyDelArgs {
+    #[arg(
+        short = 'a',
+        long = "all",
+        help = "Delete all stored vault passphrases from OS keyring"
+    )]
+    pub all: bool,
+}
 
 #[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
 pub struct AiArgs {}
@@ -582,5 +589,32 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn test_parse_key_del_all_flag() {
+        let bare = Cli::try_parse_from(["dotler", "key", "del"]).unwrap();
+        assert!(matches!(
+            bare.command,
+            Command::Key {
+                command: KeyCommand::Del(KeyDelArgs { all: false })
+            }
+        ));
+
+        let long_all = Cli::try_parse_from(["dotler", "key", "del", "--all"]).unwrap();
+        assert!(matches!(
+            long_all.command,
+            Command::Key {
+                command: KeyCommand::Del(KeyDelArgs { all: true })
+            }
+        ));
+
+        let short_all = Cli::try_parse_from(["dotler", "key", "del", "-a"]).unwrap();
+        assert!(matches!(
+            short_all.command,
+            Command::Key {
+                command: KeyCommand::Del(KeyDelArgs { all: true })
+            }
+        ));
     }
 }

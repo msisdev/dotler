@@ -324,8 +324,12 @@ fn dispatch_tool(
             let default_cfg = crate::config::local::LocalConfig::default();
             let local_cfg = local_cfg_res.get().unwrap_or(&default_cfg);
             let os_info = OsInfo::detect();
+            let active_vault_id = CoreContext::new(None, None, false)
+                .resolve_repo()
+                .ok()
+                .and_then(|ctx| ctx.repo_config.vault.map(|v| v.vault_id));
             let keyring_ready =
-                local_cfg.use_keyring && OsKeyring::get().map(|opt| opt.is_some()).unwrap_or(false);
+                local_cfg.use_keyring && OsKeyring::is_ready_for_vault(active_vault_id.as_deref());
             let briefing_text = render_briefing(local_cfg, &os_info, keyring_ready);
             Ok(ToolCallResult {
                 content: vec![ToolContent {

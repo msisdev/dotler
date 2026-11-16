@@ -94,6 +94,23 @@ pub fn get_password(
     crate::crypto::keyring::get_password(use_keyring, hint, is_interactive, stdin_passphrase)
 }
 
+/// Creates a lazy [`Resource`] scoped to an optional `vault_id` for resolving or storing the vault passphrase.
+pub fn get_password_for_vault(
+    vault_id: Option<String>,
+    use_keyring: bool,
+    hint: Option<String>,
+    is_interactive: bool,
+    stdin_passphrase: Option<String>,
+) -> Resource<SecretString, KeyringError> {
+    crate::crypto::keyring::get_password_for_vault(
+        vault_id,
+        use_keyring,
+        hint,
+        is_interactive,
+        stdin_passphrase,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -490,3 +490,178 @@ fn test_e2e_vault_init_import_from_git_url_and_local_sources() {
     let git_json: serde_json::Value = serde_json::from_slice(&git_out.stdout).unwrap();
     assert_eq!(git_json["data"]["vault_id"], origin_vault_id);
 }
+
+#[test]
+fn test_e2e_multi_vault_keyring_isolation_shared_init_and_fallback() {
+    use std::fs;
+    use std::process::{Command, Stdio};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let home_dir = root.join("home");
+    let dotler_dir = home_dir.join(".config").join("dotler");
+    let repo_pub = home_dir.join("my-dotler");
+    let repo_priv = home_dir.join("my-life-vault");
+    let repo_shared = home_dir.join("shared-work-dots");
+    fs::create_dir_all(&dotler_dir).unwrap();
+    fs::create_dir_all(&repo_pub).unwrap();
+    fs::create_dir_all(&repo_priv).unwrap();
+    fs::create_dir_all(&repo_shared).unwrap();
+
+    let run_dotler_with_stdin =
+        |cwd: &std::path::Path, args: &[&str], env_pass: Option<&str>, stdin_data: Option<&str>| {
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_dotler"));
+            cmd.env("HOME", &home_dir)
+                .env("DOTLER_MOCK_KEYRING", "1")
+                .current_dir(cwd)
+                .args(args);
+            if let Some(p) = env_pass {
+                cmd.env("DOTLER_PASSPHRASE", p);
+            } else {
+                cmd.env_remove("DOTLER_PASSPHRASE");
+            }
+            if let Some(input) = stdin_data {
+                cmd.stdin(Stdio::piped());
+                cmd.stdout(Stdio::piped());
+                cmd.stderr(Stdio::piped());
+                let mut child = cmd.spawn().unwrap();
+                if let Some(mut s) = child.stdin.take() {
+                    use std::io::Write;
+                    let _ = s.write_all(input.as_bytes());
+                }
+                child.wait_with_output().unwrap()
+            } else {
+                cmd.stdin(Stdio::null());
+                cmd.output().unwrap()
+            }
+        };
+
+    // 1. Initialize two independent repositories + one repo sharing the public vault
+    assert_eq!(
+        run_dotler_with_stdin(
+            &repo_pub,
+            &["init", "--label", "my-dotler", "--json"],
+            None,
+            None,
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run_dotler_with_stdin(
+            &repo_priv,
+            &["init", "--label", "my-life-vault", "--json"],
+            None,
+            None,
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run_dotler_with_stdin(
+            &repo_shared,
+            &["init", "--label", "shared-work", "--json"],
+            None,
+            None,
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+
+    assert_eq!(
+        run_dotler_with_stdin(
+            &repo_pub,
+            &["vault", "init", "--password-stdin", "--json"],
+            None,
+            Some("public-vault-pw-111\n"),
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run_dotler_with_stdin(
+            &repo_priv,
+            &["vault", "init", "--password-stdin", "--json"],
+            None,
+            Some("private-life-pw-222\n"),
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run_dotler_with_stdin(
+            &repo_shared,
+            &["vault", "init", "--from", "my-dotler", "--password-stdin", "--json"],
+            None,
+            Some("public-vault-pw-111\n"),
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+
+    // 2. Verify two distinct vault_ids and shared vault_id
+    let cfg_pub = dotler::config::RepoConfig::load(&repo_pub.join("dotler.toml")).unwrap();
+    let cfg_priv = dotler::config::RepoConfig::load(&repo_priv.join("dotler.toml")).unwrap();
+    let cfg_shared = dotler::config::RepoConfig::load(&repo_shared.join("dotler.toml")).unwrap();
+    let vid_pub = cfg_pub.vault.as_ref().unwrap().vault_id.clone();
+    let vid_priv = cfg_priv.vault.as_ref().unwrap().vault_id.clone();
+    assert_ne!(vid_pub, vid_priv);
+    assert_eq!(cfg_shared.vault.as_ref().unwrap().vault_id, vid_pub);
+
+    // Add encrypted group rules and secret source files
+    let os_secret_pub = home_dir.join(".pub_token");
+    let os_secret_priv = home_dir.join(".priv_note");
+    fs::write(&os_secret_pub, b"PUBLIC_REPO_TOKEN=abc\n").unwrap();
+    fs::write(&os_secret_priv, b"PRIVATE_LIFE_SECRET=xyz\n").unwrap();
+
+    let append_group = |dir: &std::path::Path, file: &str| {
+        let mut s = fs::read_to_string(dir.join("dotler.toml")).unwrap();
+        s.push_str(&format!(
+            "\n[secrets]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nfiles = \"{file} enc\"\n"
+        ));
+        fs::write(dir.join("dotler.toml"), s).unwrap();
+    };
+    append_group(&repo_pub, ".pub_token");
+    append_group(&repo_shared, ".pub_token");
+    append_group(&repo_priv, ".priv_note");
+
+    // 3. In-process verification of non-interactive multi-vault unlocking & shared vault unlock
+    let _guard = TestKeyringGuard::new();
+    unsafe {
+        std::env::remove_var(dotler::crypto::keyring::PASSPHRASE_ENV_VAR);
+    }
+    OsKeyring::set_with_fallback(
+        Some(&vid_pub),
+        &SecretString::new("public-vault-pw-111".to_string()),
+    )
+    .unwrap();
+    OsKeyring::set_with_fallback(
+        Some(&vid_priv),
+        &SecretString::new("private-life-pw-222".to_string()),
+    )
+    .unwrap();
+
+    let loaded_pub = dotler::config::RepoConfig::load(&repo_pub.join("dotler.toml")).unwrap();
+    let loaded_shared = dotler::config::RepoConfig::load(&repo_shared.join("dotler.toml")).unwrap();
+    let loaded_priv = dotler::config::RepoConfig::load(&repo_priv.join("dotler.toml")).unwrap();
+
+    let k_pub = dotler::core::unlock_vault_if_needed(&loaded_pub, true, false, true)
+        .unwrap()
+        .unwrap();
+    let k_shared = dotler::core::unlock_vault_if_needed(&loaded_shared, true, false, true)
+        .unwrap()
+        .unwrap();
+    let k_priv = dotler::core::unlock_vault_if_needed(&loaded_priv, true, false, true)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(k_pub.vault_id(), vid_pub);
+    assert_eq!(k_shared.vault_id(), vid_pub);
+    assert_eq!(k_priv.vault_id(), vid_priv);
+}

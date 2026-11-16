@@ -98,12 +98,23 @@ pub fn unlock_vault_if_needed(
         }
     }
 
-    let keyring_secret = if use_keyring {
+    let vault_keyring_secret = if use_keyring && !vault_cfg.vault_id.trim().is_empty() {
+        OsKeyring::get_for_vault(&vault_cfg.vault_id).ok().flatten()
+    } else {
+        None
+    };
+    if let Some(ref sec) = vault_keyring_secret
+        && let Ok(key) = slot.unwrap(sec, Some(&vault_cfg.vault_id))
+    {
+        return Ok(Some(key));
+    }
+
+    let default_keyring_secret = if use_keyring {
         OsKeyring::get().ok().flatten()
     } else {
         None
     };
-    if let Some(ref sec) = keyring_secret
+    if let Some(ref sec) = default_keyring_secret
         && let Ok(key) = slot.unwrap(sec, Some(&vault_cfg.vault_id))
     {
         return Ok(Some(key));
@@ -132,8 +143,8 @@ pub fn unlock_vault_if_needed(
         .map_err(|e| EngineError::Crypto(crate::crypto::CryptoError::Keyring(e)))?;
     let key = slot.unwrap(&resolved.secret, Some(&vault_cfg.vault_id))?;
 
-    if use_keyring && keyring_secret.is_none() {
-        let _ = OsKeyring::set(&resolved.secret);
+    if use_keyring && vault_keyring_secret.is_none() {
+        let _ = OsKeyring::set_with_fallback(Some(&vault_cfg.vault_id), &resolved.secret);
     }
 
     Ok(Some(key))
@@ -235,6 +246,7 @@ pub fn rotate_vault_passphrases(
 
     let mut pending_writes: Vec<(String, PathBuf, String, String)> = Vec::new();
     let mut already_synced_repos: Vec<String> = Vec::new();
+    let mut synced_vault_ids: Vec<String> = Vec::new();
 
     for (label, manifest_path, vault_cfg) in vault_targets {
         match change_password(&vault_cfg, &old_pass, &new_pass) {
@@ -261,6 +273,11 @@ pub fn rotate_vault_passphrases(
                 if let Ok(slot) = VaultSlot::from_base64(&vault_cfg.password_slot)
                     && slot.unwrap(&new_pass, Some(&vault_cfg.vault_id)).is_ok()
                 {
+                    if !vault_cfg.vault_id.trim().is_empty()
+                        && !synced_vault_ids.contains(&vault_cfg.vault_id)
+                    {
+                        synced_vault_ids.push(vault_cfg.vault_id.clone());
+                    }
                     already_synced_repos.push(label);
                     continue;
                 }
@@ -288,16 +305,42 @@ pub fn rotate_vault_passphrases(
 
     let mut rotated_repos = Vec::new();
     let mut primary_vault_id: Option<String> = None;
+    let mut target_vault_ids: Vec<String> = synced_vault_ids;
 
     for (label, manifest_path, updated_manifest, vault_id) in pending_writes {
         write_file_safe(&manifest_path, updated_manifest.as_bytes())?;
         if primary_vault_id.is_none() {
-            primary_vault_id = Some(vault_id);
+            primary_vault_id = Some(vault_id.clone());
+        }
+        if !vault_id.trim().is_empty() && !target_vault_ids.contains(&vault_id) {
+            target_vault_ids.push(vault_id);
         }
         rotated_repos.push(label);
     }
+    if primary_vault_id.is_none() {
+        primary_vault_id = target_vault_ids.first().cloned();
+    }
 
-    let keyring_updated = local_cfg.use_keyring && OsKeyring::set(&new_pass).is_ok();
+    let mut keyring_updated = false;
+    if local_cfg.use_keyring {
+        use crate::crypto::ExposeSecret;
+        for vid in &target_vault_ids {
+            if OsKeyring::set_for_vault(vid, &new_pass).is_ok() {
+                keyring_updated = true;
+            }
+        }
+        let existing_default = OsKeyring::get().ok().flatten();
+        let should_update_default = match existing_default {
+            None => true,
+            Some(ref sec) => {
+                sec.expose_secret() == old_pass.expose_secret()
+                    || sec.expose_secret() == new_pass.expose_secret()
+            }
+        };
+        if should_update_default && OsKeyring::set(&new_pass).is_ok() {
+            keyring_updated = true;
+        }
+    }
     skipped_repos.sort();
 
     Ok(VaultPasswdReport {
@@ -335,11 +378,20 @@ pub fn resolve_old_passphrase_for_vaults(
         }
     }
 
-    if use_keyring
-        && let Ok(Some(sec)) = OsKeyring::get()
-        && matches_any(&sec)
-    {
-        return Ok(sec);
+    if use_keyring {
+        for (_, _, vcfg) in vault_targets {
+            if !vcfg.vault_id.trim().is_empty()
+                && let Ok(Some(sec)) = OsKeyring::get_for_vault(&vcfg.vault_id)
+                && matches_any(&sec)
+            {
+                return Ok(sec);
+            }
+        }
+        if let Ok(Some(sec)) = OsKeyring::get()
+            && matches_any(&sec)
+        {
+            return Ok(sec);
+        }
     }
 
     if !is_interactive {
@@ -436,6 +488,77 @@ mod tests {
         let err = unlock_vault_if_needed(&repo_cfg, true, false, true).unwrap_err();
         assert!(matches!(err, EngineError::VaultLocked { .. }));
         assert_eq!(err.exit_code(), 4);
+
+        OsKeyring::clear_mock();
+        OsKeyring::disable_mock();
+    }
+
+    #[test]
+    fn multi_vault_isolation_and_default_fallback_unlock() {
+        let _guard = crate::crypto::keyring::MOCK_KEYRING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        OsKeyring::enable_mock();
+        OsKeyring::clear_mock();
+        unsafe {
+            std::env::remove_var(PASSPHRASE_ENV_VAR);
+        }
+
+        let pass_pub = SecretString::new("public-dots-pass-111".to_string());
+        let pass_priv = SecretString::new("private-vault-pass-222".to_string());
+        let (vcfg_pub, key_pub, _) = init_vault(&pass_pub).unwrap();
+        let (vcfg_priv, key_priv, _) = init_vault(&pass_priv).unwrap();
+        let repo_pub = RepoConfig {
+            vault: Some(vcfg_pub.clone()),
+            ..Default::default()
+        };
+        let repo_priv = RepoConfig {
+            vault: Some(vcfg_priv.clone()),
+            ..Default::default()
+        };
+
+        // Store both passphrases using set_with_fallback:
+        // public fills <vid_pub> + default; private fills <vid_priv> without touching default.
+        OsKeyring::set_with_fallback(Some(&vcfg_pub.vault_id), &pass_pub).unwrap();
+        OsKeyring::set_with_fallback(Some(&vcfg_priv.vault_id), &pass_priv).unwrap();
+
+        // Both unlock non-interactively in Tier 1 without env vars or prompt
+        let unlocked_pub = unlock_vault_if_needed(&repo_pub, true, false, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unlocked_pub.vault_id(), key_pub.vault_id());
+
+        let unlocked_priv = unlock_vault_if_needed(&repo_priv, true, false, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unlocked_priv.vault_id(), key_priv.vault_id());
+
+        // Fallback test: delete <vid_pub> slot; public still unlocks via default slot
+        OsKeyring::delete_for_vault(&vcfg_pub.vault_id).unwrap();
+        let unlocked_pub_fallback = unlock_vault_if_needed(&repo_pub, true, false, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unlocked_pub_fallback.vault_id(), key_pub.vault_id());
+
+        // Interactive unlock on a missing <vid_pub> slot auto-populates <vid_pub>
+        let (vcfg_fresh, key_fresh, _) = init_vault(&SecretString::new("fresh-pass-333".into())).unwrap();
+        let repo_fresh = RepoConfig {
+            vault: Some(vcfg_fresh.clone()),
+            ..Default::default()
+        };
+        OsKeyring::push_mock_prompt_reply("fresh-pass-333");
+        let unlocked_fresh = unlock_vault_if_needed(&repo_fresh, true, true, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unlocked_fresh.vault_id(), key_fresh.vault_id());
+        assert_eq!(
+            crate::crypto::ExposeSecret::expose_secret(
+                &OsKeyring::get_for_vault(&vcfg_fresh.vault_id)
+                    .unwrap()
+                    .unwrap()
+            ),
+            "fresh-pass-333"
+        );
 
         OsKeyring::clear_mock();
         OsKeyring::disable_mock();

@@ -5,20 +5,22 @@ use std::io::Write;
 use crate::cli::args::{Cli, KeyCommand, VaultCommand, VaultInitArgs};
 use crate::cli::output::{KeyReport, VaultInitReport, VaultRecoverReport, render_success_to};
 use crate::config::local::{
-    LOCAL_CONFIG_FILE, LocalConfig, expand_tilde, get_local_config, resolve_repo_path_with_cwd,
+    LOCAL_CONFIG_FILE, LocalConfig, expand_tilde, find_ancestor_repo_dir, get_local_config,
+    resolve_repo_path_with_cwd,
 };
 use crate::config::repo::{RepoConfig, VaultConfig, get_repo_config};
 use crate::config::state::DotlerLockGuard;
 use crate::core::vault_loader::{read_new_passphrase, rotate_vault_passphrases};
-use crate::crypto::SecretString;
-use crate::crypto::keyring::{OsKeyring, get_password};
+use crate::crypto::{ExposeSecret, SecretString};
+use crate::crypto::keyring::OsKeyring;
 use crate::crypto::vault::{VaultSlot, init_vault, recover_vault};
 use crate::engine::EngineError;
 use crate::engine::remote::{GitRunner, REMOTE_TOML_FETCH_MAX_BYTES, fetch_http_text, parse_url};
 use crate::tui::confirm::{ConfirmError, ConfirmPrompt, confirm_proceed_to};
 
-pub(crate) fn resolve_vault_init_passphrase<W: Write>(
+pub(crate) fn resolve_vault_init_passphrase_for_vault<W: Write>(
     writer: &mut W,
+    vault_id: Option<&str>,
     use_keyring: bool,
     password_stdin: bool,
     is_interactive: bool,
@@ -28,11 +30,17 @@ pub(crate) fn resolve_vault_init_passphrase<W: Write>(
     let has_env_pass = std::env::var(crate::crypto::keyring::PASSPHRASE_ENV_VAR)
         .is_ok_and(|v| !v.trim_end_matches(['\r', '\n']).is_empty());
 
-    if !password_stdin
-        && !has_env_pass
-        && use_keyring
-        && let Ok(Some(existing_secret)) = OsKeyring::get()
-    {
+    let existing_keyring = if !password_stdin && !has_env_pass && use_keyring {
+        vault_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|vid| OsKeyring::get_for_vault(vid).ok().flatten())
+            .or_else(|| OsKeyring::get().ok().flatten())
+    } else {
+        None
+    };
+
+    if let Some(existing_secret) = existing_keyring {
         if json_mode || (!is_interactive && !ConfirmPrompt::has_mock_or_env_input()) {
             return Ok((existing_secret, false));
         }
@@ -58,6 +66,80 @@ pub(crate) fn resolve_vault_init_passphrase<W: Write>(
     };
     let pass = read_new_passphrase(password_stdin, true, is_interactive, prompt)?;
     Ok((pass, true))
+}
+
+#[allow(dead_code)]
+pub(crate) fn resolve_vault_init_passphrase<W: Write>(
+    writer: &mut W,
+    use_keyring: bool,
+    password_stdin: bool,
+    is_interactive: bool,
+    json_mode: bool,
+    is_import: bool,
+) -> Result<(SecretString, bool), EngineError> {
+    resolve_vault_init_passphrase_for_vault(
+        writer,
+        None,
+        use_keyring,
+        password_stdin,
+        is_interactive,
+        json_mode,
+        is_import,
+    )
+}
+
+fn resolve_active_repo_vault(
+    local_cfg: &LocalConfig,
+    repo_override: Option<&str>,
+) -> Result<Option<VaultConfig>, EngineError> {
+    if let Some(label) = repo_override {
+        let (_resolved_label, repo_path) = resolve_repo_path_with_cwd(local_cfg, Some(label))?;
+        let manifest_path = repo_path.join("dotler.toml");
+        if !manifest_path.is_file() {
+            return Err(EngineError::Config(
+                crate::config::ConfigError::RepoPathNotFound(repo_path.display().to_string()),
+            ));
+        }
+        let repo_cfg = RepoConfig::load(&manifest_path)?;
+        return Ok(repo_cfg.vault);
+    }
+
+    let Ok((_label, repo_path)) = resolve_repo_path_with_cwd(local_cfg, None) else {
+        return Ok(None);
+    };
+    let manifest_path = repo_path.join("dotler.toml");
+    if !manifest_path.is_file() {
+        return Ok(None);
+    }
+    match RepoConfig::load(&manifest_path) {
+        Ok(cfg) => Ok(cfg.vault),
+        Err(_) => Ok(None),
+    }
+}
+
+fn collect_known_vault_ids(local_cfg: &LocalConfig) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut push_from_dir = |dir: &std::path::Path| {
+        let manifest_path = dir.join("dotler.toml");
+        if manifest_path.is_file()
+            && let Ok(cfg) = RepoConfig::load(&manifest_path)
+            && let Some(v) = cfg.vault
+            && !v.vault_id.trim().is_empty()
+            && !ids.contains(&v.vault_id)
+        {
+            ids.push(v.vault_id);
+        }
+    };
+
+    for raw_path in local_cfg.repos.values() {
+        push_from_dir(&expand_tilde(raw_path));
+    }
+    if let Ok(cwd) = std::env::current_dir()
+        && let Some(repo_dir) = find_ancestor_repo_dir(&cwd)
+    {
+        push_from_dir(&repo_dir);
+    }
+    ids
 }
 
 fn fetch_external_vault_payload(
@@ -167,8 +249,9 @@ pub(crate) fn handle_vault<W: Write>(
             repo_cfg.vault = Some(new_cfg);
             repo_cfg_res.set(repo_cfg)?;
 
-            let mut password_res = get_password(local_cfg.use_keyring, None, is_interactive, None);
-            let _ = password_res.set(new_pass);
+            if local_cfg.use_keyring {
+                let _ = OsKeyring::set_with_fallback(Some(&vault_id), &new_pass);
+            }
 
             let data = VaultRecoverReport {
                 vault_id,
@@ -214,8 +297,10 @@ fn handle_vault_init<W: Write>(
         let pw_slot = VaultSlot::from_base64(&ext_vault.password_slot)?;
         let _rec_slot = VaultSlot::from_base64(&ext_vault.recovery_slot)?;
 
-        let (pass, should_update_keyring) = resolve_vault_init_passphrase(
+        let expected_vid = (!ext_vault.vault_id.is_empty()).then_some(ext_vault.vault_id.as_str());
+        let (pass, should_update_keyring) = resolve_vault_init_passphrase_for_vault(
             stdout,
+            expected_vid,
             local_cfg.use_keyring,
             args.password_stdin,
             is_interactive,
@@ -223,7 +308,6 @@ fn handle_vault_init<W: Write>(
             true,
         )?;
 
-        let expected_vid = (!ext_vault.vault_id.is_empty()).then_some(ext_vault.vault_id.as_str());
         let vault_key = pw_slot.unwrap(&pass, expected_vid)?;
         let cfg = VaultConfig {
             vault_id: vault_key.vault_id(),
@@ -233,8 +317,9 @@ fn handle_vault_init<W: Write>(
         };
         (cfg, None, pass, should_update_keyring)
     } else {
-        let (pass, should_update_keyring) = resolve_vault_init_passphrase(
+        let (pass, should_update_keyring) = resolve_vault_init_passphrase_for_vault(
             stdout,
+            None,
             local_cfg.use_keyring,
             args.password_stdin,
             is_interactive,
@@ -258,9 +343,10 @@ fn handle_vault_init<W: Write>(
     let mut repo_cfg_res = get_repo_config(manifest_path);
     repo_cfg_res.set(repo_cfg)?;
 
-    if should_update_keyring {
-        let mut password_res = get_password(local_cfg.use_keyring, None, is_interactive, None);
-        let _ = password_res.set(pass);
+    if local_cfg.use_keyring
+        && (should_update_keyring || OsKeyring::get_for_vault(&vault_id).ok().flatten().is_none())
+    {
+        let _ = OsKeyring::set_with_fallback(Some(&vault_id), &pass);
     }
 
     let data = VaultInitReport {
@@ -278,26 +364,66 @@ pub(crate) fn handle_key<W: Write>(
     stdout: &mut W,
     _lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
+    let local_cfg_res = get_local_config(expand_tilde(LOCAL_CONFIG_FILE));
+    let local_cfg = match local_cfg_res.get() {
+        Ok(cfg) => cfg.clone(),
+        Err(e) if cli.repo.is_some() => return Err(EngineError::Config(e)),
+        Err(_) => LocalConfig::default(),
+    };
+
     match cmd {
         KeyCommand::Set(args) => {
+            let vault_cfg_opt = resolve_active_repo_vault(&local_cfg, cli.repo.as_deref())?;
             let pass = read_new_passphrase(
                 args.password_stdin,
                 true,
                 is_interactive,
                 "Enter vault passphrase to store in keyring: ",
             )?;
-            let mut password_res = get_password(true, None, is_interactive, None);
-            password_res
-                .set(pass)
+            let target_vid = vault_cfg_opt
+                .as_ref()
+                .map(|v| v.vault_id.trim())
+                .filter(|s| !s.is_empty());
+            OsKeyring::set_with_fallback(target_vid, &pass)
                 .map_err(|e| EngineError::Crypto(crate::crypto::CryptoError::Keyring(e)))?;
             let data = KeyReport {
                 status: "keyring_updated".to_string(),
             };
             Ok(render_success_to(stdout, "key set", &data, cli.json))
         }
-        KeyCommand::Del(_) => {
-            OsKeyring::delete()
-                .map_err(|e| EngineError::Crypto(crate::crypto::CryptoError::Keyring(e)))?;
+        KeyCommand::Del(args) => {
+            if args.all {
+                let vault_ids = collect_known_vault_ids(&local_cfg);
+                OsKeyring::delete_all(&vault_ids)
+                    .map_err(|e| EngineError::Crypto(crate::crypto::CryptoError::Keyring(e)))?;
+            } else {
+                let vault_cfg_opt = resolve_active_repo_vault(&local_cfg, cli.repo.as_deref())?;
+                if let Some(vault_cfg) = vault_cfg_opt
+                    && !vault_cfg.vault_id.trim().is_empty()
+                {
+                    let vault_sec = OsKeyring::get_for_vault(&vault_cfg.vault_id).ok().flatten();
+                    OsKeyring::delete_for_vault(&vault_cfg.vault_id)
+                        .map_err(|e| EngineError::Crypto(crate::crypto::CryptoError::Keyring(e)))?;
+
+                    if let Ok(Some(default_sec)) = OsKeyring::get() {
+                        let matches_vault_sec = vault_sec
+                            .as_ref()
+                            .is_some_and(|v| v.expose_secret() == default_sec.expose_secret());
+                        let unlocks_vault = VaultSlot::from_base64(&vault_cfg.password_slot)
+                            .ok()
+                            .and_then(|slot| {
+                                slot.unwrap(&default_sec, Some(&vault_cfg.vault_id)).ok()
+                            })
+                            .is_some();
+                        if matches_vault_sec || unlocks_vault {
+                            let _ = OsKeyring::delete();
+                        }
+                    }
+                } else {
+                    OsKeyring::delete()
+                        .map_err(|e| EngineError::Crypto(crate::crypto::CryptoError::Keyring(e)))?;
+                }
+            }
             let data = KeyReport {
                 status: "keyring_deleted".to_string(),
             };
@@ -517,5 +643,222 @@ mod tests {
                 .unwrap();
         assert_eq!(resolved_no.expose_secret(), "brand-new-pass-222");
         assert!(update_no);
+    }
+
+    #[test]
+    fn test_rotate_vault_passphrases_preserves_other_vault_slots_and_nonmatching_default() {
+        let _mock = mock_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_a = tmp.path().join("repo_a");
+        let repo_b = tmp.path().join("repo_b");
+        fs::create_dir_all(&repo_a).unwrap();
+        fs::create_dir_all(&repo_b).unwrap();
+
+        let pass_a = SecretString::new("vault-a-old-pass".to_string());
+        let pass_b = SecretString::new("vault-b-stay-pass".to_string());
+        let (vcfg_a, _, _) = init_vault(&pass_a).unwrap();
+        let (vcfg_b, _, _) = init_vault(&pass_b).unwrap();
+
+        let write_manifest = |dir: &Path, vcfg: &VaultConfig| {
+            let content = format!(
+                "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n",
+                vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
+            );
+            write_file_safe(&dir.join("dotler.toml"), content.as_bytes()).unwrap();
+        };
+        write_manifest(&repo_a, &vcfg_a);
+        write_manifest(&repo_b, &vcfg_b);
+
+        let mut local_cfg = LocalConfig::default();
+        local_cfg
+            .repos
+            .insert("a".to_string(), repo_a.to_string_lossy().to_string());
+        local_cfg
+            .repos
+            .insert("b".to_string(), repo_b.to_string_lossy().to_string());
+
+        // Set default slot to vault_b's passphrase, while vault_a has its own <vid_a> slot
+        OsKeyring::set(&pass_b).unwrap();
+        OsKeyring::set_for_vault(&vcfg_a.vault_id, &pass_a).unwrap();
+        OsKeyring::set_for_vault(&vcfg_b.vault_id, &pass_b).unwrap();
+
+        OsKeyring::push_mock_prompt_reply("vault-a-rotated-new");
+        let report = rotate_vault_passphrases(&local_cfg, Some("a"), false, None, true).unwrap();
+        assert_eq!(report.rotated_repos, vec!["a".to_string()]);
+        assert!(report.keyring_updated);
+
+        // <vid_a> updated to new pass, <vid_b> and non-matching default preserved
+        assert_eq!(
+            OsKeyring::get_for_vault(&vcfg_a.vault_id)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "vault-a-rotated-new"
+        );
+        assert_eq!(
+            OsKeyring::get_for_vault(&vcfg_b.vault_id)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "vault-b-stay-pass"
+        );
+        assert_eq!(
+            OsKeyring::get().unwrap().unwrap().expose_secret(),
+            "vault-b-stay-pass"
+        );
+    }
+
+    #[test]
+    fn test_handle_key_multi_vault_set_del_and_del_all() {
+        use crate::cli::args::Command;
+        let _mock = mock_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let dotler_cfg_dir = home_dir.join(".config").join("dotler");
+        let repo_pub = home_dir.join("my-dotler");
+        let repo_priv = home_dir.join("my-life-vault");
+        fs::create_dir_all(&dotler_cfg_dir).unwrap();
+        fs::create_dir_all(&repo_pub).unwrap();
+        fs::create_dir_all(&repo_priv).unwrap();
+
+        let pass_pub = SecretString::new("pub-secret-111".to_string());
+        let pass_priv = SecretString::new("priv-secret-222".to_string());
+        let (vcfg_pub, _, _) = init_vault(&pass_pub).unwrap();
+        let (vcfg_priv, _, _) = init_vault(&pass_priv).unwrap();
+
+        let write_manifest = |dir: &Path, vcfg: &VaultConfig| {
+            let content = format!(
+                "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n",
+                vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
+            );
+            write_file_safe(&dir.join("dotler.toml"), content.as_bytes()).unwrap();
+        };
+        write_manifest(&repo_pub, &vcfg_pub);
+        write_manifest(&repo_priv, &vcfg_priv);
+
+        let mut local_cfg = LocalConfig {
+            default_repo: Some("my-dotler".to_string()),
+            ..Default::default()
+        };
+        local_cfg
+            .repos
+            .insert("my-dotler".to_string(), "~/my-dotler".to_string());
+        local_cfg.repos.insert(
+            "my-life-vault".to_string(),
+            "~/my-life-vault".to_string(),
+        );
+
+        let orig_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", &home_dir);
+        }
+        local_cfg.save_atomic(&dotler_cfg_dir.join("config.toml")).unwrap();
+
+        let lock_res = crate::config::state::get_lock(dotler_cfg_dir.join("dotler.lock"));
+        let lock_guard = lock_res.get().unwrap();
+
+        let make_cli = |repo: Option<&str>, cmd: Command| Cli {
+            json: true,
+            device: None,
+            repo: repo.map(str::to_string),
+            dry_run: false,
+            verbose: false,
+            command: cmd,
+        };
+
+        // `dotler key set -r my-dotler`
+        OsKeyring::push_mock_prompt_reply("pub-secret-111");
+        handle_key(
+            &KeyCommand::Set(crate::cli::args::KeySetArgs::default()),
+            &make_cli(
+                Some("my-dotler"),
+                Command::Key {
+                    command: KeyCommand::Set(crate::cli::args::KeySetArgs::default()),
+                },
+            ),
+            true,
+            &mut Vec::new(),
+            lock_guard,
+        )
+        .unwrap();
+
+        // `dotler key set -r my-life-vault`
+        OsKeyring::push_mock_prompt_reply("priv-secret-222");
+        handle_key(
+            &KeyCommand::Set(crate::cli::args::KeySetArgs::default()),
+            &make_cli(
+                Some("my-life-vault"),
+                Command::Key {
+                    command: KeyCommand::Set(crate::cli::args::KeySetArgs::default()),
+                },
+            ),
+            true,
+            &mut Vec::new(),
+            lock_guard,
+        )
+        .unwrap();
+
+        assert_eq!(
+            OsKeyring::get_for_vault(&vcfg_pub.vault_id)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "pub-secret-111"
+        );
+        assert_eq!(
+            OsKeyring::get_for_vault(&vcfg_priv.vault_id)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "priv-secret-222"
+        );
+
+        // `dotler key del -r my-dotler` deletes pub slot (and matching default) while keeping priv
+        handle_key(
+            &KeyCommand::Del(crate::cli::args::KeyDelArgs { all: false }),
+            &make_cli(
+                Some("my-dotler"),
+                Command::Key {
+                    command: KeyCommand::Del(crate::cli::args::KeyDelArgs { all: false }),
+                },
+            ),
+            true,
+            &mut Vec::new(),
+            lock_guard,
+        )
+        .unwrap();
+        assert!(OsKeyring::get_for_vault(&vcfg_pub.vault_id).unwrap().is_none());
+        assert!(OsKeyring::get().unwrap().is_none());
+        assert_eq!(
+            OsKeyring::get_for_vault(&vcfg_priv.vault_id)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "priv-secret-222"
+        );
+
+        // `dotler key del --all` clears remaining priv slot too
+        OsKeyring::set(&SecretString::new("dangling-default".to_string())).unwrap();
+        handle_key(
+            &KeyCommand::Del(crate::cli::args::KeyDelArgs { all: true }),
+            &make_cli(
+                None,
+                Command::Key {
+                    command: KeyCommand::Del(crate::cli::args::KeyDelArgs { all: true }),
+                },
+            ),
+            true,
+            &mut Vec::new(),
+            lock_guard,
+        )
+        .unwrap();
+        assert!(OsKeyring::get_for_vault(&vcfg_priv.vault_id).unwrap().is_none());
+        assert!(OsKeyring::get().unwrap().is_none());
+
+        if let Some(h) = orig_home {
+            unsafe {
+                std::env::set_var("HOME", h);
+            }
+        }
     }
 }

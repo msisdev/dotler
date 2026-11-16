@@ -10,7 +10,8 @@ pub mod vault_loader;
 
 pub use context::{CoreContext, ResolvedRepoContext};
 pub use resource::{
-    Resource, get_local_config, get_lock, get_password, get_repo_config, get_state_db,
+    Resource, get_local_config, get_lock, get_password, get_password_for_vault, get_repo_config,
+    get_state_db,
 };
 pub use vault_loader::{
     VaultPasswdReport, VaultUnlockPolicy, has_encrypted_repo_files, has_encrypted_rules,

@@ -90,7 +90,7 @@ pub fn random_u32() -> u32 {
 
 pub use keyring::{
     KEYRING_DEFAULT_USER, KEYRING_SERVICE_NAME, KeyringError, OsKeyring, PASSPHRASE_ENV_VAR,
-    PassphraseSource, ResolvedPassphrase, get_password,
+    PassphraseSource, ResolvedPassphrase, get_password, get_password_for_vault,
 };
 pub use vault::{
     ARGON2_M_COST_KIB, ARGON2_P_COST, ARGON2_SALT_LEN, ARGON2_T_COST, BIP39_ENTROPY_BITS,

@@ -169,6 +169,53 @@ pub fn is_symlink(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Recursively removes empty parent directories starting from `file_path.parent()` upward,
+/// stopping immediately upon reaching `stop_at_root`, encountering a non-empty directory,
+/// or encountering a symbolic link or filesystem error.
+pub fn prune_empty_parent_dirs(file_path: &Path, stop_at_root: &Path) {
+    let stop_root = normalize_lexical_path(stop_at_root);
+    if stop_root.as_os_str().is_empty() {
+        return;
+    }
+    let normalized_file = normalize_lexical_path(file_path);
+    let Some(parent) = normalized_file.parent() else {
+        return;
+    };
+    let Ok(rel_parent) = parent.strip_prefix(&stop_root) else {
+        return;
+    };
+    if rel_parent.as_os_str().is_empty() {
+        return;
+    }
+
+    // Verify no intermediate ancestor below `stop_root` is a symbolic link before pruning upward.
+    let mut probe = stop_root.clone();
+    for comp in rel_parent.components() {
+        probe.push(comp);
+        if is_symlink(&probe) {
+            return;
+        }
+    }
+
+    let mut current = Some(parent);
+    while let Some(dir) = current {
+        if dir == stop_root || !dir.starts_with(&stop_root) {
+            break;
+        }
+        let Ok(meta) = fs::symlink_metadata(dir) else {
+            break;
+        };
+        let file_type = meta.file_type();
+        if file_type.is_symlink() || !file_type.is_dir() {
+            break;
+        }
+        if fs::remove_dir(dir).is_err() {
+            break;
+        }
+        current = dir.parent();
+    }
+}
+
 /// Rejects any symbolic link (file, directory, or broken link) inside a repository directory.
 pub fn validate_dir_no_symlinks(dir: &Path) -> Result<(), ConfigError> {
     if is_symlink(dir) {
@@ -483,5 +530,77 @@ mod tests {
         assert!(validate_rule_pattern(".gitconfig").is_ok());
         assert!(validate_rule_pattern("custom.conf").is_ok());
         assert!(validate_rule_pattern("*.conf").is_ok());
+    }
+
+    #[test]
+    fn test_prune_empty_parent_dirs_removes_nested_empty_dirs_and_stops_at_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("group_root");
+        let deep_file = root.join("a/b/c/file.txt");
+        fs::create_dir_all(deep_file.parent().unwrap()).unwrap();
+        fs::write(&deep_file, b"data").unwrap();
+        fs::remove_file(&deep_file).unwrap();
+
+        prune_empty_parent_dirs(&deep_file, &root);
+
+        assert!(!root.join("a/b/c").exists());
+        assert!(!root.join("a/b").exists());
+        assert!(!root.join("a").exists());
+        assert!(root.is_dir());
+    }
+
+    #[test]
+    fn test_prune_empty_parent_dirs_stops_at_non_empty_ancestor_and_ignores_outside_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("group_root");
+        let sibling = root.join("a/sibling.txt");
+        let deep_file = root.join("a/b/c/file.txt");
+        fs::create_dir_all(deep_file.parent().unwrap()).unwrap();
+        fs::write(&sibling, b"keep").unwrap();
+        fs::write(&deep_file, b"remove").unwrap();
+        fs::remove_file(&deep_file).unwrap();
+
+        prune_empty_parent_dirs(&deep_file, &root);
+
+        assert!(!root.join("a/b/c").exists());
+        assert!(!root.join("a/b").exists());
+        assert!(root.join("a").is_dir());
+        assert!(sibling.is_file());
+
+        let outside_file = tmp.path().join("outside/nested/file.txt");
+        fs::create_dir_all(outside_file.parent().unwrap()).unwrap();
+        fs::write(&outside_file, b"outside").unwrap();
+        fs::remove_file(&outside_file).unwrap();
+
+        prune_empty_parent_dirs(&outside_file, &root);
+        assert!(tmp.path().join("outside/nested").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_prune_empty_parent_dirs_never_removes_symlink_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("group_root");
+        let target_dir = tmp.path().join("real_empty_target");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&target_dir).unwrap();
+
+        let link_dir = root.join("linked");
+        std::os::unix::fs::symlink(&target_dir, &link_dir).unwrap();
+        let file_inside_link = link_dir.join("file.txt");
+
+        prune_empty_parent_dirs(&file_inside_link, &root);
+
+        assert!(is_symlink(&link_dir));
+        assert!(target_dir.is_dir());
+        assert!(root.is_dir());
+
+        let nested_under_link = link_dir.join("sub");
+        fs::create_dir_all(&nested_under_link).unwrap();
+        let nested_file = nested_under_link.join("file.txt");
+        prune_empty_parent_dirs(&nested_file, &root);
+
+        assert!(nested_under_link.is_dir());
+        assert!(is_symlink(&link_dir));
     }
 }

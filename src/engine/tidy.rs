@@ -2,14 +2,14 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::local::{WalkDir, expand_tilde};
+use crate::config::local::WalkDir;
 use crate::config::repo::{
-    evaluate_selection, is_symlink, parse_selection_rules, resolve_group_target_path,
-    validate_dir_no_symlinks,
+    evaluate_selection, is_symlink, parse_selection_rules, prune_empty_parent_dirs,
+    resolve_group_target_path, validate_dir_no_symlinks,
 };
 use crate::config::state::{DotlerLockGuard, TMP_FILE_PREFIX, write_file_safe};
 use crate::core::context::CoreContext;
@@ -146,9 +146,7 @@ pub fn tidy_groups_with_observer(
             continue;
         }
 
-        let group_base = resolve_group_target_path(group_cfg, &engine.devices, &engine.os_info)
-            .map(|s| engine.expand_target_base(&s))
-            .unwrap_or_else(|| expand_tilde("~"));
+        let group_base = engine.group_base_for(group_name);
 
         let rules = parse_selection_rules(&group_cfg.files)?;
 
@@ -293,10 +291,12 @@ pub fn tidy_groups_with_observer(
             continue;
         }
         let orphan_path = PathBuf::from(&rec.target_path);
-        let group_base = orphan_path
-            .parent()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| expand_tilde("~"));
+        let group_base = resolve_orphan_group_base(
+            engine,
+            &rec.group_name,
+            &rec.relative_path,
+            &orphan_path,
+        );
         let repo_path = engine
             .repo_dir
             .join(&rec.group_name)
@@ -332,7 +332,7 @@ pub fn tidy_groups_with_observer(
 
     let mut report = TidyReport::default();
     for op in repo_ops {
-        let len = execute_repo_tidy_op(engine, &op.kind, &mut report)?;
+        let len = execute_repo_tidy_op(engine, &op.group_name, &op.kind, &mut report)?;
         observer.on_file_progress(&op.group_name, &op.group_base, &op.rel_path, len);
     }
     for op in orphan_ops {
@@ -340,6 +340,7 @@ pub fn tidy_groups_with_observer(
             if op.orphan_path.is_file() || is_symlink(&op.orphan_path) {
                 let _ = fs::remove_file(&op.orphan_path);
             }
+            prune_empty_parent_dirs(&op.orphan_path, &op.group_base);
             report.removed_os_orphans.push(op.orphan_path);
         } else {
             report.untracked_kept_orphans.push(op.orphan_path);
@@ -433,8 +434,52 @@ fn summarize_tidy_dry_run(
     sim
 }
 
+fn resolve_orphan_group_base(
+    engine: &SyncEngine,
+    group_name: &str,
+    relative_path: &str,
+    orphan_path: &Path,
+) -> PathBuf {
+    if let Some(group_cfg) = engine.repo_config.groups.get(group_name)
+        && let Some(base_str) =
+            resolve_group_target_path(group_cfg, &engine.devices, &engine.os_info)
+    {
+        let cfg_base = engine.expand_target_base(&base_str);
+        if orphan_path.starts_with(&cfg_base) {
+            return cfg_base;
+        }
+    }
+
+    let rel_comps: Vec<_> = Path::new(relative_path)
+        .components()
+        .filter(|c| matches!(c, Component::Normal(_)))
+        .collect();
+    if !rel_comps.is_empty() {
+        let mut base = orphan_path.to_path_buf();
+        let mut matched = true;
+        for comp in rel_comps.into_iter().rev() {
+            if base.file_name() == Some(comp.as_os_str()) {
+                base.pop();
+            } else {
+                matched = false;
+                break;
+            }
+        }
+        if matched && !base.as_os_str().is_empty() {
+            let home = engine.effective_home_dir();
+            if base.starts_with(&home) {
+                return base;
+            }
+            return home;
+        }
+    }
+
+    engine.group_base_for(group_name)
+}
+
 fn execute_repo_tidy_op(
     engine: &SyncEngine,
+    group_name: &str,
     kind: &RepoTidyKind,
     report: &mut TidyReport,
 ) -> Result<Option<u64>, EngineError> {
@@ -468,6 +513,8 @@ fn execute_repo_tidy_op(
         }
         RepoTidyKind::RemoveExcluded { repo_path } => {
             let _ = fs::remove_file(repo_path);
+            let group_repo_dir = engine.repo_dir.join(group_name);
+            prune_empty_parent_dirs(repo_path, &group_repo_dir);
             report.removed_from_repo += 1;
             Ok(None)
         }
@@ -480,7 +527,6 @@ mod tests {
     use crate::config::repo::{OsInfo, RepoConfig};
     use crate::config::state::{DotlerLock, StateDb, SyncedFileRecord};
     use crate::crypto::{SecretString, VaultKey, init_vault};
-    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     struct TidyTestEnv {
@@ -576,5 +622,60 @@ mod tests {
         let rep_purge = env.run(toml, None, TidyOrphanPolicy::PurgeFromOs);
         assert_eq!(rep_purge.removed_os_orphans.len(), 1);
         assert!(!orphan_file.exists());
+    }
+
+    #[test]
+    fn tidy_prunes_empty_subdirectories_in_repo_and_os_preserving_group_roots() {
+        let env = TidyTestEnv::new();
+        let active_repo = env.repo_dir.join("nvim/init.lua");
+        let excluded_repo = env.repo_dir.join("nvim/lua/plugins/unused/init.lua");
+        fs::create_dir_all(excluded_repo.parent().unwrap()).unwrap();
+        fs::write(&active_repo, b"-- init\n").unwrap();
+        fs::write(&excluded_repo, b"-- unused\n").unwrap();
+
+        let os_base = env.home_dir.join(".config/nvim");
+        let orphan_os = os_base.join("lua/legacy/old.lua");
+        fs::create_dir_all(orphan_os.parent().unwrap()).unwrap();
+        fs::write(&orphan_os, b"-- old\n").unwrap();
+
+        let toml = "[nvim]\nos-nux = \"~/.config/nvim\"\nos-mac = \"~/.config/nvim\"\nos-win = \"~/.config/nvim\"\nos-bsd = \"~/.config/nvim\"\nfiles = \"!*\\ninit.lua\"\n";
+
+        env.state_db
+            .upsert_synced_file(&SyncedFileRecord {
+                target_path: orphan_os.to_string_lossy().to_string(),
+                repo_label: "main".to_string(),
+                group_name: "nvim".to_string(),
+                relative_path: "lua/legacy/old.lua".to_string(),
+                file_hash: "00".to_string(),
+                updated_at: 1,
+            })
+            .unwrap();
+
+        let rep_keep = env.run(toml, None, TidyOrphanPolicy::KeepOnOs);
+        assert_eq!(rep_keep.removed_from_repo, 1);
+        assert_eq!(rep_keep.untracked_kept_orphans.len(), 1);
+        assert!(!excluded_repo.exists());
+        assert!(!env.repo_dir.join("nvim/lua").exists());
+        assert!(env.repo_dir.join("nvim").is_dir());
+        assert!(active_repo.is_file());
+        assert!(orphan_os.is_file());
+
+        env.state_db
+            .upsert_synced_file(&SyncedFileRecord {
+                target_path: orphan_os.to_string_lossy().to_string(),
+                repo_label: "main".to_string(),
+                group_name: "nvim".to_string(),
+                relative_path: "lua/legacy/old.lua".to_string(),
+                file_hash: "00".to_string(),
+                updated_at: 2,
+            })
+            .unwrap();
+
+        let rep_purge = env.run(toml, None, TidyOrphanPolicy::PurgeFromOs);
+        assert_eq!(rep_purge.removed_os_orphans.len(), 1);
+        assert!(!orphan_os.exists());
+        assert!(!os_base.join("lua/legacy").exists());
+        assert!(!os_base.join("lua").exists());
+        assert!(os_base.is_dir());
     }
 }

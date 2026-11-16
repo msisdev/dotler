@@ -489,3 +489,95 @@ files = "*"
     assert!(!internal_repo.join("shell").join(".git").exists());
     assert!(!internal_repo.join("shell").join("dotfiles").exists());
 }
+
+#[test]
+fn test_tidy_prunes_empty_parent_directories_within_group_boundaries() {
+    let sandbox = SyncTestSandbox::new();
+    let lock = sandbox.acquire_lock();
+
+    let toml_partial = r#"
+[editor]
+os-nux = "~/.config/editor"
+os-mac = "~/.config/editor"
+os-win = "~/.config/editor"
+os-bsd = "~/.config/editor"
+files = """
+!*
+lua/core/options.lua
+"""
+"#;
+    sandbox.write_dotler_toml(toml_partial);
+    let config_partial = RepoConfig::parse(toml_partial).unwrap();
+
+    sandbox.write_repo_file("editor/lua/core/options.lua", b"-- core\n");
+    sandbox.write_repo_file("editor/lua/user/plugins/alpha.lua", b"-- alpha\n");
+    let os_orphan_path =
+        sandbox.write_home_file(".config/editor/lua/user/plugins/alpha.lua", b"-- alpha\n");
+
+    sandbox
+        .state_db
+        .upsert_synced_file(&SyncedFileRecord {
+            target_path: os_orphan_path.to_string_lossy().to_string(),
+            repo_label: "default".to_string(),
+            group_name: "editor".to_string(),
+            relative_path: "lua/user/plugins/alpha.lua".to_string(),
+            file_hash: "deadbeef".to_string(),
+            updated_at: 1000,
+        })
+        .unwrap();
+
+    let engine_partial = sandbox.sync_engine(&config_partial, None);
+    let report_keep = engine_partial
+        .tidy(None, &lock, TidyOrphanPolicy::KeepOnOs, false)
+        .unwrap();
+
+    assert_eq!(report_keep.removed_from_repo, 1);
+    assert_eq!(report_keep.untracked_kept_orphans.len(), 1);
+    assert!(!sandbox.repo_dir.join("editor/lua/user/plugins").exists());
+    assert!(!sandbox.repo_dir.join("editor/lua/user").exists());
+    assert!(sandbox.repo_dir.join("editor/lua/core/options.lua").is_file());
+    assert!(sandbox.repo_dir.join("editor/lua").is_dir());
+    assert!(sandbox.repo_dir.join("editor").is_dir());
+    assert!(os_orphan_path.is_file());
+
+    // Now exclude everything so both repo and OS group directories lose all nested files
+    let toml_empty = r#"
+[editor]
+os-nux = "~/.config/editor"
+os-mac = "~/.config/editor"
+os-win = "~/.config/editor"
+os-bsd = "~/.config/editor"
+files = "!*"
+"#;
+    sandbox.write_dotler_toml(toml_empty);
+    let config_empty = RepoConfig::parse(toml_empty).unwrap();
+
+    sandbox
+        .state_db
+        .upsert_synced_file(&SyncedFileRecord {
+            target_path: os_orphan_path.to_string_lossy().to_string(),
+            repo_label: "default".to_string(),
+            group_name: "editor".to_string(),
+            relative_path: "lua/user/plugins/alpha.lua".to_string(),
+            file_hash: "deadbeef".to_string(),
+            updated_at: 2000,
+        })
+        .unwrap();
+
+    let engine_empty = sandbox.sync_engine(&config_empty, None);
+    let report_purge = engine_empty
+        .tidy(None, &lock, TidyOrphanPolicy::PurgeFromOs, false)
+        .unwrap();
+
+    assert_eq!(report_purge.removed_from_repo, 1);
+    assert_eq!(report_purge.removed_os_orphans.len(), 1);
+    assert!(!sandbox.repo_dir.join("editor/lua").exists());
+    assert!(sandbox.repo_dir.join("editor").is_dir());
+
+    let group_base = sandbox.home_dir.join(".config/editor");
+    assert!(!os_orphan_path.exists());
+    assert!(!group_base.join("lua/user/plugins").exists());
+    assert!(!group_base.join("lua/user").exists());
+    assert!(!group_base.join("lua").exists());
+    assert!(group_base.is_dir());
+}

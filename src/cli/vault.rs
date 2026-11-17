@@ -1,10 +1,10 @@
-//! CLI handlers for `vault` (`init`, `passwd`, `recover`) and `key` (`set`, `del`) commands.
+//! CLI handlers for `vault` (`init`, `from`, `passwd`, `recover`) and `key` (`ls`, `set`, `del`) commands.
 
 use std::io::Write;
 
-use crate::cli::args::{Cli, KeyCommand, VaultCommand, VaultImportArgs, VaultInitArgs};
+use crate::cli::args::{Cli, KeyCommand, VaultCommand, VaultFromCommand, VaultInitArgs};
 use crate::cli::output::{
-    KeyLsReport, KeyRepoStatusEntry, KeyReport, VaultImportReport, VaultInitReport,
+    KeyLsReport, KeyRepoStatusEntry, KeyReport, VaultFromReport, VaultInitReport,
     VaultRecoverReport, render_success_to,
 };
 use crate::config::local::{
@@ -149,48 +149,44 @@ fn collect_known_vault_ids(local_cfg: &LocalConfig) -> Vec<String> {
 
 fn fetch_external_vault_payload(
     local_cfg: &LocalConfig,
-    args: &VaultImportArgs,
+    cmd: &VaultFromCommand,
 ) -> Result<String, EngineError> {
-    if let Some(ref git_url) = args.git {
-        let parsed = parse_url(git_url)?;
-        let rel_path = match &parsed.subpath {
-            Some(sub) if !sub.is_empty() => format!("{}/dotler.toml", sub.trim_matches('/')),
-            _ => "dotler.toml".to_string(),
-        };
-        let raw_bytes = GitRunner::fetch_file_shallow(
-            &parsed.clone_url,
-            None,
-            &rel_path,
-            REMOTE_TOML_FETCH_MAX_BYTES,
-        )?;
-        let raw = String::from_utf8(raw_bytes).map_err(|e| {
-            EngineError::Config(crate::config::ConfigError::TomlSyntaxError(e.to_string()))
-        })?;
-        return Ok(raw);
-    }
-    if let Some(ref http_url) = args.url {
-        let raw = fetch_http_text(http_url, REMOTE_TOML_FETCH_MAX_BYTES)?;
-        return Ok(raw);
-    }
-    if let Some(ref file_source) = args.file {
-        let target_file = if let Some(registered) = local_cfg.repos.get(file_source) {
-            expand_tilde(registered).join("dotler.toml")
-        } else {
-            let expanded = expand_tilde(file_source);
-            if expanded.is_dir() {
-                expanded.join("dotler.toml")
-            } else {
-                expanded
-            }
-        };
-        if !target_file.exists() {
-            return Err(EngineError::FileNotFound { path: target_file });
+    match cmd {
+        VaultFromCommand::Git(args) => {
+            let parsed = parse_url(&args.source)?;
+            let rel_path = match &parsed.subpath {
+                Some(sub) if !sub.is_empty() => format!("{}/dotler.toml", sub.trim_matches('/')),
+                _ => "dotler.toml".to_string(),
+            };
+            let raw_bytes = GitRunner::fetch_file_shallow(
+                &parsed.clone_url,
+                None,
+                &rel_path,
+                REMOTE_TOML_FETCH_MAX_BYTES,
+            )?;
+            let raw = String::from_utf8(raw_bytes).map_err(|e| {
+                EngineError::Config(crate::config::ConfigError::TomlSyntaxError(e.to_string()))
+            })?;
+            Ok(raw)
         }
-        return Ok(std::fs::read_to_string(&target_file)?);
+        VaultFromCommand::Url(args) => fetch_http_text(&args.source, REMOTE_TOML_FETCH_MAX_BYTES),
+        VaultFromCommand::File(args) => {
+            let target_file = if let Some(registered) = local_cfg.repos.get(&args.source) {
+                expand_tilde(registered).join("dotler.toml")
+            } else {
+                let expanded = expand_tilde(&args.source);
+                if expanded.is_dir() {
+                    expanded.join("dotler.toml")
+                } else {
+                    expanded
+                }
+            };
+            if !target_file.exists() {
+                return Err(EngineError::FileNotFound { path: target_file });
+            }
+            Ok(std::fs::read_to_string(&target_file)?)
+        }
     }
-    Err(EngineError::Config(
-        crate::config::ConfigError::MissingVaultConfig,
-    ))
 }
 
 pub(crate) fn handle_vault<W: Write>(
@@ -205,8 +201,8 @@ pub(crate) fn handle_vault<W: Write>(
 
     match cmd {
         VaultCommand::Init(args) => handle_vault_init(args, local_cfg, cli, is_interactive, stdout),
-        VaultCommand::Import(args) => {
-            handle_vault_import(args, local_cfg, cli, is_interactive, stdout)
+        VaultCommand::From { command } => {
+            handle_vault_from(command, local_cfg, cli, is_interactive, stdout)
         }
         VaultCommand::Passwd(args) => {
             let data = rotate_vault_passphrases(
@@ -288,7 +284,7 @@ fn handle_vault_init<W: Write>(
     if repo_cfg.vault.is_some() {
         return Err(EngineError::Config(crate::config::ConfigError::UnknownField {
             field: "vault".to_string(),
-            hint: "Vault is already initialized in dotler.toml. Use 'dotler vault passwd' to change password or 'dotler vault import' to replace with another vault."
+            hint: "Vault is already initialized in dotler.toml. Use 'dotler vault passwd' to change password or 'dotler vault from <file|git|url>' to replace with another vault."
                 .to_string(),
         }));
     }
@@ -333,8 +329,8 @@ fn handle_vault_init<W: Write>(
     Ok(render_success_to(stdout, "vault init", &data, cli.json))
 }
 
-fn handle_vault_import<W: Write>(
-    args: &VaultImportArgs,
+fn handle_vault_from<W: Write>(
+    cmd: &VaultFromCommand,
     local_cfg: &LocalConfig,
     cli: &Cli,
     is_interactive: bool,
@@ -344,7 +340,8 @@ fn handle_vault_import<W: Write>(
     let manifest_path = repo_path.join("dotler.toml");
     let mut repo_cfg = RepoConfig::load_without_vault_check(&manifest_path)?;
 
-    let raw_payload = fetch_external_vault_payload(local_cfg, args)?;
+    let raw_payload = fetch_external_vault_payload(local_cfg, cmd)?;
+    let args = cmd.source_args();
     let ext_vault = VaultConfig::parse_external_payload(&raw_payload)?;
     let pw_slot = VaultSlot::from_base64(&ext_vault.password_slot)?;
     let _rec_slot = VaultSlot::from_base64(&ext_vault.recovery_slot)?;
@@ -441,12 +438,12 @@ fn handle_vault_import<W: Write>(
         let _ = OsKeyring::set_with_fallback(Some(&vault_id), &pass);
     }
 
-    let data = VaultImportReport {
+    let data = VaultFromReport {
         vault_id,
         rekeyed_files,
         hint: vault_hint,
     };
-    Ok(render_success_to(stdout, "vault import", &data, cli.json))
+    Ok(render_success_to(stdout, "vault from", &data, cli.json))
 }
 
 pub(crate) fn handle_key<W: Write>(
@@ -1104,8 +1101,8 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_vault_import_rekeys_existing_enc_files_with_distinct_passphrases() {
-        use crate::cli::args::Command;
+    fn test_handle_vault_from_rekeys_existing_enc_files_with_distinct_passphrases() {
+        use crate::cli::args::{Command, VaultFromSourceArgs};
         let _mock = mock_guard();
         let tmp = tempfile::tempdir().unwrap();
         let home_dir = tmp.path().join("home");
@@ -1163,10 +1160,10 @@ mod tests {
         let lock_res = crate::config::state::get_lock(dotler_cfg_dir.join("dotler.lock"));
         let lock_guard = lock_res.get().unwrap();
 
-        let import_args = VaultImportArgs {
-            file: Some("src".to_string()),
+        let from_cmd = VaultFromCommand::File(VaultFromSourceArgs {
+            source: "src".to_string(),
             ..Default::default()
-        };
+        });
         let cli = Cli {
             json: true,
             device: None,
@@ -1174,12 +1171,14 @@ mod tests {
             dry_run: false,
             verbose: false,
             command: Command::Vault {
-                command: VaultCommand::Import(import_args.clone()),
+                command: VaultCommand::From {
+                    command: from_cmd.clone(),
+                },
             },
         };
         let mut out = Vec::new();
         handle_vault(
-            &VaultCommand::Import(import_args),
+            &VaultCommand::From { command: from_cmd },
             &cli,
             true,
             &mut out,
@@ -1188,7 +1187,7 @@ mod tests {
         .unwrap();
 
         let resp: serde_json::Value = serde_json::from_slice(&out).unwrap();
-        assert_eq!(resp["command"], "vault import");
+        assert_eq!(resp["command"], "vault from");
         assert_eq!(resp["data"]["vault_id"], vcfg_src.vault_id);
         assert_eq!(resp["data"]["rekeyed_files"], 1);
 

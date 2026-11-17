@@ -5,7 +5,7 @@ use std::io::Write;
 
 pub use crate::cli::render::{
     ExportReport, InlineRender, KeyLsReport, KeyRepoStatusEntry, KeyReport, UpdateReport,
-    VaultImportReport, VaultInitReport, VaultRecoverReport, styled_error_label, styled_hint_label,
+    VaultFromReport, VaultInitReport, VaultRecoverReport, styled_error_label, styled_hint_label,
 };
 pub use crate::core::vault_loader::VaultPasswdReport;
 
@@ -256,7 +256,7 @@ impl CliError {
                 actual,
             }) => {
                 format!(
-                    "Encrypted file vault_id ('{actual}') does not match dotler.toml ('{expected}'). Run 'dotler key ls' to inspect repository vaults or 'dotler vault import --file <repo>' to unify vault keys."
+                    "Encrypted file vault_id ('{actual}') does not match dotler.toml ('{expected}'). Run 'dotler key ls' to inspect repository vaults or 'dotler vault from file <repo>' to unify vault keys."
                 )
             }
             CliError::Keyring(

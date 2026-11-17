@@ -37,9 +37,9 @@ pub struct VaultInitReport {
     pub hint: Option<String>,
 }
 
-/// Summary report returned by `vault import`.
+/// Summary report returned by `vault from`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VaultImportReport {
+pub struct VaultFromReport {
     pub vault_id: String,
     #[serde(default)]
     pub rekeyed_files: usize,
@@ -281,15 +281,15 @@ impl InlineRender for VaultInitReport {
     }
 }
 
-impl InlineRender for VaultImportReport {
+impl InlineRender for VaultFromReport {
     fn render_inline(&self) -> String {
         if self.rekeyed_files > 0 {
             format!(
-                "☀️ Vault import done. (id: {}, {} re-keyed)",
+                "☀️ Vault from done. (id: {}, {} re-keyed)",
                 self.vault_id, self.rekeyed_files
             )
         } else {
-            format!("Vault import done. (id: {})", self.vault_id)
+            format!("Vault from done. (id: {})", self.vault_id)
         }
     }
 }
@@ -537,6 +537,22 @@ pub(crate) mod tests {
             hint: None,
         };
         assert_eq!(vinit_imp.render_inline(), "Vault init done. (id: vid-123)");
+
+        let vfrom_plain = VaultFromReport {
+            vault_id: "vid-123".into(),
+            rekeyed_files: 0,
+            hint: None,
+        };
+        assert_eq!(vfrom_plain.render_inline(), "Vault from done. (id: vid-123)");
+        let vfrom_rekeyed = VaultFromReport {
+            vault_id: "vid-123".into(),
+            rekeyed_files: 2,
+            hint: None,
+        };
+        assert_eq!(
+            vfrom_rekeyed.render_inline(),
+            "☀️ Vault from done. (id: vid-123, 2 re-keyed)"
+        );
 
         let vpasswd = VaultPasswdReport {
             status: "password_rotated".into(),

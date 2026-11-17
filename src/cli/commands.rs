@@ -23,8 +23,8 @@ use crate::engine::tidy::{TidyOrphanPolicy, run_tidy};
 pub use crate::cli::args::{
     AiArgs, CheckArgs, Cli, Command, ExportArgs, GitCloneArgs, GitCommand, GitInstallArgs,
     GitLsArgs, GitUninstallArgs, ImportArgs, InitArgs, KeyCommand, KeyDelArgs, KeyLsArgs,
-    KeySetArgs, McpArgs, StatusArgs, TidyArgs, UpdateArgs, VaultCommand, VaultImportArgs,
-    VaultInitArgs, VaultPasswdArgs, VaultRecoverArgs,
+    KeySetArgs, McpArgs, StatusArgs, TidyArgs, UpdateArgs, VaultCommand, VaultFromCommand,
+    VaultFromSourceArgs, VaultInitArgs, VaultPasswdArgs, VaultRecoverArgs,
 };
 
 /// Dispatches parsed CLI commands to domain workflows under lock protection.

@@ -15,11 +15,13 @@ use std::io::{IsTerminal, Write};
 use crate::config::ConfigError;
 use crate::engine::EngineError;
 
-pub use commands::{Cli, Command, GitCommand, KeyCommand, VaultCommand, dispatch};
+pub use commands::{
+    Cli, Command, GitCommand, KeyCommand, VaultCommand, VaultFromCommand, dispatch,
+};
 pub use output::{
     CliError, EXIT_AUTH_OR_LOCK_ERROR, EXIT_CONFIG_OR_ARGS_ERROR, EXIT_SECURITY_BLOCKED,
     EXIT_SUCCESS, EXIT_SYNC_CONFLICT, ExportReport, InlineRender, JsonEnvelope, JsonErrorPayload,
-    KeyLsReport, KeyRepoStatusEntry, KeyReport, UpdateReport, VaultImportReport, VaultInitReport,
+    KeyLsReport, KeyRepoStatusEntry, KeyReport, UpdateReport, VaultFromReport, VaultInitReport,
     VaultPasswdReport, VaultRecoverReport, render_engine_error, render_error, render_error_to,
     render_success, render_success_to,
 };

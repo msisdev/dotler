@@ -248,7 +248,7 @@ impl EngineError {
                 )
             }
             EngineError::EncryptionMismatch { path, reason } => {
-                if reason.contains("vault import") || reason.contains("import --force") {
+                if reason.contains("vault from") || reason.contains("import --force") {
                     reason.clone()
                 } else {
                     format!(
@@ -306,7 +306,7 @@ impl EngineError {
                 actual,
             }) => {
                 format!(
-                    "Encrypted file vault_id ('{actual}') does not match dotler.toml ('{expected}'). Run 'dotler key ls' to inspect repository vaults or 'dotler vault import --file <repo>' to unify vault keys."
+                    "Encrypted file vault_id ('{actual}') does not match dotler.toml ('{expected}'). Run 'dotler key ls' to inspect repository vaults or 'dotler vault from file <repo>' to unify vault keys."
                 )
             }
             EngineError::Vault(e) => format!("Vault operation failed: {e}"),

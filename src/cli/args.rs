@@ -323,8 +323,11 @@ pub enum VaultCommand {
     /// Initialize vault slots and generate 12-word recovery mnemonic
     Init(VaultInitArgs),
 
-    /// Import existing vault slots from external source or registered repository
-    Import(VaultImportArgs),
+    /// Import existing vault slots from an external source or registered repository
+    From {
+        #[command(subcommand)]
+        command: VaultFromCommand,
+    },
 
     /// Rotate vault password slot using current credentials
     Passwd(VaultPasswdArgs),
@@ -342,34 +345,30 @@ pub struct VaultInitArgs {
     pub hint: Option<String>,
 }
 
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum VaultFromCommand {
+    /// Import existing vault metadata from a local path or registered repository label (TOML or JSON)
+    File(VaultFromSourceArgs),
+
+    /// Import existing vault metadata from a remote Git repository
+    Git(VaultFromSourceArgs),
+
+    /// Import existing vault metadata via HTTP GET (TOML or JSON)
+    Url(VaultFromSourceArgs),
+}
+
+impl VaultFromCommand {
+    pub fn source_args(&self) -> &VaultFromSourceArgs {
+        match self {
+            Self::File(a) | Self::Git(a) | Self::Url(a) => a,
+        }
+    }
+}
+
 #[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
-#[command(group(
-    clap::ArgGroup::new("source")
-        .required(true)
-        .args(["git", "url", "file"])
-))]
-pub struct VaultImportArgs {
-    #[arg(
-        long,
-        conflicts_with_all = ["url", "file"],
-        help = "Import existing vault metadata from a remote Git repository"
-    )]
-    pub git: Option<String>,
-
-    #[arg(
-        long,
-        conflicts_with_all = ["git", "file"],
-        help = "Import existing vault metadata via HTTP GET (TOML or JSON)"
-    )]
-    pub url: Option<String>,
-
-    #[arg(
-        long,
-        visible_alias = "from",
-        conflicts_with_all = ["git", "url"],
-        help = "Import existing vault metadata from a local path or registered repository label (TOML or JSON)"
-    )]
-    pub file: Option<String>,
+pub struct VaultFromSourceArgs {
+    #[arg(help = "Source path, registered repository label, Git URL/shorthand, or HTTP(S) URL")]
+    pub source: String,
 
     #[arg(long = "password-stdin", help = "Read passphrase from standard input")]
     pub password_stdin: bool,
@@ -531,7 +530,7 @@ mod tests {
             vec!["dotler", "export"],
             vec!["dotler", "tidy"],
             vec!["dotler", "vault", "init"],
-            vec!["dotler", "vault", "import", "--file", "main"],
+            vec!["dotler", "vault", "from", "file", "main"],
             vec!["dotler", "key", "ls"],
             vec!["dotler", "key", "set"],
             vec!["dotler", "ai"],
@@ -561,69 +560,60 @@ mod tests {
     }
 
     #[test]
-    fn test_vault_import_external_flags_mutual_exclusion() {
-        let g =
-            Cli::try_parse_from(["dotler", "vault", "import", "--git", "github:user/dots"]).unwrap();
-        assert!(
-            matches!(g.command, Command::Vault { command: VaultCommand::Import(a) } if a.git.as_deref() == Some("github:user/dots"))
-        );
+    fn test_vault_from_subcommands_parsing() {
+        let g = Cli::try_parse_from([
+            "dotler",
+            "vault",
+            "from",
+            "git",
+            "github:user/dots",
+            "--password-stdin",
+            "--hint",
+            "work",
+        ])
+        .unwrap();
+        assert!(matches!(
+            g.command,
+            Command::Vault {
+                command: VaultCommand::From {
+                    command: VaultFromCommand::Git(a)
+                }
+            } if a.source == "github:user/dots" && a.password_stdin && a.hint.as_deref() == Some("work")
+        ));
 
         let u = Cli::try_parse_from([
             "dotler",
             "vault",
-            "import",
-            "--url",
+            "from",
+            "url",
             "https://example.com/vault.json",
         ])
         .unwrap();
-        assert!(
-            matches!(u.command, Command::Vault { command: VaultCommand::Import(a) } if a.url.as_deref() == Some("https://example.com/vault.json"))
-        );
+        assert!(matches!(
+            u.command,
+            Command::Vault {
+                command: VaultCommand::From {
+                    command: VaultFromCommand::Url(a)
+                }
+            } if a.source == "https://example.com/vault.json" && !a.password_stdin && a.hint.is_none()
+        ));
 
-        let f = Cli::try_parse_from(["dotler", "vault", "import", "--file", "main"]).unwrap();
-        assert!(
-            matches!(f.command, Command::Vault { command: VaultCommand::Import(a) } if a.file.as_deref() == Some("main"))
-        );
+        let f = Cli::try_parse_from(["dotler", "vault", "from", "file", "main"]).unwrap();
+        assert!(matches!(
+            f.command,
+            Command::Vault {
+                command: VaultCommand::From {
+                    command: VaultFromCommand::File(a)
+                }
+            } if a.source == "main"
+        ));
 
-        let alias_f = Cli::try_parse_from(["dotler", "vault", "import", "--from", "main"]).unwrap();
-        assert!(
-            matches!(alias_f.command, Command::Vault { command: VaultCommand::Import(a) } if a.file.as_deref() == Some("main"))
-        );
-
+        assert!(Cli::try_parse_from(["dotler", "vault", "from"]).is_err());
+        assert!(Cli::try_parse_from(["dotler", "vault", "from", "file"]).is_err());
         assert!(Cli::try_parse_from(["dotler", "vault", "import"]).is_err());
+        assert!(Cli::try_parse_from(["dotler", "vault", "import", "--file", "main"]).is_err());
         assert!(Cli::try_parse_from(["dotler", "vault", "init", "--git", "gh:u/r"]).is_err());
         assert!(Cli::try_parse_from(["dotler", "vault", "init", "--file", "main"]).is_err());
-
-        assert!(
-            Cli::try_parse_from([
-                "dotler",
-                "vault",
-                "import",
-                "--git",
-                "gh:u/r",
-                "--url",
-                "https://example.com/v.toml"
-            ])
-            .is_err()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "dotler", "vault", "import", "--git", "gh:u/r", "--file", "main"
-            ])
-            .is_err()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "dotler",
-                "vault",
-                "import",
-                "--url",
-                "https://example.com/v.toml",
-                "--file",
-                "main"
-            ])
-            .is_err()
-        );
     }
 
     #[test]

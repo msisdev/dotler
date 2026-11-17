@@ -222,7 +222,7 @@ pub fn run_check(
                         return Err(EngineError::EncryptionMismatch {
                             path: entry.path().to_path_buf(),
                             reason: format!(
-                                "Repository file '{rel_str}' is encrypted with vault '{file_vid}', which does not match dotler.toml vault '{expected_vid}'. Run 'dotler vault import --file <repo>' to align vault keys or 'dotler import --force' to re-encrypt."
+                                "Repository file '{rel_str}' is encrypted with vault '{file_vid}', which does not match dotler.toml vault '{expected_vid}'. Run 'dotler vault from file <repo>' to align vault keys or 'dotler import --force' to re-encrypt."
                             ),
                         });
                     }
@@ -322,6 +322,6 @@ files = ".bashrc"
         let err3 = run_check(&ctx, None, &lock).unwrap_err();
         assert_eq!(err3.error_code(), "ENCRYPTION_MISMATCH");
         assert_eq!(err3.exit_code(), 1);
-        assert!(err3.hint().contains("vault import"));
+        assert!(err3.hint().contains("vault from file"));
     }
 }

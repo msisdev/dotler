@@ -16,33 +16,33 @@ dotler vault init
 
 > **Important**: Store your 12-word recovery mnemonic in a safe place. If you forget your passphrase, `dotler vault recover` is the only way to unlock the vault.
 
-## 2. Share or Align a Vault Across Repositories & Devices (`vault import`)
+## 2. Share or Align a Vault Across Repositories & Devices (`vault from`)
 
 If you maintain multiple dotler repositories (for example, a public repository and a private work repository, or repositories on separate machines) and want them to share the exact same vault (`vault_id`, `password_slot`, and `recovery_slot`), import the existing vault configuration into the target repository:
 
-### From a Remote Git Repository (`--git`)
+### From a Remote Git Repository (`vault from git`)
 
 Fetches `dotler.toml` from a remote Git repository without requiring `git` to be installed on your system:
 
 ```sh
 # Using shorthand or full provider prefix
-dotler vault import --git gh:username/dotfiles
-dotler vault import --git github:username/dotfiles
+dotler vault from git gh:username/dotfiles
+dotler vault from git github:username/dotfiles
 
 # Or a full HTTPS URL (with optional subdirectory path)
-dotler vault import --git https://github.com/username/dotfiles/work
+dotler vault from git https://github.com/username/dotfiles/work
 ```
 
-### From an HTTP / Self-Hosted Endpoint (`--url`)
+### From an HTTP / Self-Hosted Endpoint (`vault from url`)
 
 Fetches vault metadata via `HTTP GET`. Parses as **TOML first** (such as a raw `dotler.toml` URL) and **automatically falls back to JSON**:
 
 ```sh
 # Raw dotler.toml over HTTPS
-dotler vault import --url https://raw.githubusercontent.com/username/dotfiles/main/dotler.toml
+dotler vault from url https://raw.githubusercontent.com/username/dotfiles/main/dotler.toml
 
 # Or a minimal self-hosted JSON endpoint
-dotler vault import --url https://vault.example.com/dotler-vault.json
+dotler vault from url https://vault.example.com/dotler-vault.json
 ```
 
 Minimal TOML or JSON payloads only need `password_slot` and `recovery_slot` (`vault_id` is verified if present, or derived automatically from the unwrapped key once your passphrase is verified):
@@ -55,20 +55,20 @@ Minimal TOML or JSON payloads only need `password_slot` and `recovery_slot` (`va
 }
 ```
 
-### From a Local Repository Label or File Path (`--file`)
+### From a Local Repository Label or File Path (`vault from file`)
 
-Reads vault metadata from another repository registered in `~/.config/dotler/config.toml` or from a local TOML/JSON file or directory path (`--from` is also accepted as a compatibility alias):
+Reads vault metadata from another repository registered in `~/.config/dotler/config.toml` or from a local TOML/JSON file or directory path:
 
 ```sh
 # Registered repository label
-dotler vault import --file main
+dotler vault from file main
 
 # Local directory or file path (TOML or JSON)
-dotler vault import --file ~/other-dotfiles
-dotler vault import --file ./vault.json
+dotler vault from file ~/other-dotfiles
+dotler vault from file ./vault.json
 ```
 
-In all three modes (`--git`, `--url`, `--file`), any `[<group>]` sections in the source file are ignored, and your passphrase is verified against `password_slot` before writing the vault configuration to the target `dotler.toml`. If the target repository already has `.enc` files encrypted under a different vault, `dotler vault import` automatically decrypts them with the previous vault key and re-encrypts them in memory under the newly imported vault before atomically updating `dotler.toml`.
+In all three subcommands (`file`, `git`, `url`), any `[<group>]` sections in the source file are ignored, and your passphrase is verified against `password_slot` before writing the vault configuration to the target `dotler.toml`. If the target repository already has `.enc` files encrypted under a different vault, `dotler vault from` automatically decrypts them with the previous vault key and re-encrypts them in memory under the newly imported vault before atomically updating `dotler.toml`.
 
 ## 3. Encrypting & Decrypting Files
 

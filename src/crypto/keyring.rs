@@ -642,7 +642,10 @@ mod tests {
         // Setting vault A populates vault-a and fills empty default slot
         OsKeyring::set_with_fallback(Some("vault-a"), &pw_a).unwrap();
         assert_eq!(
-            OsKeyring::get_for_vault("vault-a").unwrap().unwrap().expose_secret(),
+            OsKeyring::get_for_vault("vault-a")
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
             "vault-a-pass"
         );
         assert_eq!(
@@ -653,7 +656,10 @@ mod tests {
         // Setting vault B populates vault-b without overwriting existing default slot
         OsKeyring::set_with_fallback(Some("vault-b"), &pw_b).unwrap();
         assert_eq!(
-            OsKeyring::get_for_vault("vault-b").unwrap().unwrap().expose_secret(),
+            OsKeyring::get_for_vault("vault-b")
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
             "vault-b-pass"
         );
         assert_eq!(
@@ -669,7 +675,10 @@ mod tests {
         OsKeyring::delete_for_vault("vault-a").unwrap();
         assert!(OsKeyring::get_for_vault("vault-a").unwrap().is_none());
         assert_eq!(
-            OsKeyring::get_for_vault("vault-b").unwrap().unwrap().expose_secret(),
+            OsKeyring::get_for_vault("vault-b")
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
             "vault-b-pass"
         );
 

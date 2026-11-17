@@ -11,7 +11,9 @@ use crate::config::local::{
     LOCAL_CONFIG_FILE, LocalConfig, WalkDir, expand_tilde, find_ancestor_repo_dir,
     get_local_config, resolve_repo_path_with_cwd,
 };
-use crate::config::repo::{RepoConfig, VaultConfig, get_repo_config, update_vault_manifest_section};
+use crate::config::repo::{
+    RepoConfig, VaultConfig, get_repo_config, update_vault_manifest_section,
+};
 use crate::config::state::{DotlerLockGuard, write_file_safe};
 use crate::core::vault_loader::{
     read_new_passphrase, rotate_vault_passphrases, unlock_vault_if_needed,
@@ -114,7 +116,8 @@ pub(crate) fn ensure_repo_vault_in_keyring(
     is_interactive: bool,
 ) -> Result<(), EngineError> {
     let pw_slot = VaultSlot::from_base64(&vault_cfg.password_slot)?;
-    let expected_vid = (!vault_cfg.vault_id.trim().is_empty()).then_some(vault_cfg.vault_id.as_str());
+    let expected_vid =
+        (!vault_cfg.vault_id.trim().is_empty()).then_some(vault_cfg.vault_id.as_str());
     let (_key, pass, should_update_keyring) = unlock_imported_vault_slot(
         &pw_slot,
         expected_vid,
@@ -420,10 +423,9 @@ fn handle_vault_from<W: Write>(
         let old_vault_key = if let Ok(key) = old_slot.unwrap(&pass, Some(&old_vcfg.vault_id)) {
             key
         } else {
-            unlock_vault_if_needed(&repo_cfg, local_cfg.use_keyring, is_interactive, true)?
-                .ok_or(EngineError::Config(
-                    crate::config::ConfigError::MissingVaultConfig,
-                ))?
+            unlock_vault_if_needed(&repo_cfg, local_cfg.use_keyring, is_interactive, true)?.ok_or(
+                EngineError::Config(crate::config::ConfigError::MissingVaultConfig),
+            )?
         };
 
         for (enc_path, enc_file) in mismatched_enc_files {
@@ -479,9 +481,9 @@ fn handle_vault_ls<W: Write>(
         && let Some(repo_dir) = find_ancestor_repo_dir(&cwd)
     {
         let canon_cwd = std::fs::canonicalize(&repo_dir).unwrap_or_else(|_| repo_dir.clone());
-        let already = candidates.iter().any(|(_, p)| {
-            std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == canon_cwd
-        });
+        let already = candidates
+            .iter()
+            .any(|(_, p)| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == canon_cwd);
         if !already {
             let cwd_label = repo_dir
                 .file_name()
@@ -882,16 +884,17 @@ mod tests {
         local_cfg
             .repos
             .insert("my-dotler".to_string(), "~/my-dotler".to_string());
-        local_cfg.repos.insert(
-            "my-life-vault".to_string(),
-            "~/my-life-vault".to_string(),
-        );
+        local_cfg
+            .repos
+            .insert("my-life-vault".to_string(), "~/my-life-vault".to_string());
 
         let orig_home = std::env::var_os("HOME");
         unsafe {
             std::env::set_var("HOME", &home_dir);
         }
-        local_cfg.save_atomic(&dotler_cfg_dir.join("config.toml")).unwrap();
+        local_cfg
+            .save_atomic(&dotler_cfg_dir.join("config.toml"))
+            .unwrap();
 
         let lock_res = crate::config::state::get_lock(dotler_cfg_dir.join("dotler.lock"));
         let lock_guard = lock_res.get().unwrap();
@@ -1038,21 +1041,30 @@ mod tests {
             .as_bytes(),
         )
         .unwrap();
-        let orig_enc = vkey_dst.encrypt_file(b"API_KEY=hello_world").unwrap().to_bytes();
+        let orig_enc = vkey_dst
+            .encrypt_file(b"API_KEY=hello_world")
+            .unwrap()
+            .to_bytes();
         write_file_safe(&repo_dst.join("sec/secret.env.enc"), &orig_enc).unwrap();
 
         let mut local_cfg = LocalConfig {
             default_repo: Some("dst".to_string()),
             ..Default::default()
         };
-        local_cfg.repos.insert("src".to_string(), "~/repo_src".to_string());
-        local_cfg.repos.insert("dst".to_string(), "~/repo_dst".to_string());
+        local_cfg
+            .repos
+            .insert("src".to_string(), "~/repo_src".to_string());
+        local_cfg
+            .repos
+            .insert("dst".to_string(), "~/repo_dst".to_string());
 
         let orig_home = std::env::var_os("HOME");
         unsafe {
             std::env::set_var("HOME", &home_dir);
         }
-        local_cfg.save_atomic(&dotler_cfg_dir.join("config.toml")).unwrap();
+        local_cfg
+            .save_atomic(&dotler_cfg_dir.join("config.toml"))
+            .unwrap();
 
         // Store dst passphrase in both <vid_dst> and default slot; vault from checks keyring first,
         // sees dst passphrase does not unlock src, and falls straight through to prompt for src without ConfirmPrompt.
@@ -1149,14 +1161,20 @@ mod tests {
             default_repo: Some("dst".to_string()),
             ..Default::default()
         };
-        local_cfg.repos.insert("src".to_string(), "~/repo_src".to_string());
-        local_cfg.repos.insert("dst".to_string(), "~/repo_dst".to_string());
+        local_cfg
+            .repos
+            .insert("src".to_string(), "~/repo_src".to_string());
+        local_cfg
+            .repos
+            .insert("dst".to_string(), "~/repo_dst".to_string());
 
         let orig_home = std::env::var_os("HOME");
         unsafe {
             std::env::set_var("HOME", &home_dir);
         }
-        local_cfg.save_atomic(&dotler_cfg_dir.join("config.toml")).unwrap();
+        local_cfg
+            .save_atomic(&dotler_cfg_dir.join("config.toml"))
+            .unwrap();
 
         let lock_res = crate::config::state::get_lock(dotler_cfg_dir.join("dotler.lock"));
         let lock_guard = lock_res.get().unwrap();

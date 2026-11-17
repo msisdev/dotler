@@ -223,7 +223,10 @@ pub fn get_password_for_vault(
     crate::config::Resource::new(
         move || {
             if use_keyring {
-                if let Some(vid) = loader_vid.as_deref().map(str::trim).filter(|s| !s.is_empty())
+                if let Some(vid) = loader_vid
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
                     && let Ok(Some(secret)) = OsKeyring::get_for_vault(vid)
                 {
                     return Ok(secret);
@@ -294,8 +297,11 @@ mod tests {
     fn test_passphrase_supply_tier1_vault_specific_and_default_fallback() {
         let _guard = MockKeyringGuard::new();
         OsKeyring::set(&SecretString::new("default-fallback-pw".to_string())).unwrap();
-        OsKeyring::set_for_vault("vault-alpha", &SecretString::new("alpha-only-pw".to_string()))
-            .unwrap();
+        OsKeyring::set_for_vault(
+            "vault-alpha",
+            &SecretString::new("alpha-only-pw".to_string()),
+        )
+        .unwrap();
 
         let alpha = OsKeyring::resolve_for_vault(Some("vault-alpha"), false, None).unwrap();
         assert_eq!(alpha.source, PassphraseSource::OsKeyring);

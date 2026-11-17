@@ -541,7 +541,8 @@ mod tests {
         assert_eq!(unlocked_pub_fallback.vault_id(), key_pub.vault_id());
 
         // Interactive unlock on a missing <vid_pub> slot auto-populates <vid_pub>
-        let (vcfg_fresh, key_fresh, _) = init_vault(&SecretString::new("fresh-pass-333".into())).unwrap();
+        let (vcfg_fresh, key_fresh, _) =
+            init_vault(&SecretString::new("fresh-pass-333".into())).unwrap();
         let repo_fresh = RepoConfig {
             vault: Some(vcfg_fresh.clone()),
             ..Default::default()

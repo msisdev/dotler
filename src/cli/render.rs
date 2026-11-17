@@ -309,7 +309,11 @@ impl InlineRender for VaultRecoverReport {
 
 impl InlineRender for VaultLsReport {
     fn render_inline(&self) -> String {
-        let default_state = if self.default_slot_set { "set" } else { "empty" };
+        let default_state = if self.default_slot_set {
+            "set"
+        } else {
+            "empty"
+        };
         let mut out = format!(
             "Default keyring slot: {default_state} (use_keyring: {})",
             self.use_keyring
@@ -528,7 +532,10 @@ pub(crate) mod tests {
             rekeyed_files: 0,
             hint: None,
         };
-        assert_eq!(vfrom_plain.render_inline(), "Vault from done. (id: vid-123)");
+        assert_eq!(
+            vfrom_plain.render_inline(),
+            "Vault from done. (id: vid-123)"
+        );
         let vfrom_rekeyed = VaultFromReport {
             vault_id: "vid-123".into(),
             rekeyed_files: 2,

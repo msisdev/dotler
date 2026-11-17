@@ -343,12 +343,8 @@ pub fn tidy_groups_with_observer(
             continue;
         }
         let orphan_path = PathBuf::from(&rec.target_path);
-        let group_base = resolve_orphan_group_base(
-            engine,
-            &rec.group_name,
-            &rec.relative_path,
-            &orphan_path,
-        );
+        let group_base =
+            resolve_orphan_group_base(engine, &rec.group_name, &rec.relative_path, &orphan_path);
         let repo_path = engine
             .repo_dir
             .join(&rec.group_name)

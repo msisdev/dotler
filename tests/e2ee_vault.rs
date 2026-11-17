@@ -597,9 +597,10 @@ fn test_e2e_vault_init_import_from_git_url_and_local_sources() {
         .code(),
         Some(0)
     );
-    let enc_before =
-        EncryptedFile::from_bytes(&fs::read(rekey_same_pw_repo.join("sec/secret.txt.enc")).unwrap())
-            .unwrap();
+    let enc_before = EncryptedFile::from_bytes(
+        &fs::read(rekey_same_pw_repo.join("sec/secret.txt.enc")).unwrap(),
+    )
+    .unwrap();
     assert_ne!(
         dotler::config::RepoConfig::load(&rekey_same_pw_repo.join("dotler.toml"))
             .unwrap()
@@ -624,9 +625,10 @@ fn test_e2e_vault_init_import_from_git_url_and_local_sources() {
     assert_eq!(rekey_json["data"]["vault_id"], origin_vault_id);
     assert_eq!(rekey_json["data"]["rekeyed_files"], 1);
 
-    let enc_after =
-        EncryptedFile::from_bytes(&fs::read(rekey_same_pw_repo.join("sec/secret.txt.enc")).unwrap())
-            .unwrap();
+    let enc_after = EncryptedFile::from_bytes(
+        &fs::read(rekey_same_pw_repo.join("sec/secret.txt.enc")).unwrap(),
+    )
+    .unwrap();
     assert_ne!(enc_before.vault_id, enc_after.vault_id);
     assert_eq!(
         dotler::config::RepoConfig::load(&rekey_same_pw_repo.join("dotler.toml"))
@@ -757,7 +759,14 @@ fn test_e2e_multi_vault_keyring_isolation_shared_init_and_fallback() {
     assert_eq!(
         run_dotler_with_stdin(
             &repo_shared,
-            &["vault", "from", "file", "my-dotler", "--password-stdin", "--json"],
+            &[
+                "vault",
+                "from",
+                "file",
+                "my-dotler",
+                "--password-stdin",
+                "--json"
+            ],
             None,
             Some("public-vault-pw-111\n"),
         )

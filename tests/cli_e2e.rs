@@ -260,11 +260,7 @@ fn test_e2e_all_12_subcommands_clean_execution() {
 
     // 7. vault ls
     let out_vault_ls = sandbox.cmd().args(["vault", "ls"]).output().unwrap();
-    assert_eq!(
-        out_vault_ls.status.code(),
-        Some(0),
-        "vault ls must succeed"
-    );
+    assert_eq!(out_vault_ls.status.code(), Some(0), "vault ls must succeed");
 
     // 8. vault init, rotate, recover
     let mut vault_child = sandbox

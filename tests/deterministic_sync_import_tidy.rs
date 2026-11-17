@@ -535,7 +535,12 @@ lua/core/options.lua
     assert_eq!(report_keep.untracked_kept_orphans.len(), 1);
     assert!(!sandbox.repo_dir.join("editor/lua/user/plugins").exists());
     assert!(!sandbox.repo_dir.join("editor/lua/user").exists());
-    assert!(sandbox.repo_dir.join("editor/lua/core/options.lua").is_file());
+    assert!(
+        sandbox
+            .repo_dir
+            .join("editor/lua/core/options.lua")
+            .is_file()
+    );
     assert!(sandbox.repo_dir.join("editor/lua").is_dir());
     assert!(sandbox.repo_dir.join("editor").is_dir());
     assert!(os_orphan_path.is_file());

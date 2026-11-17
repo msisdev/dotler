@@ -306,7 +306,10 @@ files = ".bashrc"
         let pass_b = crate::crypto::SecretString::new("vault-b-pass-456".to_string());
         let (vcfg_a, _, _) = crate::crypto::vault::init_vault(&pass_a).unwrap();
         let (_, vkey_b, _) = crate::crypto::vault::init_vault(&pass_b).unwrap();
-        let enc_b = vkey_b.encrypt_file(b"TOKEN=other_vault").unwrap().to_bytes();
+        let enc_b = vkey_b
+            .encrypt_file(b"TOKEN=other_vault")
+            .unwrap()
+            .to_bytes();
 
         let _ = fs::remove_file(repo_dir.join("g1/.bashrc.enc"));
         fs::write(

@@ -1,4 +1,4 @@
-//! CLI handlers for `vault` (`init`, `ls`, `from`, `passwd`, `recover`) commands.
+//! CLI handlers for `vault` (`init`, `ls`, `from`, `rotate`, `recover`) commands.
 
 use std::io::Write;
 
@@ -198,7 +198,7 @@ pub(crate) fn handle_vault<W: Write>(
         VaultCommand::From { command } => {
             handle_vault_from(command, local_cfg, cli, is_interactive, stdout)
         }
-        VaultCommand::Passwd(args) => {
+        VaultCommand::Rotate(args) => {
             let data = rotate_vault_passphrases(
                 local_cfg,
                 cli.repo.as_deref(),
@@ -206,7 +206,7 @@ pub(crate) fn handle_vault<W: Write>(
                 args.hint.as_deref(),
                 is_interactive,
             )?;
-            Ok(render_success_to(stdout, "vault passwd", &data, cli.json))
+            Ok(render_success_to(stdout, "vault rotate", &data, cli.json))
         }
         VaultCommand::Recover(args) => {
             let (_label, repo_path) = resolve_repo_path_with_cwd(local_cfg, cli.repo.as_deref())?;
@@ -307,7 +307,7 @@ fn handle_vault_init<W: Write>(
 
         return Err(EngineError::Config(crate::config::ConfigError::UnknownField {
             field: "vault".to_string(),
-            hint: "Vault is already initialized in dotler.toml. Use 'dotler vault passwd' to change password or 'dotler vault from <file|git|url>' to replace with another vault."
+            hint: "Vault is already initialized in dotler.toml. Use 'dotler vault rotate' to change password or 'dotler vault from <file|git|url>' to replace with another vault."
                 .to_string(),
         }));
     }

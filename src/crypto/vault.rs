@@ -269,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vault_init_passwd_recover_lifecycle() {
+    fn test_vault_init_rotate_recover_lifecycle() {
         let initial_pass = SecretString::new("initial-passphrase".to_string());
         let (config, initial_key, mnemonic) = init_vault(&initial_pass).unwrap();
         assert_eq!(config.vault_id, initial_key.vault_id());

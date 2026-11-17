@@ -19,8 +19,8 @@ pub use commands::{Cli, Command, GitCommand, VaultCommand, VaultFromCommand, dis
 pub use output::{
     CliError, EXIT_AUTH_OR_LOCK_ERROR, EXIT_CONFIG_OR_ARGS_ERROR, EXIT_SECURITY_BLOCKED,
     EXIT_SUCCESS, EXIT_SYNC_CONFLICT, ExportReport, InlineRender, JsonEnvelope, JsonErrorPayload,
-    UpdateReport, VaultFromReport, VaultInitReport, VaultLsReport, VaultPasswdReport,
-    VaultRecoverReport, VaultRepoStatusEntry, render_engine_error, render_error, render_error_to,
+    UpdateReport, VaultFromReport, VaultInitReport, VaultLsReport, VaultRecoverReport,
+    VaultRepoStatusEntry, VaultRotateReport, render_engine_error, render_error, render_error_to,
     render_success, render_success_to,
 };
 

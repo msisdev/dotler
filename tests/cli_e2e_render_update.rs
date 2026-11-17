@@ -46,7 +46,7 @@ fn test_e2e_non_json_inline_formats_emoji_rules_and_colored_labels() {
     );
     assert!(!vault_ls_stdout.contains("☀️"));
 
-    // 4. vault init, passwd, recover (non-JSON)
+    // 4. vault init, rotate, recover (non-JSON)
     let mut vault_child = sandbox
         .cmd()
         .args(["vault", "init", "--password-stdin"])
@@ -72,22 +72,22 @@ fn test_e2e_non_json_inline_formats_emoji_rules_and_colored_labels() {
         .trim()
         .to_string();
 
-    let mut passwd_child = sandbox
+    let mut rotate_child = sandbox
         .cmd()
         .env("DOTLER_PASSPHRASE", "vault_pass_111")
-        .args(["vault", "passwd", "--password-stdin"])
+        .args(["vault", "rotate", "--password-stdin"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    if let Some(mut stdin) = passwd_child.stdin.take() {
+    if let Some(mut stdin) = rotate_child.stdin.take() {
         writeln!(stdin, "vault_pass_222").unwrap();
     }
-    let passwd_out = passwd_child.wait_with_output().unwrap();
-    assert_eq!(passwd_out.status.code(), Some(0));
+    let rotate_out = rotate_child.wait_with_output().unwrap();
+    assert_eq!(rotate_out.status.code(), Some(0));
     assert_eq!(
-        String::from_utf8_lossy(&passwd_out.stdout).trim(),
+        String::from_utf8_lossy(&rotate_out.stdout).trim(),
         "☀️ Passphrase rotation done. (1 rotated, 0 skipped)"
     );
 

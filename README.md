@@ -45,7 +45,7 @@ dotler export
 dotler tidy [--purge]
 dotler vault init
 dotler vault from <file | git | url> <source>
-dotler vault <ls | passwd | recover>
+dotler vault <ls | rotate | recover>
 dotler git <ls | clone | install | uninstall>
 dotler ai
 dotler mcp

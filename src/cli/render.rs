@@ -3,7 +3,7 @@
 use crossterm::style::{Attribute, Color, ResetColor, SetAttribute, SetForegroundColor};
 use serde::{Deserialize, Serialize};
 
-pub use crate::core::vault_loader::VaultPasswdReport;
+pub use crate::core::vault_loader::VaultRotateReport;
 
 /// Formats the `Error:` label using ANSI 16-color index 9 (Negative Red) and Bold.
 pub fn styled_error_label() -> String {
@@ -288,7 +288,7 @@ impl InlineRender for VaultFromReport {
     }
 }
 
-impl InlineRender for VaultPasswdReport {
+impl InlineRender for VaultRotateReport {
     fn render_inline(&self) -> String {
         format!(
             "☀️ Passphrase rotation done. ({} rotated, {} skipped)",
@@ -539,7 +539,7 @@ pub(crate) mod tests {
             "☀️ Vault from done. (id: vid-123, 2 re-keyed)"
         );
 
-        let vpasswd = VaultPasswdReport {
+        let vrotate = VaultRotateReport {
             status: "password_rotated".into(),
             rotated_repos: vec!["a".into(), "b".into()],
             skipped_repos: vec!["c".into()],
@@ -548,7 +548,7 @@ pub(crate) mod tests {
             vault_id: Some("vid-123".into()),
         };
         assert_eq!(
-            vpasswd.render_inline(),
+            vrotate.render_inline(),
             "☀️ Passphrase rotation done. (2 rotated, 1 skipped)"
         );
 

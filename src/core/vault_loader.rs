@@ -26,7 +26,7 @@ pub enum VaultUnlockPolicy {
 
 /// Summary report returned by [`rotate_vault_passphrases`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VaultPasswdReport {
+pub struct VaultRotateReport {
     pub status: String,
     pub rotated_repos: Vec<String>,
     pub skipped_repos: Vec<String>,
@@ -157,7 +157,7 @@ pub fn rotate_vault_passphrases(
     password_stdin: bool,
     new_hint: Option<&str>,
     is_interactive: bool,
-) -> Result<VaultPasswdReport, EngineError> {
+) -> Result<VaultRotateReport, EngineError> {
     let mut candidates: Vec<(String, PathBuf)> = Vec::new();
     let explicit_repo = requested_label.is_some();
 
@@ -343,7 +343,7 @@ pub fn rotate_vault_passphrases(
     }
     skipped_repos.sort();
 
-    Ok(VaultPasswdReport {
+    Ok(VaultRotateReport {
         status: "password_rotated".to_string(),
         rotated_repos,
         skipped_repos,

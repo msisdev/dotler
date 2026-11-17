@@ -90,7 +90,7 @@ hosts.yml enc
 
 ## 4. OS Keyring Integration
 
-Dotler automatically provisions your master passphrase in your operating system's native credential manager (macOS Keychain, Linux Secret Service / Keyutils, Windows Credential Manager) at vault and repository lifecycle boundaries (`dotler init`, `dotler vault init`, `dotler vault from`, `dotler vault passwd`, `dotler vault recover`) so `import`, `export`, and `tidy` run without prompting every time. Keys are isolated per `vault_id` (so multiple independent repositories with distinct passphrases coexist without conflict), with automatic fallback to the global `default` slot:
+Dotler automatically provisions your master passphrase in your operating system's native credential manager (macOS Keychain, Linux Secret Service / Keyutils, Windows Credential Manager) at vault and repository lifecycle boundaries (`dotler init`, `dotler vault init`, `dotler vault from`, `dotler vault rotate`, `dotler vault recover`) so `import`, `export`, and `tidy` run without prompting every time. Keys are isolated per `vault_id` (so multiple independent repositories with distinct passphrases coexist without conflict), with automatic fallback to the global `default` slot:
 
 ```sh
 # Inspect vault_id and OS keyring readiness across registered repositories
@@ -102,12 +102,12 @@ dotler vault init
 
 ## 5. Passphrase Rotation & Mnemonic Recovery
 
-### Change Passphrase (`vault passwd`)
+### Rotate Passphrase (`vault rotate`)
 
-Re-wraps `password_slot` using your new passphrase without re-encrypting any `.enc` files in the repository. By default, `dotler vault passwd` updates all locally registered repositories that share the current passphrase and updates the OS keyring in one step:
+Re-wraps `password_slot` using your new passphrase without re-encrypting any `.enc` files in the repository. By default, `dotler vault rotate` updates all locally registered repositories that share the current passphrase and updates the OS keyring in one step:
 
 ```sh
-dotler vault passwd
+dotler vault rotate
 ```
 
 ### Recover Vault (`vault recover`)

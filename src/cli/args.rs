@@ -293,7 +293,7 @@ pub enum VaultCommand {
     },
 
     /// Rotate vault password slot using current credentials
-    Passwd(VaultPasswdArgs),
+    Rotate(VaultRotateArgs),
 
     /// Recover vault using 12-word mnemonic and issue new recovery mnemonic
     Recover(VaultRecoverArgs),
@@ -344,7 +344,7 @@ pub struct VaultFromSourceArgs {
 }
 
 #[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
-pub struct VaultPasswdArgs {
+pub struct VaultRotateArgs {
     #[arg(
         long = "password-stdin",
         help = "Read new passphrase from standard input"
@@ -474,6 +474,7 @@ mod tests {
             vec!["dotler", "vault", "init"],
             vec!["dotler", "vault", "ls"],
             vec!["dotler", "vault", "from", "file", "main"],
+            vec!["dotler", "vault", "rotate"],
             vec!["dotler", "ai"],
             vec!["dotler", "mcp"],
             vec!["dotler", "update"],
@@ -564,6 +565,7 @@ mod tests {
         assert!(Cli::try_parse_from(["dotler", "key", "del"]).is_err());
         assert!(Cli::try_parse_from(["dotler", "vault", "set"]).is_err());
         assert!(Cli::try_parse_from(["dotler", "vault", "del"]).is_err());
+        assert!(Cli::try_parse_from(["dotler", "vault", "passwd"]).is_err());
         assert!(Cli::try_parse_from(["dotler", "check", "-g", "shell"]).is_err());
         assert!(Cli::try_parse_from(["dotler", "status", "-g", "shell"]).is_err());
         assert!(Cli::try_parse_from(["dotler", "import", "-g", "shell"]).is_err());

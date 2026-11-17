@@ -30,7 +30,7 @@ impl<'a> Drop for TestKeyringGuard<'a> {
 }
 
 #[test]
-fn test_vault_passwd_preserves_ciphertext_without_reencryption() {
+fn test_vault_rotate_preserves_ciphertext_without_reencryption() {
     let initial_pass = SecretString::new("initial-vault-password".to_string());
     let (config, vault_key, _mnemonic) = init_vault(&initial_pass).unwrap();
 

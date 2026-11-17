@@ -116,7 +116,7 @@ files = "!*"
 }
 
 #[test]
-fn test_e2e_vault_passwd_rotates_all_matching_registered_repos() {
+fn test_e2e_vault_rotate_rotates_all_matching_registered_repos() {
     let sandbox = E2eSandbox::new();
 
     let repo_personal = sandbox.home_dir.join("personal-dots");
@@ -164,30 +164,31 @@ fn test_e2e_vault_passwd_rotates_all_matching_registered_repos() {
 
     let other_before = fs::read_to_string(repo_other.join("dotler.toml")).unwrap();
 
-    // Run `dotler vault passwd` from outside all repo directories (`home_dir`)
-    let mut passwd_child = sandbox
+    // Run `dotler vault rotate` from outside all repo directories (`home_dir`)
+    let mut rotate_child = sandbox
         .cmd()
         .env("DOTLER_PASSPHRASE", "shared_old_pass_123")
         .current_dir(&sandbox.home_dir)
-        .args(["vault", "passwd", "--password-stdin", "--json"])
+        .args(["vault", "rotate", "--password-stdin", "--json"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    if let Some(mut stdin) = passwd_child.stdin.take() {
+    if let Some(mut stdin) = rotate_child.stdin.take() {
         writeln!(stdin, "shared_new_pass_789").unwrap();
     }
-    let passwd_out = passwd_child.wait_with_output().unwrap();
+    let rotate_out = rotate_child.wait_with_output().unwrap();
     assert_eq!(
-        passwd_out.status.code(),
+        rotate_out.status.code(),
         Some(0),
         "stderr: {}",
-        String::from_utf8_lossy(&passwd_out.stderr)
+        String::from_utf8_lossy(&rotate_out.stderr)
     );
 
-    let parsed: Value = serde_json::from_slice(&passwd_out.stdout).unwrap();
+    let parsed: Value = serde_json::from_slice(&rotate_out.stdout).unwrap();
     assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["command"], "vault rotate");
     assert_eq!(
         parsed["data"]["rotated_repos"],
         serde_json::json!(["personal", "work"])
@@ -202,22 +203,22 @@ fn test_e2e_vault_passwd_rotates_all_matching_registered_repos() {
     assert_eq!(other_before, other_after);
 
     // Subsequent rotation using `shared_new_pass_789` must succeed on both `personal` and `work`
-    let mut passwd_child2 = sandbox
+    let mut rotate_child2 = sandbox
         .cmd()
         .env("DOTLER_PASSPHRASE", "shared_new_pass_789")
         .current_dir(&sandbox.home_dir)
-        .args(["vault", "passwd", "--password-stdin", "--json"])
+        .args(["vault", "rotate", "--password-stdin", "--json"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    if let Some(mut stdin) = passwd_child2.stdin.take() {
+    if let Some(mut stdin) = rotate_child2.stdin.take() {
         writeln!(stdin, "shared_final_pass_000").unwrap();
     }
-    let passwd_out2 = passwd_child2.wait_with_output().unwrap();
-    assert_eq!(passwd_out2.status.code(), Some(0));
-    let parsed2: Value = serde_json::from_slice(&passwd_out2.stdout).unwrap();
+    let rotate_out2 = rotate_child2.wait_with_output().unwrap();
+    assert_eq!(rotate_out2.status.code(), Some(0));
+    let parsed2: Value = serde_json::from_slice(&rotate_out2.stdout).unwrap();
     assert_eq!(
         parsed2["data"]["rotated_repos"],
         serde_json::json!(["personal", "work"])
@@ -371,12 +372,12 @@ fn test_e2e_vault_hint_and_use_keyring_optout() {
     );
 
     // 3. Rotate passphrase with `--hint` updated
-    let mut passwd_child = sandbox
+    let mut rotate_child = sandbox
         .cmd()
         .env("DOTLER_PASSPHRASE", "pass_init_111")
         .args([
             "vault",
-            "passwd",
+            "rotate",
             "--hint",
             "second pet name",
             "--password-stdin",
@@ -387,17 +388,17 @@ fn test_e2e_vault_hint_and_use_keyring_optout() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    if let Some(mut stdin) = passwd_child.stdin.take() {
+    if let Some(mut stdin) = rotate_child.stdin.take() {
         writeln!(stdin, "pass_rot_222").unwrap();
     }
-    let passwd_out = passwd_child.wait_with_output().unwrap();
-    assert_eq!(passwd_out.status.code(), Some(0));
+    let rotate_out = rotate_child.wait_with_output().unwrap();
+    assert_eq!(rotate_out.status.code(), Some(0));
 
-    let dotler_toml_after_passwd =
+    let dotler_toml_after_rotate =
         fs::read_to_string(sandbox.repo_dir.join("dotler.toml")).unwrap();
     assert!(
-        dotler_toml_after_passwd.contains("vault_hint = \"second pet name\""),
-        "dotler.toml should contain updated vault_hint: {dotler_toml_after_passwd}"
+        dotler_toml_after_rotate.contains("vault_hint = \"second pet name\""),
+        "dotler.toml should contain updated vault_hint: {dotler_toml_after_rotate}"
     );
 
     // 4. Recover vault with `--hint` updated

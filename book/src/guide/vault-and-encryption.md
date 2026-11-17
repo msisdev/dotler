@@ -68,7 +68,7 @@ dotler vault from file ~/other-dotfiles
 dotler vault from file ./vault.json
 ```
 
-In all three subcommands (`file`, `git`, `url`), any `[<group>]` sections in the source file are ignored. `dotler vault from` automatically checks your OS keyring (`<vault_id>` slot first, then the `default` slot) to verify and unlock `password_slot` without prompting if the matching passphrase is already stored (prompting only when no matching key is found in the keyring), before writing the vault configuration to the target `dotler.toml`. If the target repository already has `.enc` files encrypted under a different vault, `dotler vault from` automatically decrypts them with the previous vault key and re-encrypts them in memory under the newly imported vault before atomically updating `dotler.toml`.
+In all three subcommands (`file`, `git`, `url`), any `[<group>]` sections in the source file are ignored. If the imported `vault_id` is already registered in your OS keyring, `dotler vault from` unlocks `password_slot` without prompting; otherwise it prompts for the passphrase, verifies `password_slot`, and stores the `vault_id` entry in your OS keyring before writing the vault configuration to the target `dotler.toml`. If the target repository already has `.enc` files encrypted under a different vault, `dotler vault from` automatically decrypts them with the previous vault key and re-encrypts them in memory under the newly imported vault before atomically updating `dotler.toml`.
 
 ## 3. Encrypting & Decrypting Files
 

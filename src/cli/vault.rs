@@ -90,19 +90,12 @@ pub(crate) fn unlock_imported_vault_slot(
         }
     }
 
-    if use_keyring {
-        if let Some(vid) = expected_vid.map(str::trim).filter(|s| !s.is_empty())
-            && let Ok(Some(sec)) = OsKeyring::get_for_vault(vid)
-            && let Ok(key) = pw_slot.unwrap(&sec, expected_vid)
-        {
-            return Ok((key, sec, false));
-        }
-
-        if let Ok(Some(sec)) = OsKeyring::get()
-            && let Ok(key) = pw_slot.unwrap(&sec, expected_vid)
-        {
-            return Ok((key, sec, true));
-        }
+    if use_keyring
+        && let Some(vid) = expected_vid.map(str::trim).filter(|s| !s.is_empty())
+        && let Ok(Some(sec)) = OsKeyring::get_for_vault(vid)
+        && let Ok(key) = pw_slot.unwrap(&sec, expected_vid)
+    {
+        return Ok((key, sec, false));
     }
 
     let prompt_msg = match vault_hint.map(str::trim).filter(|s| !s.is_empty()) {
@@ -1306,10 +1299,12 @@ mod tests {
         .unwrap();
         assert!(String::from_utf8_lossy(&out1).contains(&vcfg_src.vault_id));
 
-        // 2. Matching `default` slot unlocks immediately with zero prompts and populates <vault_id> slot
+        // 2. When <vault_id> is NOT registered in OS keyring (even if `default` has a passphrase),
+        //    `vault from` prompts at the boundary and registers <vault_id> into OS keyring.
         OsKeyring::clear_mock();
         write_file_safe(&repo_dst.join("dotler.toml"), b"").unwrap();
         OsKeyring::set(&pass_src).unwrap();
+        OsKeyring::push_mock_prompt_reply("src-keyring-auto-777");
         let mut out2 = Vec::new();
         handle_vault(
             &VaultCommand::From {
@@ -1321,6 +1316,7 @@ mod tests {
             lock_guard,
         )
         .unwrap();
+        assert!(OsKeyring::take_mock_prompt_reply().is_none());
         assert_eq!(
             OsKeyring::get_for_vault(&vcfg_src.vault_id)
                 .unwrap()

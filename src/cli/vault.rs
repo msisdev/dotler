@@ -16,31 +16,25 @@ use crate::config::state::{DotlerLockGuard, write_file_safe};
 use crate::core::vault_loader::{
     read_new_passphrase, rotate_vault_passphrases, unlock_vault_if_needed,
 };
+use crate::crypto::keyring::{OsKeyring, PASSPHRASE_ENV_VAR};
+use crate::crypto::vault::{EncryptedFile, VaultKey, VaultSlot, init_vault, recover_vault};
 use crate::crypto::{ExposeSecret, SecretString};
-use crate::crypto::keyring::OsKeyring;
-use crate::crypto::vault::{EncryptedFile, VaultSlot, init_vault, recover_vault};
 use crate::engine::EngineError;
 use crate::engine::remote::{GitRunner, REMOTE_TOML_FETCH_MAX_BYTES, fetch_http_text, parse_url};
 use crate::tui::confirm::{ConfirmError, ConfirmPrompt, confirm_proceed_to};
 
-pub(crate) fn resolve_vault_init_passphrase_for_vault<W: Write>(
+pub(crate) fn resolve_vault_init_passphrase<W: Write>(
     writer: &mut W,
-    vault_id: Option<&str>,
     use_keyring: bool,
     password_stdin: bool,
     is_interactive: bool,
     json_mode: bool,
-    is_import: bool,
 ) -> Result<(SecretString, bool), EngineError> {
-    let has_env_pass = std::env::var(crate::crypto::keyring::PASSPHRASE_ENV_VAR)
+    let has_env_pass = std::env::var(PASSPHRASE_ENV_VAR)
         .is_ok_and(|v| !v.trim_end_matches(['\r', '\n']).is_empty());
 
     let existing_keyring = if !password_stdin && !has_env_pass && use_keyring {
-        vault_id
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .and_then(|vid| OsKeyring::get_for_vault(vid).ok().flatten())
-            .or_else(|| OsKeyring::get().ok().flatten())
+        OsKeyring::get().ok().flatten()
     } else {
         None
     };
@@ -64,33 +58,60 @@ pub(crate) fn resolve_vault_init_passphrase_for_vault<W: Write>(
         }
     }
 
-    let prompt = if is_import {
-        "Enter vault passphrase: "
-    } else {
-        "Enter new vault passphrase: "
-    };
-    let pass = read_new_passphrase(password_stdin, true, is_interactive, prompt)?;
+    let pass = read_new_passphrase(
+        password_stdin,
+        true,
+        is_interactive,
+        "Enter new vault passphrase: ",
+    )?;
     Ok((pass, true))
 }
 
-#[allow(dead_code)]
-pub(crate) fn resolve_vault_init_passphrase<W: Write>(
-    writer: &mut W,
+pub(crate) fn unlock_imported_vault_slot(
+    pw_slot: &VaultSlot,
+    expected_vid: Option<&str>,
+    vault_hint: Option<&str>,
     use_keyring: bool,
     password_stdin: bool,
     is_interactive: bool,
-    json_mode: bool,
-    is_import: bool,
-) -> Result<(SecretString, bool), EngineError> {
-    resolve_vault_init_passphrase_for_vault(
-        writer,
-        None,
-        use_keyring,
-        password_stdin,
-        is_interactive,
-        json_mode,
-        is_import,
-    )
+) -> Result<(VaultKey, SecretString, bool), EngineError> {
+    if password_stdin {
+        let pass = read_new_passphrase(true, false, is_interactive, "Enter vault passphrase: ")?;
+        let key = pw_slot.unwrap(&pass, expected_vid)?;
+        return Ok((key, pass, true));
+    }
+
+    if let Ok(env_pass) = std::env::var(PASSPHRASE_ENV_VAR) {
+        let trimmed = env_pass.trim_end_matches(['\r', '\n']);
+        if !trimmed.is_empty() {
+            let pass = SecretString::new(trimmed.to_string());
+            let key = pw_slot.unwrap(&pass, expected_vid)?;
+            return Ok((key, pass, true));
+        }
+    }
+
+    if use_keyring {
+        if let Some(vid) = expected_vid.map(str::trim).filter(|s| !s.is_empty())
+            && let Ok(Some(sec)) = OsKeyring::get_for_vault(vid)
+            && let Ok(key) = pw_slot.unwrap(&sec, expected_vid)
+        {
+            return Ok((key, sec, false));
+        }
+
+        if let Ok(Some(sec)) = OsKeyring::get()
+            && let Ok(key) = pw_slot.unwrap(&sec, expected_vid)
+        {
+            return Ok((key, sec, true));
+        }
+    }
+
+    let prompt_msg = match vault_hint.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(h) => format!("Enter vault passphrase (hint: {h}): "),
+        None => "Enter vault passphrase: ".to_string(),
+    };
+    let pass = read_new_passphrase(false, false, is_interactive, &prompt_msg)?;
+    let key = pw_slot.unwrap(&pass, expected_vid)?;
+    Ok((key, pass, true))
 }
 
 fn resolve_active_repo_vault(
@@ -296,14 +317,12 @@ fn handle_vault_init<W: Write>(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
-    let (pass, should_update_keyring) = resolve_vault_init_passphrase_for_vault(
+    let (pass, should_update_keyring) = resolve_vault_init_passphrase(
         stdout,
-        None,
         local_cfg.use_keyring,
         args.password_stdin,
         is_interactive,
         cli.json,
-        false,
     )?;
     let (mut vault_cfg, _vault_key, mnemonic) = init_vault(&pass)?;
     vault_cfg.vault_hint = explicit_hint;
@@ -354,17 +373,14 @@ fn handle_vault_from<W: Write>(
         .map(str::to_string);
 
     let expected_vid = (!ext_vault.vault_id.is_empty()).then_some(ext_vault.vault_id.as_str());
-    let (pass, should_update_keyring) = resolve_vault_init_passphrase_for_vault(
-        stdout,
+    let (new_vault_key, pass, should_update_keyring) = unlock_imported_vault_slot(
+        &pw_slot,
         expected_vid,
+        ext_vault.vault_hint.as_deref(),
         local_cfg.use_keyring,
         args.password_stdin,
         is_interactive,
-        cli.json,
-        true,
     )?;
-
-    let new_vault_key = pw_slot.unwrap(&pass, expected_vid)?;
     let new_vid_bytes = new_vault_key.vault_id_bytes();
     let imported_cfg = VaultConfig {
         vault_id: new_vault_key.vault_id(),
@@ -825,16 +841,14 @@ mod tests {
 
         ConfirmPrompt::push_mock_input("yes");
         let (resolved_yes, update_yes) =
-            resolve_vault_init_passphrase(&mut Vec::new(), true, false, true, false, false)
-                .unwrap();
+            resolve_vault_init_passphrase(&mut Vec::new(), true, false, true, false).unwrap();
         assert_eq!(resolved_yes.expose_secret(), "existing-keyring-pass-111");
         assert!(!update_yes);
 
         ConfirmPrompt::push_mock_input("no");
         OsKeyring::push_mock_prompt_reply("brand-new-pass-222");
         let (resolved_no, update_no) =
-            resolve_vault_init_passphrase(&mut Vec::new(), true, false, true, false, false)
-                .unwrap();
+            resolve_vault_init_passphrase(&mut Vec::new(), true, false, true, false).unwrap();
         assert_eq!(resolved_no.expose_secret(), "brand-new-pass-222");
         assert!(update_no);
     }
@@ -1153,7 +1167,9 @@ mod tests {
         }
         local_cfg.save_atomic(&dotler_cfg_dir.join("config.toml")).unwrap();
 
-        // Store dst passphrase in keyring under vcfg_dst.vault_id; supply src passphrase via prompt
+        // Store dst passphrase in both <vid_dst> and default slot; vault from checks keyring first,
+        // sees dst passphrase does not unlock src, and falls straight through to prompt for src without ConfirmPrompt.
+        OsKeyring::set(&pass_dst).unwrap();
         OsKeyring::set_for_vault(&vcfg_dst.vault_id, &pass_dst).unwrap();
         OsKeyring::push_mock_prompt_reply("src-vault-pass-999");
 
@@ -1200,6 +1216,145 @@ mod tests {
 
         let updated_dst_cfg = RepoConfig::load(&repo_dst.join("dotler.toml")).unwrap();
         assert_eq!(updated_dst_cfg.vault.unwrap().vault_id, vcfg_src.vault_id);
+        assert_eq!(
+            OsKeyring::get_for_vault(&vcfg_src.vault_id)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "src-vault-pass-999"
+        );
+
+        if let Some(h) = orig_home {
+            unsafe {
+                std::env::set_var("HOME", h);
+            }
+        }
+    }
+
+    #[test]
+    fn test_vault_from_auto_verifies_os_keyring_without_confirm_prompt() {
+        use crate::cli::args::{Command, VaultFromSourceArgs};
+        let _mock = mock_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let dotler_cfg_dir = home_dir.join(".config").join("dotler");
+        let repo_src = home_dir.join("repo_src");
+        let repo_dst = home_dir.join("repo_dst");
+        fs::create_dir_all(&dotler_cfg_dir).unwrap();
+        fs::create_dir_all(&repo_src).unwrap();
+        fs::create_dir_all(&repo_dst).unwrap();
+
+        let pass_src = SecretString::new("src-keyring-auto-777".to_string());
+        let (vcfg_src, _, _) = init_vault(&pass_src).unwrap();
+
+        write_file_safe(
+            &repo_src.join("dotler.toml"),
+            format!(
+                "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n",
+                vcfg_src.vault_id, vcfg_src.password_slot, vcfg_src.recovery_slot
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        write_file_safe(&repo_dst.join("dotler.toml"), b"").unwrap();
+
+        let mut local_cfg = LocalConfig {
+            default_repo: Some("dst".to_string()),
+            ..Default::default()
+        };
+        local_cfg.repos.insert("src".to_string(), "~/repo_src".to_string());
+        local_cfg.repos.insert("dst".to_string(), "~/repo_dst".to_string());
+
+        let orig_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", &home_dir);
+        }
+        local_cfg.save_atomic(&dotler_cfg_dir.join("config.toml")).unwrap();
+
+        let lock_res = crate::config::state::get_lock(dotler_cfg_dir.join("dotler.lock"));
+        let lock_guard = lock_res.get().unwrap();
+
+        let from_cmd = VaultFromCommand::File(VaultFromSourceArgs {
+            source: "src".to_string(),
+            ..Default::default()
+        });
+        let cli_interactive = Cli {
+            json: false,
+            device: None,
+            repo: Some("dst".to_string()),
+            dry_run: false,
+            verbose: false,
+            command: Command::Vault {
+                command: VaultCommand::From {
+                    command: from_cmd.clone(),
+                },
+            },
+        };
+
+        // 1. Matching <vault_id> slot unlocks immediately in interactive mode with zero prompts
+        OsKeyring::set_for_vault(&vcfg_src.vault_id, &pass_src).unwrap();
+        let mut out1 = Vec::new();
+        handle_vault(
+            &VaultCommand::From {
+                command: from_cmd.clone(),
+            },
+            &cli_interactive,
+            true,
+            &mut out1,
+            lock_guard,
+        )
+        .unwrap();
+        assert!(String::from_utf8_lossy(&out1).contains(&vcfg_src.vault_id));
+
+        // 2. Matching `default` slot unlocks immediately with zero prompts and populates <vault_id> slot
+        OsKeyring::clear_mock();
+        write_file_safe(&repo_dst.join("dotler.toml"), b"").unwrap();
+        OsKeyring::set(&pass_src).unwrap();
+        let mut out2 = Vec::new();
+        handle_vault(
+            &VaultCommand::From {
+                command: from_cmd.clone(),
+            },
+            &cli_interactive,
+            true,
+            &mut out2,
+            lock_guard,
+        )
+        .unwrap();
+        assert_eq!(
+            OsKeyring::get_for_vault(&vcfg_src.vault_id)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "src-keyring-auto-777"
+        );
+
+        // 3. Mismatched keyring entries fall through cleanly to passphrase prompt (zero ConfirmPrompt)
+        OsKeyring::clear_mock();
+        write_file_safe(&repo_dst.join("dotler.toml"), b"").unwrap();
+        OsKeyring::set(&SecretString::new("other-vault-pass-000".to_string())).unwrap();
+        OsKeyring::set_for_vault(
+            &vcfg_src.vault_id,
+            &SecretString::new("stale-wrong-pass-000".to_string()),
+        )
+        .unwrap();
+        OsKeyring::push_mock_prompt_reply("src-keyring-auto-777");
+        let mut out3 = Vec::new();
+        handle_vault(
+            &VaultCommand::From { command: from_cmd },
+            &cli_interactive,
+            true,
+            &mut out3,
+            lock_guard,
+        )
+        .unwrap();
+        assert_eq!(
+            OsKeyring::get_for_vault(&vcfg_src.vault_id)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "src-keyring-auto-777"
+        );
 
         if let Some(h) = orig_home {
             unsafe {

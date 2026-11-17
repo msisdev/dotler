@@ -57,15 +57,9 @@ pub struct VaultRecoverReport {
     pub hint: Option<String>,
 }
 
-/// Summary report returned by `key set` and `key del`.
+/// Per-repository vault and keyring status entry returned by `vault ls`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct KeyReport {
-    pub status: String,
-}
-
-/// Per-repository vault and keyring status entry returned by `key ls`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct KeyRepoStatusEntry {
+pub struct VaultRepoStatusEntry {
     pub label: String,
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,12 +69,12 @@ pub struct KeyRepoStatusEntry {
     pub keyring_status: String,
 }
 
-/// Summary report returned by `key ls`.
+/// Summary report returned by `vault ls`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct KeyLsReport {
+pub struct VaultLsReport {
     pub use_keyring: bool,
     pub default_slot_set: bool,
-    pub repos: Vec<KeyRepoStatusEntry>,
+    pub repos: Vec<VaultRepoStatusEntry>,
 }
 
 /// Summary report returned by `update`.
@@ -313,16 +307,7 @@ impl InlineRender for VaultRecoverReport {
     }
 }
 
-impl InlineRender for KeyReport {
-    fn render_inline(&self) -> String {
-        match self.status.as_str() {
-            "keyring_deleted" => "Key delete done.".to_string(),
-            _ => "Key set done.".to_string(),
-        }
-    }
-}
-
-impl InlineRender for KeyLsReport {
+impl InlineRender for VaultLsReport {
     fn render_inline(&self) -> String {
         let default_state = if self.default_slot_set { "set" } else { "empty" };
         let mut out = format!(
@@ -576,20 +561,6 @@ pub(crate) mod tests {
         assert_eq!(
             vrec.render_inline(),
             "☀️ Vault recovery done. (id: vid-999)\n🔑 New recovery mnemonic: new1 new2"
-        );
-        assert_eq!(
-            KeyReport {
-                status: "keyring_updated".into()
-            }
-            .render_inline(),
-            "Key set done."
-        );
-        assert_eq!(
-            KeyReport {
-                status: "keyring_deleted".into()
-            }
-            .render_inline(),
-            "Key delete done."
         );
 
         assert_eq!(

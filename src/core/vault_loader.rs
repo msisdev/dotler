@@ -126,7 +126,7 @@ pub fn unlock_vault_if_needed(
 
     if !is_interactive {
         return Err(EngineError::VaultLocked {
-            reason: "Passphrase required in non-interactive mode. Run 'dotler key set' or export DOTLER_PASSPHRASE.".to_string(),
+            reason: "Passphrase required in non-interactive mode. Run 'dotler vault init' or export DOTLER_PASSPHRASE.".to_string(),
         });
     }
 

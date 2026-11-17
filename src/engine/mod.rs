@@ -239,7 +239,7 @@ impl EngineError {
                 "Another dotler process holds ~/.config/dotler/dotler.lock. Wait for it to complete or terminate stale processes.".to_string()
             }
             EngineError::VaultLocked { .. } => {
-                "Run 'dotler key set' to store the passphrase in the OS keyring, or set the DOTLER_PASSPHRASE environment variable.".to_string()
+                "Run 'dotler vault init' to store the passphrase in the OS keyring, or set the DOTLER_PASSPHRASE environment variable.".to_string()
             }
             EngineError::SyncConflict { path, .. } => {
                 format!(
@@ -306,7 +306,7 @@ impl EngineError {
                 actual,
             }) => {
                 format!(
-                    "Encrypted file vault_id ('{actual}') does not match dotler.toml ('{expected}'). Run 'dotler key ls' to inspect repository vaults or 'dotler vault from file <repo>' to unify vault keys."
+                    "Encrypted file vault_id ('{actual}') does not match dotler.toml ('{expected}'). Run 'dotler vault ls' to inspect repository vaults or 'dotler vault from file <repo>' to unify vault keys."
                 )
             }
             EngineError::Vault(e) => format!("Vault operation failed: {e}"),

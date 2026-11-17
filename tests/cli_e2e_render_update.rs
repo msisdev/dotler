@@ -36,31 +36,15 @@ fn test_e2e_non_json_inline_formats_emoji_rules_and_colored_labels() {
     let check_stdout = String::from_utf8_lossy(&out_check.stdout);
     assert_eq!(check_stdout.trim(), "☀️ Config is ok. (0 groups)");
 
-    // 3. key set & key del (non-JSON): no raw JSON, no emoji
-    let mut key_child = sandbox
-        .cmd()
-        .args(["key", "set", "--password-stdin"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    if let Some(mut stdin) = key_child.stdin.take() {
-        writeln!(stdin, "master_password_passphrase_12345").unwrap();
-    }
-    let key_out = key_child.wait_with_output().unwrap();
-    assert_eq!(key_out.status.code(), Some(0));
-    assert_eq!(
-        String::from_utf8_lossy(&key_out.stdout).trim(),
-        "Key set done."
+    // 3. vault ls (non-JSON): no raw JSON, no emoji
+    let out_vault_ls = sandbox.cmd().args(["vault", "ls"]).output().unwrap();
+    assert_eq!(out_vault_ls.status.code(), Some(0));
+    let vault_ls_stdout = String::from_utf8_lossy(&out_vault_ls.stdout);
+    assert!(
+        vault_ls_stdout.starts_with("Default keyring slot: "),
+        "unexpected vault ls stdout: {vault_ls_stdout}"
     );
-
-    let out_key_del = sandbox.cmd().args(["key", "del"]).output().unwrap();
-    assert_eq!(out_key_del.status.code(), Some(0));
-    assert_eq!(
-        String::from_utf8_lossy(&out_key_del.stdout).trim(),
-        "Key delete done."
-    );
+    assert!(!vault_ls_stdout.contains("☀️"));
 
     // 4. vault init, passwd, recover (non-JSON)
     let mut vault_child = sandbox
@@ -199,7 +183,7 @@ files = "hello.txt"
     // Error output in non-JSON mode colors `Error:` (Red 9 + Bold) and `Hint:` (Blue 12 + Bold)
     let err_out = sandbox
         .cmd()
-        .args(["check", "--group", "nonexistent"])
+        .args(["check", "nonexistent"])
         .output()
         .unwrap();
     assert_eq!(err_out.status.code(), Some(2));

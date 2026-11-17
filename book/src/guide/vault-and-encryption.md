@@ -90,20 +90,14 @@ hosts.yml enc
 
 ## 4. OS Keyring Integration
 
-Store your master passphrase in your operating system's native credential manager (macOS Keychain, Linux Secret Service / Keyutils, Windows Credential Manager) so `import`, `export`, and `tidy` run without prompting every time. Keys are isolated per `vault_id` (so multiple independent repositories with distinct passphrases coexist without conflict), with automatic fallback to the global `default` slot:
+Dotler automatically provisions your master passphrase in your operating system's native credential manager (macOS Keychain, Linux Secret Service / Keyutils, Windows Credential Manager) at vault and repository lifecycle boundaries (`dotler init`, `dotler vault init`, `dotler vault from`, `dotler vault passwd`, `dotler vault recover`) so `import`, `export`, and `tidy` run without prompting every time. Keys are isolated per `vault_id` (so multiple independent repositories with distinct passphrases coexist without conflict), with automatic fallback to the global `default` slot:
 
 ```sh
 # Inspect vault_id and OS keyring readiness across registered repositories
-dotler key ls
+dotler vault ls
 
-# Save passphrase to OS keyring (scoped to the active repository's vault_id, or default slot outside a repo)
-dotler key set
-
-# Remove passphrase for the active repository's vault_id from OS keyring
-dotler key del
-
-# Remove all dotler keyring entries across all registered vaults and the default slot
-dotler key del --all
+# Register an already-initialized repository's vault passphrase in your OS keyring
+dotler vault init
 ```
 
 ## 5. Passphrase Rotation & Mnemonic Recovery

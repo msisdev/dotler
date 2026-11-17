@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 
 pub use crate::cli::render::{
-    ExportReport, InlineRender, KeyLsReport, KeyRepoStatusEntry, KeyReport, UpdateReport,
-    VaultFromReport, VaultInitReport, VaultRecoverReport, styled_error_label, styled_hint_label,
+    ExportReport, InlineRender, UpdateReport, VaultFromReport, VaultInitReport, VaultLsReport,
+    VaultRecoverReport, VaultRepoStatusEntry, styled_error_label, styled_hint_label,
 };
 pub use crate::core::vault_loader::VaultPasswdReport;
 
@@ -256,12 +256,12 @@ impl CliError {
                 actual,
             }) => {
                 format!(
-                    "Encrypted file vault_id ('{actual}') does not match dotler.toml ('{expected}'). Run 'dotler key ls' to inspect repository vaults or 'dotler vault from file <repo>' to unify vault keys."
+                    "Encrypted file vault_id ('{actual}') does not match dotler.toml ('{expected}'). Run 'dotler vault ls' to inspect repository vaults or 'dotler vault from file <repo>' to unify vault keys."
                 )
             }
             CliError::Keyring(
                 crate::crypto::keyring::KeyringError::PassphraseRequiredInNonInteractiveMode,
-            ) => "Passphrase required. Run 'dotler key set' to register in keyring or export DOTLER_PASSPHRASE.".to_string(),
+            ) => "Passphrase required. Run 'dotler vault init' to register in keyring or export DOTLER_PASSPHRASE.".to_string(),
             CliError::Args(msg) => format!("Correct argument usage: {msg}"),
             _ => "Review command syntax and local configuration.".to_string(),
         }

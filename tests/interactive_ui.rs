@@ -442,7 +442,7 @@ fn test_unknown_group_returns_exit_code_2_for_status_import_and_export() {
     let sandbox = InteractiveSandbox::new();
 
     for args in [
-        vec!["status", "--group", "nonexistent"],
+        vec!["status", "nonexistent"],
         vec!["import", "nonexistent", "-y"],
         vec!["export", "nonexistent", "-y"],
     ] {

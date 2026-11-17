@@ -538,13 +538,13 @@ fn test_e2e_vault_init_import_from_git_url_and_local_sources() {
     );
 
     // Run `dotler vault from file origin` (different passphrase via DOTLER_PASSPHRASE vs keyring/existing)
-    // Put existing-old-pass in OS keyring via `key set` first, then supply origin pass via DOTLER_PASSPHRASE.
+    // Register existing-old-pass in OS keyring via `vault init --password-stdin` first, then supply origin pass via DOTLER_PASSPHRASE.
     let key_set_child = Command::new(env!("CARGO_BIN_EXE_dotler"))
         .env("HOME", &home_dir)
         .env("DOTLER_MOCK_KEYRING", "1")
         .env_remove("DOTLER_PASSPHRASE")
         .current_dir(&repo_existing)
-        .args(["key", "set", "--password-stdin", "--json"])
+        .args(["vault", "init", "--password-stdin", "--json"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -643,11 +643,11 @@ fn test_e2e_vault_init_import_from_git_url_and_local_sources() {
         Some(0)
     );
 
-    // 6. Test `dotler key ls --json`
-    let key_ls_out = run_dotler(&repo_origin, &["key", "ls", "--json"], None);
+    // 6. Test `dotler vault ls --json`
+    let key_ls_out = run_dotler(&repo_origin, &["vault", "ls", "--json"], None);
     assert_eq!(key_ls_out.status.code(), Some(0));
     let key_ls_json: serde_json::Value = serde_json::from_slice(&key_ls_out.stdout).unwrap();
-    assert_eq!(key_ls_json["command"], "key ls");
+    assert_eq!(key_ls_json["command"], "vault ls");
     assert_eq!(key_ls_json["data"]["use_keyring"], true);
     assert!(!key_ls_json["data"]["repos"].as_array().unwrap().is_empty());
 }

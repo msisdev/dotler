@@ -6,14 +6,14 @@ use std::path::Path;
 use crate::agent::briefing::render_briefing;
 use crate::cli::observer::execute_with_observer;
 use crate::cli::output::{EXIT_SUCCESS, ExportReport, render_success_to};
-use crate::cli::vault::{handle_key, handle_vault};
+use crate::cli::vault::{ensure_repo_vault_in_keyring, handle_vault};
 use crate::config::local::{LOCAL_CONFIG_FILE, LocalConfig, expand_tilde, get_local_config};
-use crate::config::repo::OsInfo;
+use crate::config::repo::{OsInfo, RepoConfig};
 use crate::config::state::{DOTLER_LOCK_PATH, DotlerLockGuard, get_lock};
 use crate::core::context::CoreContext;
 use crate::crypto::keyring::OsKeyring;
 use crate::engine::EngineError;
-use crate::engine::check::{run_check, run_init, run_status};
+use crate::engine::check::{CheckReport, run_check, run_init, run_status};
 use crate::engine::remote::{
     GroupSelector, run_git_clone, run_git_install, run_git_ls, run_git_uninstall,
 };
@@ -22,9 +22,9 @@ use crate::engine::tidy::{TidyOrphanPolicy, run_tidy};
 
 pub use crate::cli::args::{
     AiArgs, CheckArgs, Cli, Command, ExportArgs, GitCloneArgs, GitCommand, GitInstallArgs,
-    GitLsArgs, GitUninstallArgs, ImportArgs, InitArgs, KeyCommand, KeyDelArgs, KeyLsArgs,
-    KeySetArgs, McpArgs, StatusArgs, TidyArgs, UpdateArgs, VaultCommand, VaultFromCommand,
-    VaultFromSourceArgs, VaultInitArgs, VaultPasswdArgs, VaultRecoverArgs,
+    GitLsArgs, GitUninstallArgs, ImportArgs, InitArgs, McpArgs, StatusArgs, TidyArgs, UpdateArgs,
+    VaultCommand, VaultFromCommand, VaultFromSourceArgs, VaultInitArgs, VaultLsArgs,
+    VaultPasswdArgs, VaultRecoverArgs,
 };
 
 /// Dispatches parsed CLI commands to domain workflows under lock protection.
@@ -55,7 +55,6 @@ pub fn dispatch<W1: Write, W2: Write>(
         Command::Vault { command } => {
             handle_vault(command, cli, is_interactive, stdout, lock_guard)
         }
-        Command::Key { command } => handle_key(command, cli, is_interactive, stdout, lock_guard),
         Command::Ai(_) => handle_ai(cli, stdout, lock_guard),
         Command::Update(args) => handle_update(args, cli, is_interactive, stdout, lock_guard),
         Command::Mcp(_) => unreachable!(),
@@ -70,6 +69,22 @@ fn handle_init<W: Write>(
     lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
     let mut ctx = CoreContext::new(cli.repo.clone(), cli.device.clone(), is_interactive);
+    let repo_dir = match &args.repo_path {
+        Some(p) => p.clone(),
+        None => std::env::current_dir()?,
+    };
+    let manifest_path = repo_dir.join("dotler.toml");
+    if manifest_path.is_file() {
+        let existing_cfg = RepoConfig::load_without_vault_check(&manifest_path)?;
+        if let Some(ref vault_cfg) = existing_cfg.vault {
+            let use_keyring = ctx
+                .local_config
+                .get()
+                .map(|c| c.use_keyring)
+                .unwrap_or(true);
+            ensure_repo_vault_in_keyring(vault_cfg, use_keyring, args.password_stdin, is_interactive)?;
+        }
+    }
     let report = run_init(
         &mut ctx,
         crate::engine::check::InitParams {
@@ -110,7 +125,7 @@ fn handle_git<W: Write>(
                 .unwrap_or("dotfiles");
             let dest = std::env::current_dir()?.join(repo_name);
             let cfg_path = expand_tilde(LOCAL_CONFIG_FILE);
-            let dry_run = args.dry_run || cli.dry_run;
+            let dry_run = cli.dry_run;
             execute_with_observer(
                 stdout,
                 "git clone",
@@ -139,7 +154,7 @@ fn handle_git<W: Write>(
             let dev_override = args.device.clone().or_else(|| cli.device.clone());
             let ctx = CoreContext::new(cli.repo.clone(), dev_override, is_interactive);
             let override_path = args.path.first().map(Path::new);
-            let dry_run = args.dry_run || cli.dry_run;
+            let dry_run = cli.dry_run;
             execute_with_observer(
                 stdout,
                 "git install",
@@ -164,7 +179,7 @@ fn handle_git<W: Write>(
         }
         GitCommand::Uninstall(args) => {
             let ctx = CoreContext::new(cli.repo.clone(), cli.device.clone(), is_interactive);
-            let dry_run = args.dry_run || cli.dry_run;
+            let dry_run = cli.dry_run;
             execute_with_observer(
                 stdout,
                 "git uninstall",
@@ -187,7 +202,17 @@ fn handle_check<W: Write>(
     lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
     let ctx = CoreContext::new(cli.repo.clone(), cli.device.clone(), is_interactive);
-    let report = run_check(&ctx, args.group.as_deref(), lock)?;
+    let report = if args.groups.is_empty() {
+        run_check(&ctx, None, lock)?
+    } else {
+        for g in &args.groups {
+            run_check(&ctx, Some(g), lock)?;
+        }
+        CheckReport {
+            status: "valid".to_string(),
+            groups_checked: args.groups.len(),
+        }
+    };
     Ok(render_success_to(stdout, "check", &report, cli.json))
 }
 
@@ -199,7 +224,16 @@ fn handle_status<W: Write>(
     lock: &DotlerLockGuard,
 ) -> Result<i32, EngineError> {
     let ctx = CoreContext::new(cli.repo.clone(), cli.device.clone(), is_interactive);
-    let plans = run_status(&ctx, args.group.as_deref(), lock)?;
+    let plans = if args.groups.is_empty() {
+        run_status(&ctx, None, lock)?
+    } else {
+        let mut all_plans = Vec::new();
+        for g in &args.groups {
+            all_plans.extend(run_status(&ctx, Some(g), lock)?);
+        }
+        all_plans.sort_by(|a, b| a.target_os_path.cmp(&b.target_os_path));
+        all_plans
+    };
     Ok(render_success_to(stdout, "status", &plans, cli.json))
 }
 
@@ -212,7 +246,7 @@ fn handle_import<W: Write>(
 ) -> Result<i32, EngineError> {
     let ctx = CoreContext::new(cli.repo.clone(), cli.device.clone(), is_interactive);
     let groups = args.resolved_groups();
-    let dry_run = args.dry_run || cli.dry_run;
+    let dry_run = cli.dry_run;
     execute_with_observer(
         stdout,
         "import",
@@ -234,7 +268,7 @@ fn handle_export<W: Write>(
 ) -> Result<i32, EngineError> {
     let ctx = CoreContext::new(cli.repo.clone(), cli.device.clone(), is_interactive);
     let groups = args.resolved_groups();
-    let dry_run = args.dry_run || cli.dry_run;
+    let dry_run = cli.dry_run;
     execute_with_observer(
         stdout,
         "export",
@@ -261,7 +295,7 @@ fn handle_tidy<W: Write>(
     } else {
         TidyOrphanPolicy::KeepOnOs
     };
-    let dry_run = args.dry_run || cli.dry_run;
+    let dry_run = cli.dry_run;
     execute_with_observer(
         stdout,
         "tidy",

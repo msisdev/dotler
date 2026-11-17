@@ -81,16 +81,10 @@ pub enum Command {
     /// Format conversion (foo <-> foo.enc) and orphan cleanup
     Tidy(TidyArgs),
 
-    /// Manage repository encryption vault slots
+    /// Manage repository encryption vault slots and OS keyring readiness
     Vault {
         #[command(subcommand)]
         command: VaultCommand,
-    },
-
-    /// Manage device OS keyring passphrase storage
-    Key {
-        #[command(subcommand)]
-        command: KeyCommand,
     },
 
     /// Render one-shot AI briefing markdown
@@ -116,6 +110,12 @@ pub struct InitArgs {
         help = "Target directory path for repository initialization"
     )]
     pub repo_path: Option<PathBuf>,
+
+    #[arg(
+        long = "password-stdin",
+        help = "Read passphrase from standard input when registering an existing vault"
+    )]
+    pub password_stdin: bool,
 }
 
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
@@ -161,9 +161,6 @@ pub struct GitCloneArgs {
 
     #[arg(short = 'a', long = "all", help = "Show all files in preview")]
     pub all: bool,
-
-    #[arg(long = "dry-run", help = "Simulate clone without writing changes")]
-    pub dry_run: bool,
 }
 
 #[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
@@ -192,12 +189,6 @@ pub struct GitInstallArgs {
 
     #[arg(short = 'a', long = "all", help = "Show all files in preview")]
     pub all: bool,
-
-    #[arg(
-        long = "dry-run",
-        help = "Simulate installation without writing changes"
-    )]
-    pub dry_run: bool,
 }
 
 #[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
@@ -210,40 +201,24 @@ pub struct GitUninstallArgs {
 
     #[arg(short = 'a', long = "all", help = "Show all files in preview")]
     pub all: bool,
-
-    #[arg(long, help = "Simulate rollback without restoring files")]
-    pub dry_run: bool,
 }
 
 #[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
 pub struct CheckArgs {
-    #[arg(short, long, help = "Specific group to validate")]
-    pub group: Option<String>,
+    #[arg(help = "Positional group names to validate")]
+    pub groups: Vec<String>,
 }
 
 #[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
 pub struct StatusArgs {
-    #[arg(short, long, help = "Specific group to inspect")]
-    pub group: Option<String>,
-}
-
-fn merge_group_args(groups: &[String], group: Option<&String>) -> Vec<String> {
-    let mut list = groups.to_vec();
-    if let Some(g) = group
-        && !list.contains(g)
-    {
-        list.push(g.clone());
-    }
-    list
+    #[arg(help = "Positional group names to inspect")]
+    pub groups: Vec<String>,
 }
 
 #[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
 pub struct ImportArgs {
     #[arg(help = "Positional group names to import")]
     pub groups: Vec<String>,
-
-    #[arg(short, long, help = "Group name flag to import")]
-    pub group: Option<String>,
 
     #[arg(short, long, help = "Force overwrite repository files")]
     pub force: bool,
@@ -253,14 +228,11 @@ pub struct ImportArgs {
 
     #[arg(short = 'a', long = "all", help = "Show all files in preview")]
     pub all: bool,
-
-    #[arg(long, help = "Simulate import without modifying repository")]
-    pub dry_run: bool,
 }
 
 impl ImportArgs {
     pub fn resolved_groups(&self) -> Vec<String> {
-        merge_group_args(&self.groups, self.group.as_ref())
+        self.groups.clone()
     }
 }
 
@@ -268,9 +240,6 @@ impl ImportArgs {
 pub struct ExportArgs {
     #[arg(help = "Positional group names to export")]
     pub groups: Vec<String>,
-
-    #[arg(short, long, help = "Group name flag to export")]
-    pub group: Option<String>,
 
     #[arg(short, long, help = "Force overwrite conflicting OS files")]
     pub force: bool,
@@ -280,14 +249,11 @@ pub struct ExportArgs {
 
     #[arg(short = 'a', long = "all", help = "Show all files in preview")]
     pub all: bool,
-
-    #[arg(long, help = "Simulate export without modifying OS files")]
-    pub dry_run: bool,
 }
 
 impl ExportArgs {
     pub fn resolved_groups(&self) -> Vec<String> {
-        merge_group_args(&self.groups, self.group.as_ref())
+        self.groups.clone()
     }
 }
 
@@ -295,9 +261,6 @@ impl ExportArgs {
 pub struct TidyArgs {
     #[arg(help = "Positional group names to tidy")]
     pub groups: Vec<String>,
-
-    #[arg(short, long, help = "Group name flag to tidy")]
-    pub group: Option<String>,
 
     #[arg(long, help = "Permanently delete orphaned files from OS filesystem")]
     pub purge: bool,
@@ -307,14 +270,11 @@ pub struct TidyArgs {
 
     #[arg(short = 'a', long = "all", help = "Show all files in preview")]
     pub all: bool,
-
-    #[arg(long, help = "Simulate tidy operations without modifying files")]
-    pub dry_run: bool,
 }
 
 impl TidyArgs {
     pub fn resolved_groups(&self) -> Vec<String> {
-        merge_group_args(&self.groups, self.group.as_ref())
+        self.groups.clone()
     }
 }
 
@@ -322,6 +282,9 @@ impl TidyArgs {
 pub enum VaultCommand {
     /// Initialize vault slots and generate 12-word recovery mnemonic
     Init(VaultInitArgs),
+
+    /// List registered repository vaults and OS keyring readiness status
+    Ls(VaultLsArgs),
 
     /// Import existing vault slots from an external source or registered repository
     From {
@@ -335,6 +298,9 @@ pub enum VaultCommand {
     /// Recover vault using 12-word mnemonic and issue new recovery mnemonic
     Recover(VaultRecoverArgs),
 }
+
+#[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
+pub struct VaultLsArgs {}
 
 #[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
 pub struct VaultInitArgs {
@@ -404,37 +370,6 @@ pub struct VaultRecoverArgs {
     pub hint: Option<String>,
 }
 
-#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
-pub enum KeyCommand {
-    /// List registered repository vaults and OS keyring readiness status
-    Ls(KeyLsArgs),
-
-    /// Store passphrase in OS keyring (scoped to active repository vault when available)
-    Set(KeySetArgs),
-
-    /// Delete passphrase from OS keyring
-    Del(KeyDelArgs),
-}
-
-#[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
-pub struct KeyLsArgs {}
-
-#[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
-pub struct KeySetArgs {
-    #[arg(long = "password-stdin", help = "Read passphrase from standard input")]
-    pub password_stdin: bool,
-}
-
-#[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
-pub struct KeyDelArgs {
-    #[arg(
-        short = 'a',
-        long = "all",
-        help = "Delete all stored vault passphrases from OS keyring"
-    )]
-    pub all: bool,
-}
-
 #[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
 pub struct AiArgs {}
 
@@ -479,22 +414,25 @@ mod tests {
     #[test]
     fn test_parse_6_mutating_commands_yes_all_dry_run_flags() {
         let imp = Cli::try_parse_from(["dotler", "import", "-y", "-a", "--dry-run"]).unwrap();
-        assert!(matches!(imp.command, Command::Import(a) if a.yes && a.all && a.dry_run));
+        assert!(imp.dry_run && matches!(imp.command, Command::Import(a) if a.yes && a.all));
 
         let exp = Cli::try_parse_from(["dotler", "export", "-y", "-a", "--dry-run", "-f"]).unwrap();
         assert!(
-            matches!(exp.command, Command::Export(a) if a.yes && a.all && a.dry_run && a.force)
+            exp.dry_run && matches!(exp.command, Command::Export(a) if a.yes && a.all && a.force)
         );
 
         let tidy =
             Cli::try_parse_from(["dotler", "tidy", "-y", "-a", "--dry-run", "--purge"]).unwrap();
-        assert!(matches!(tidy.command, Command::Tidy(a) if a.yes && a.all && a.dry_run && a.purge));
+        assert!(
+            tidy.dry_run && matches!(tidy.command, Command::Tidy(a) if a.yes && a.all && a.purge)
+        );
 
         let clone =
             Cli::try_parse_from(["dotler", "git", "clone", "gh:u/r", "-y", "-a", "--dry-run"])
                 .unwrap();
         assert!(
-            matches!(clone.command, Command::Git { command: GitCommand::Clone(a) } if a.yes && a.all && a.dry_run)
+            clone.dry_run
+                && matches!(clone.command, Command::Git { command: GitCommand::Clone(a) } if a.yes && a.all)
         );
 
         let install = Cli::try_parse_from([
@@ -509,30 +447,33 @@ mod tests {
         ])
         .unwrap();
         assert!(
-            matches!(install.command, Command::Git { command: GitCommand::Install(a) } if a.yes && a.all && a.dry_run)
+            install.dry_run
+                && matches!(install.command, Command::Git { command: GitCommand::Install(a) } if a.yes && a.all)
         );
 
         let uninstall =
             Cli::try_parse_from(["dotler", "git", "uninstall", "-y", "-a", "--dry-run"]).unwrap();
         assert!(
-            matches!(uninstall.command, Command::Git { command: GitCommand::Uninstall(a) } if a.yes && a.all && a.dry_run)
+            uninstall.dry_run
+                && matches!(uninstall.command, Command::Git { command: GitCommand::Uninstall(a) } if a.yes && a.all)
         );
     }
 
     #[test]
-    fn test_parse_12_subcommands_syntax() {
+    fn test_parse_11_subcommands_syntax() {
         for argv in [
             vec!["dotler", "init"],
             vec!["dotler", "git", "ls", "gh:user/dot"],
             vec!["dotler", "check"],
+            vec!["dotler", "check", "shell", "nvim"],
             vec!["dotler", "status"],
+            vec!["dotler", "status", "shell", "nvim"],
             vec!["dotler", "import"],
             vec!["dotler", "export"],
             vec!["dotler", "tidy"],
             vec!["dotler", "vault", "init"],
+            vec!["dotler", "vault", "ls"],
             vec!["dotler", "vault", "from", "file", "main"],
-            vec!["dotler", "key", "ls"],
-            vec!["dotler", "key", "set"],
             vec!["dotler", "ai"],
             vec!["dotler", "mcp"],
             vec!["dotler", "update"],
@@ -617,29 +558,16 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_key_del_all_flag() {
-        let bare = Cli::try_parse_from(["dotler", "key", "del"]).unwrap();
-        assert!(matches!(
-            bare.command,
-            Command::Key {
-                command: KeyCommand::Del(KeyDelArgs { all: false })
-            }
-        ));
-
-        let long_all = Cli::try_parse_from(["dotler", "key", "del", "--all"]).unwrap();
-        assert!(matches!(
-            long_all.command,
-            Command::Key {
-                command: KeyCommand::Del(KeyDelArgs { all: true })
-            }
-        ));
-
-        let short_all = Cli::try_parse_from(["dotler", "key", "del", "-a"]).unwrap();
-        assert!(matches!(
-            short_all.command,
-            Command::Key {
-                command: KeyCommand::Del(KeyDelArgs { all: true })
-            }
-        ));
+    fn test_reject_removed_commands_and_group_flags() {
+        assert!(Cli::try_parse_from(["dotler", "key", "ls"]).is_err());
+        assert!(Cli::try_parse_from(["dotler", "key", "set"]).is_err());
+        assert!(Cli::try_parse_from(["dotler", "key", "del"]).is_err());
+        assert!(Cli::try_parse_from(["dotler", "vault", "set"]).is_err());
+        assert!(Cli::try_parse_from(["dotler", "vault", "del"]).is_err());
+        assert!(Cli::try_parse_from(["dotler", "check", "-g", "shell"]).is_err());
+        assert!(Cli::try_parse_from(["dotler", "status", "-g", "shell"]).is_err());
+        assert!(Cli::try_parse_from(["dotler", "import", "-g", "shell"]).is_err());
+        assert!(Cli::try_parse_from(["dotler", "export", "-g", "shell"]).is_err());
+        assert!(Cli::try_parse_from(["dotler", "tidy", "-g", "shell"]).is_err());
     }
 }

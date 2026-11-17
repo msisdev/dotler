@@ -37,7 +37,7 @@ fn test_e2e_json_output_envelope_invariant() {
     // 2. Error output under --json must be pure JsonErrorPayload
     let err_out = sandbox
         .cmd()
-        .args(["check", "--group", "non_existent_group", "--json"])
+        .args(["check", "non_existent_group", "--json"])
         .output()
         .unwrap();
 
@@ -258,23 +258,13 @@ fn test_e2e_all_12_subcommands_clean_execution() {
     let out_tidy = sandbox.cmd().arg("tidy").output().unwrap();
     assert_eq!(out_tidy.status.code(), Some(0), "tidy must succeed");
 
-    // 7. key set & del
-    let mut key_child = sandbox
-        .cmd()
-        .args(["key", "set", "--password-stdin"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    if let Some(mut stdin) = key_child.stdin.take() {
-        writeln!(stdin, "master_password_passphrase_12345").unwrap();
-    }
-    let key_out = key_child.wait_with_output().unwrap();
-    assert_eq!(key_out.status.code(), Some(0), "key set must succeed");
-
-    let out_key_del = sandbox.cmd().args(["key", "del"]).output().unwrap();
-    assert_eq!(out_key_del.status.code(), Some(0), "key del must succeed");
+    // 7. vault ls
+    let out_vault_ls = sandbox.cmd().args(["vault", "ls"]).output().unwrap();
+    assert_eq!(
+        out_vault_ls.status.code(),
+        Some(0),
+        "vault ls must succeed"
+    );
 
     // 8. vault init, passwd, recover
     let mut vault_child = sandbox

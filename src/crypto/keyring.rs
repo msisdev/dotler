@@ -25,7 +25,7 @@ impl std::fmt::Display for KeyringError {
             Self::BackendError(msg) => write!(f, "Keyring backend error: {msg}"),
             Self::PassphraseRequiredInNonInteractiveMode => write!(
                 f,
-                "Passphrase required in non-interactive mode. Please register password using 'dotler key set' or export DOTLER_PASSPHRASE"
+                "Passphrase required in non-interactive mode. Please register password using 'dotler vault init' or export DOTLER_PASSPHRASE"
             ),
             Self::PromptCancelled => write!(f, "Terminal prompt cancelled or unavailable"),
             Self::Io(e) => write!(f, "I/O error: {e}"),

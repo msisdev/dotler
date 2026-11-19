@@ -10,7 +10,7 @@ use crate::config::local::{WalkDir, expand_tilde};
 use crate::config::repo::{
     GroupConfig, SelectionMode, SelectionRule, evaluate_selection, parse_selection_rules,
     render_home_template, resolve_group_target_path, unrender_home_template,
-    validate_dir_no_symlinks, validate_os_dir_path, validate_os_target_path,
+    validate_dir_no_symlinks, validate_os_dir_path, validate_os_target_path, validate_rule_pattern,
 };
 use crate::config::state::{DotlerLockGuard, TMP_FILE_PREFIX};
 use crate::core::context::CoreContext;
@@ -18,7 +18,7 @@ use crate::core::vault_loader::{
     has_encrypted_repo_files, has_encrypted_rules, unlock_vault_if_needed,
 };
 use crate::crypto::ExposeSecret;
-use crate::crypto::vault::EncryptedFile;
+use crate::crypto::vault::{EncryptedFile, FullEncryptedFile};
 use crate::engine::EngineError;
 use crate::engine::sync::SyncEngine;
 
@@ -45,6 +45,8 @@ pub struct FileActionPlan {
     pub repo_file_path: PathBuf,
     pub status: FileSyncStatus,
     pub is_encrypted: bool,
+    #[serde(default)]
+    pub is_full_encrypted: bool,
     #[serde(default)]
     pub is_template: bool,
     pub os_hash: Option<String>,
@@ -187,6 +189,18 @@ fn collect_repo_and_db_candidates(
             }
             if let Ok(rel) = entry.path().strip_prefix(group_repo_dir) {
                 let rel_str = rel.to_string_lossy().to_string();
+                if rel_str.ends_with(".fenc") {
+                    let fname = entry.file_name().to_string_lossy().to_string();
+                    if let Some(key) = engine.vault_key
+                        && let Ok(bytes) = fs::read(entry.path())
+                        && let Ok(fenc) = FullEncryptedFile::from_bytes(&bytes)
+                        && let Ok((dec_rel, _)) = key.decrypt_full_file(&fname, &fenc)
+                    {
+                        validate_rule_pattern(&dec_rel)?;
+                        candidates.insert(dec_rel);
+                    }
+                    continue;
+                }
                 let clean = rel_str
                     .strip_suffix(".enc")
                     .map(str::to_string)
@@ -321,6 +335,7 @@ fn build_file_plan(
             target_os_path,
             status: FileSyncStatus::Orphaned,
             is_encrypted: false,
+            is_full_encrypted: false,
             is_template: false,
             os_hash: None,
             repo_hash: None,
@@ -328,11 +343,16 @@ fn build_file_plan(
         }));
     }
 
+    let mode_val = mode.unwrap();
     validate_os_target_path(&target_os_path, home_dir)?;
-    let is_encrypted = mode.is_some_and(|m| m.is_encrypted());
-    let is_template = mode.is_some_and(|m| m.is_template());
+    let is_encrypted = mode_val.is_encrypted();
+    let is_full_encrypted = mode_val.is_full_encrypted();
+    let is_template = mode_val.is_template();
     let plain_repo_path = group_repo_dir.join(&rel_path);
     let enc_repo_path = group_repo_dir.join(format!("{rel_path}.enc"));
+    let full_enc_repo_path = engine
+        .vault_key
+        .map(|k| group_repo_dir.join(k.derive_full_enc_filename(&rel_path)));
 
     let os_bytes = fs::read(&target_os_path).ok();
     if is_template && let Some(ref bytes) = os_bytes {
@@ -346,13 +366,16 @@ fn build_file_plan(
         engine,
         home_dir,
         &rel_path,
-        is_encrypted,
+        mode_val,
         is_template,
         &plain_repo_path,
         &enc_repo_path,
+        full_enc_repo_path.as_deref(),
     )?;
 
-    let chosen_repo_path = if is_encrypted {
+    let chosen_repo_path = if is_full_encrypted {
+        full_enc_repo_path.unwrap_or_else(|| group_repo_dir.join("<locked>.fenc"))
+    } else if is_encrypted {
         enc_repo_path
     } else {
         plain_repo_path
@@ -367,6 +390,7 @@ fn build_file_plan(
         repo_file_path: chosen_repo_path,
         status,
         is_encrypted,
+        is_full_encrypted,
         is_template,
         os_hash,
         repo_hash,
@@ -379,13 +403,41 @@ fn compute_repo_hash_and_mismatch(
     engine: &SyncEngine,
     home_dir: &Path,
     rel_path: &str,
-    is_encrypted: bool,
+    mode: SelectionMode,
     is_template: bool,
     plain_repo_path: &Path,
     enc_repo_path: &Path,
+    full_enc_repo_path: Option<&Path>,
 ) -> Result<(Option<String>, bool), EngineError> {
-    if is_encrypted {
-        if plain_repo_path.is_file() && !enc_repo_path.is_file() {
+    let fenc_exists = full_enc_repo_path.is_some_and(Path::is_file);
+
+    if mode.is_full_encrypted() {
+        if (plain_repo_path.is_file() || enc_repo_path.is_file()) && !fenc_exists {
+            return Ok((None, true));
+        }
+        if let (Some(key), Some(fenc_path)) = (engine.vault_key, full_enc_repo_path)
+            && fenc_path.is_file()
+            && let Some(fname) = fenc_path.file_name().and_then(|s| s.to_str())
+            && let Ok(bytes) = fs::read(fenc_path)
+            && let Ok(fenc_file) = FullEncryptedFile::from_bytes(&bytes)
+            && let Ok((dec_rel, plain)) = key.decrypt_full_file(fname, &fenc_file)
+            && dec_rel == rel_path
+        {
+            return Ok((
+                Some(hash_maybe_template(
+                    plain.expose_secret(),
+                    is_template,
+                    home_dir,
+                    rel_path,
+                )?),
+                false,
+            ));
+        }
+        return Ok((None, false));
+    }
+
+    if mode.is_content_encrypted() {
+        if (plain_repo_path.is_file() || fenc_exists) && !enc_repo_path.is_file() {
             return Ok((None, true));
         }
         if enc_repo_path.is_file()
@@ -407,7 +459,7 @@ fn compute_repo_hash_and_mismatch(
         return Ok((None, false));
     }
 
-    if enc_repo_path.is_file() && !plain_repo_path.is_file() {
+    if (enc_repo_path.is_file() || fenc_exists) && !plain_repo_path.is_file() {
         return Ok((None, true));
     }
     if plain_repo_path.is_file()

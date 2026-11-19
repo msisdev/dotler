@@ -16,7 +16,7 @@ use crate::config::state::{DotlerLockGuard, StateDb, SyncedFileRecord};
 use crate::core::context::CoreContext;
 use crate::core::vault_loader::{has_encrypted_rules, unlock_vault_if_needed};
 use crate::crypto::ExposeSecret;
-use crate::crypto::vault::{EncryptedFile, VaultKey};
+use crate::crypto::vault::{EncryptedFile, FullEncryptedFile, VaultKey};
 use crate::engine::EngineError;
 pub use crate::engine::check::{FileActionPlan, FileSyncStatus, plan};
 pub use crate::engine::export::{export_files, run_export};
@@ -204,9 +204,11 @@ impl<'a> SyncEngine<'a> {
                     && plan.status == FileSyncStatus::MissingLocally
                     && plan.db_hash.is_some()
                 {
-                    let (plain_path, enc_path) = repo_paths_for_plan(plan);
+                    let counterparts = all_repo_paths_for_plan(self, plan);
                     let mut repo_paths_to_remove = Vec::new();
-                    for candidate in [&plan.repo_file_path, &plain_path, &enc_path] {
+                    for candidate in
+                        std::iter::once(&plan.repo_file_path).chain(counterparts.iter())
+                    {
                         if is_symlink(candidate) {
                             return Err(EngineError::HardBlockedPath {
                                 path: candidate.clone(),
@@ -253,14 +255,11 @@ impl<'a> SyncEngine<'a> {
             };
             let repo_payload_hash = blake3::hash(&repo_payload_bytes).to_hex().to_string();
             let can_skip = can_skip_import(self, plan, &os_hash, &repo_payload_hash, force)?;
-            let (plain_counterpart, enc_counterpart) = repo_paths_for_plan(plan);
+            let counterparts = all_repo_paths_for_plan(self, plan);
 
             let repo_action = if can_skip {
                 PlanActionKind::Okay
-            } else if plan.repo_file_path.is_file()
-                || plain_counterpart.is_file()
-                || enc_counterpart.is_file()
-            {
+            } else if plan.repo_file_path.is_file() || counterparts.iter().any(|p| p.is_file()) {
                 PlanActionKind::Overwrite
             } else {
                 PlanActionKind::Create
@@ -396,19 +395,16 @@ impl<'a> SyncEngine<'a> {
     }
 }
 
-fn repo_paths_for_plan(plan: &FileActionPlan) -> (PathBuf, PathBuf) {
-    if plan.is_encrypted {
-        let plain = plan
-            .repo_file_path
-            .to_str()
-            .and_then(|s| s.strip_suffix(".enc"))
-            .map(PathBuf::from)
-            .unwrap_or_else(|| plan.repo_file_path.with_extension(""));
-        (plain, plan.repo_file_path.clone())
-    } else {
-        let enc = PathBuf::from(format!("{}.enc", plan.repo_file_path.display()));
-        (plan.repo_file_path.clone(), enc)
+fn all_repo_paths_for_plan(engine: &SyncEngine, plan: &FileActionPlan) -> Vec<PathBuf> {
+    let group_repo_dir = engine.repo_dir.join(&plan.group_name);
+    let mut paths = vec![
+        group_repo_dir.join(&plan.relative_path),
+        group_repo_dir.join(format!("{}.enc", plan.relative_path)),
+    ];
+    if let Some(key) = engine.vault_key {
+        paths.push(group_repo_dir.join(key.derive_full_enc_filename(&plan.relative_path)));
     }
+    paths
 }
 
 fn can_skip_import(
@@ -427,6 +423,18 @@ fn can_skip_import(
         }
         if plan.db_hash.as_deref() == Some(os_hash) {
             return Ok(true);
+        }
+        if plan.is_full_encrypted {
+            if let Some(fname) = plan.repo_file_path.file_name().and_then(|s| s.to_str())
+                && let Ok(fenc_bytes) = fs::read(&plan.repo_file_path)
+                && let Ok(fenc_file) = FullEncryptedFile::from_bytes(&fenc_bytes)
+                && let Ok((dec_rel, decrypted)) = vault_key.decrypt_full_file(fname, &fenc_file)
+                && dec_rel == plan.relative_path
+            {
+                return Ok(blake3::hash(decrypted.expose_secret()).to_hex().to_string()
+                    == repo_payload_hash);
+            }
+            return Ok(false);
         }
         if let Ok(enc_bytes) = fs::read(&plan.repo_file_path)
             && let Ok(enc_file) = EncryptedFile::from_bytes(&enc_bytes)
@@ -455,20 +463,28 @@ fn write_import_payload(
     plan: &FileActionPlan,
     repo_payload_bytes: &[u8],
 ) -> Result<(), EngineError> {
-    let (plain_counterpart, enc_counterpart) = repo_paths_for_plan(plan);
-    if plan.is_encrypted {
+    let counterparts = all_repo_paths_for_plan(engine, plan);
+    if plan.is_full_encrypted {
+        let vault_key = engine.vault_key.ok_or_else(|| EngineError::VaultLocked {
+            reason: "encrypted files detected but no vault key was provided".into(),
+        })?;
+        let (_, fenc) = vault_key.encrypt_full_file(&plan.relative_path, repo_payload_bytes)?;
+        write_file_safe(&plan.repo_file_path, &fenc.to_bytes())?;
+    } else if plan.is_encrypted {
         let vault_key = engine.vault_key.ok_or_else(|| EngineError::VaultLocked {
             reason: "encrypted files detected but no vault key was provided".into(),
         })?;
         let enc = vault_key.encrypt_file(repo_payload_bytes)?;
         write_file_safe(&plan.repo_file_path, &enc.to_bytes())?;
-        if plain_counterpart != plan.repo_file_path && plain_counterpart.is_file() {
-            let _ = fs::remove_file(plain_counterpart);
-        }
     } else {
         write_file_safe(&plan.repo_file_path, repo_payload_bytes)?;
-        if enc_counterpart != plan.repo_file_path && enc_counterpart.is_file() {
-            let _ = fs::remove_file(enc_counterpart);
+    }
+
+    let group_repo_dir = engine.repo_dir.join(&plan.group_name);
+    for other in counterparts {
+        if other != plan.repo_file_path && other.is_file() {
+            let _ = fs::remove_file(&other);
+            prune_empty_parent_dirs(&other, &group_repo_dir);
         }
     }
     Ok(())

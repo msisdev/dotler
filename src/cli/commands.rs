@@ -114,12 +114,19 @@ fn handle_check<W: Write>(
     let report = if args.groups.is_empty() {
         run_check(&ctx, None, lock)?
     } else {
+        let mut warnings = Vec::new();
         for g in &args.groups {
-            run_check(&ctx, Some(g), lock)?;
+            let sub = run_check(&ctx, Some(g), lock)?;
+            for w in sub.warnings {
+                if !warnings.contains(&w) {
+                    warnings.push(w);
+                }
+            }
         }
         CheckReport {
             status: "valid".to_string(),
             groups_checked: args.groups.len(),
+            warnings,
         }
     };
     Ok(render_success_to(stdout, "check", &report, cli.json))

@@ -156,17 +156,23 @@ impl InlineRender for crate::engine::check::InitReport {
 
 impl InlineRender for crate::engine::check::CheckReport {
     fn render_inline(&self) -> String {
-        format!("☀️ Config is ok. ({} groups)", self.groups_checked)
+        let mut out = format!("☀️ Config is ok. ({} groups)", self.groups_checked);
+        for warning in &self.warnings {
+            out.push_str(&format!("\n{} {}", styled_hint_label(), warning));
+        }
+        out
     }
 }
 
 impl InlineRender for crate::engine::sync::FileActionPlan {
     fn render_inline(&self) -> String {
-        let mode_label = match (self.is_encrypted, self.is_template) {
-            (true, true) => "encrypted+template",
-            (true, false) => "encrypted",
-            (false, true) => "template",
-            (false, false) => "plain",
+        let mode_label = match (self.is_full_encrypted, self.is_encrypted, self.is_template) {
+            (true, _, true) => "full-encrypted+template",
+            (true, _, false) => "full-encrypted",
+            (false, true, true) => "encrypted+template",
+            (false, true, false) => "encrypted",
+            (false, false, true) => "template",
+            (false, false, false) => "plain",
         };
         format!(
             "[{}] {} -> {:?} ({})",
@@ -454,6 +460,7 @@ pub(crate) mod tests {
         let check_rep = crate::engine::check::CheckReport {
             status: "valid".into(),
             groups_checked: 3,
+            warnings: vec![],
         };
         assert_eq!(check_rep.render_inline(), "☀️ Config is ok. (3 groups)");
 

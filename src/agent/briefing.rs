@@ -62,9 +62,10 @@ pub const SHARED_OPERATIONAL_GUIDE: &str = r#"## 2. Group Layout & Selection Rul
 - Selection Rules (Allowlist by Default, Last-Match-Wins):
   - Unmatched files are ignored by default. Do NOT prepend `!*` when picking specific files, and NEVER use `*` on `~`.
   - `<pattern>`: Include matching file or directory as plaintext.
-  - `<pattern> enc`: Include matching file or directory encrypted with XChaCha20-Poly1305 (`.enc`).
+  - `<pattern> enc` (or `<pattern> enc=cont`): Include matching file or directory with content-only XChaCha20-Poly1305 encryption (`<rel_path>.enc`).
+  - `<pattern> enc=full`: Include matching file or directory with full path + content encryption (`<group>/<32-hex>.fenc`), hiding subdirectory and file names in the repository (prefer wildcard or directory patterns so literal filenames are not exposed in `dotler.toml`).
   - `<pattern> tmpl`: Include matching UTF-8 text file or directory with bidirectional `{{ $HOME }}` <-> OS home directory substitution (`import` replaces home path with `{{ $HOME }}`; `export` and `git install` render `{{ $HOME }}` to the target home path).
-  - `<pattern> enc tmpl` (or `<pattern> tmpl enc`): Include matching UTF-8 text file or directory with both `{{ $HOME }}` template substitution and `.enc` encryption.
+  - `<pattern> enc tmpl` / `<pattern> enc=cont tmpl` / `<pattern> enc=full tmpl` (order-independent): Combine `{{ $HOME }}` template substitution with content-only (`.enc`) or full path+content (`.fenc`) encryption.
   - `!<pattern>`: Exclude matching file or directory (used to carve out exceptions after a broader rule like `*` or a directory name).
   - Sequential line-by-line evaluation: rules appearing later override earlier declarations.
 - Manifest Examples:

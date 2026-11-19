@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::local::WalkDir;
 use crate::config::repo::{
     evaluate_selection, is_symlink, parse_selection_rules, prune_empty_parent_dirs,
-    resolve_group_target_path, validate_dir_no_symlinks,
+    resolve_group_target_path, validate_dir_no_symlinks, validate_rule_pattern,
 };
 use crate::config::state::{DotlerLockGuard, TMP_FILE_PREFIX, write_file_safe};
 use crate::core::context::CoreContext;
@@ -17,7 +17,7 @@ use crate::core::vault_loader::{
     has_encrypted_repo_files, has_encrypted_rules, unlock_vault_if_needed,
 };
 use crate::crypto::ExposeSecret;
-use crate::crypto::vault::EncryptedFile;
+use crate::crypto::vault::{EncryptedFile, FullEncryptedFile};
 use crate::engine::EngineError;
 use crate::engine::check::{FileSyncStatus, plan};
 use crate::engine::observer::{
@@ -50,13 +50,28 @@ struct PlannedRepoTidyOp {
     kind: RepoTidyKind,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepoArtifactKind {
+    Plain,
+    ContentEnc,
+    FullEnc,
+}
+
 enum RepoTidyKind {
-    Encrypt {
-        plain_path: PathBuf,
+    ConvertToContentEnc {
+        src_path: PathBuf,
+        src_kind: RepoArtifactKind,
         enc_path: PathBuf,
+    },
+    ConvertToFullEnc {
+        src_path: PathBuf,
+        src_kind: RepoArtifactKind,
+        clean_rel: String,
+        fenc_path: PathBuf,
     },
     Decrypt {
         enc_path: PathBuf,
+        src_kind: RepoArtifactKind,
         plain_path: PathBuf,
     },
     RemoveExcluded {
@@ -182,12 +197,20 @@ pub fn tidy_groups_with_observer(
                 Err(_) => continue,
             };
             let rel_str = rel.to_string_lossy().to_string();
-            let is_enc_ext = rel_str.ends_with(".enc");
-            let clean_rel = if is_enc_ext {
-                rel_str.strip_suffix(".enc").unwrap()
+            let (src_kind, clean_rel_owned) = if rel_str.ends_with(".fenc") {
+                let vault_key = require_vault(engine, "decryption")?;
+                let raw_bytes = fs::read(path)?;
+                let fenc = FullEncryptedFile::from_bytes(&raw_bytes)?;
+                let (dec_rel, _) = vault_key.decrypt_full_file(&file_name, &fenc)?;
+                validate_rule_pattern(&dec_rel)?;
+                (RepoArtifactKind::FullEnc, dec_rel)
+            } else if let Some(stripped) = rel_str.strip_suffix(".enc") {
+                (RepoArtifactKind::ContentEnc, stripped.to_string())
             } else {
-                &rel_str
+                (RepoArtifactKind::Plain, rel_str.clone())
             };
+            let clean_rel = clean_rel_owned.as_str();
+            let is_enc_artifact = src_kind != RepoArtifactKind::Plain;
 
             let os_path = group_base.join(clean_rel);
             let os_path_str = os_path.to_string_lossy().to_string();
@@ -198,7 +221,7 @@ pub fn tidy_groups_with_observer(
                 && !is_symlink(&os_path)
                 && synced_keys.contains(&(group_name.clone(), os_path_str.clone()))
             {
-                let direction = if is_enc_ext {
+                let direction = if is_enc_artifact {
                     PlanDirection::EncryptToRepo
                 } else {
                     PlanDirection::PlainToRepo
@@ -214,7 +237,7 @@ pub fn tidy_groups_with_observer(
                 repo_ops.push(PlannedRepoTidyOp {
                     group_name: group_name.clone(),
                     group_base: group_base.clone(),
-                    rel_path: rel_str,
+                    rel_path: clean_rel.to_string(),
                     kind: RepoTidyKind::RemoveDeleted {
                         repo_path: path.to_path_buf(),
                         target_path_str: os_path_str.clone(),
@@ -225,8 +248,52 @@ pub fn tidy_groups_with_observer(
             }
 
             match mode {
-                Some(m) if m.is_encrypted() => {
-                    if !is_enc_ext {
+                Some(m) if m.is_full_encrypted() => {
+                    let vault_key = require_vault(engine, "encryption")?;
+                    let fenc_path =
+                        group_repo_dir.join(vault_key.derive_full_enc_filename(clean_rel));
+                    if src_kind == RepoArtifactKind::FullEnc && path == fenc_path {
+                        push_repo_preview(
+                            &mut preview_entries,
+                            group_name,
+                            os_path,
+                            path,
+                            PlanActionKind::Okay,
+                            PlanDirection::EncryptToRepo,
+                        );
+                    } else {
+                        push_repo_preview(
+                            &mut preview_entries,
+                            group_name,
+                            os_path,
+                            &fenc_path,
+                            PlanActionKind::Overwrite,
+                            PlanDirection::EncryptToRepo,
+                        );
+                        repo_ops.push(PlannedRepoTidyOp {
+                            group_name: group_name.clone(),
+                            group_base: group_base.clone(),
+                            rel_path: clean_rel.to_string(),
+                            kind: RepoTidyKind::ConvertToFullEnc {
+                                src_path: path.to_path_buf(),
+                                src_kind,
+                                clean_rel: clean_rel.to_string(),
+                                fenc_path,
+                            },
+                        });
+                    }
+                }
+                Some(m) if m.is_content_encrypted() => {
+                    if src_kind == RepoArtifactKind::ContentEnc {
+                        push_repo_preview(
+                            &mut preview_entries,
+                            group_name,
+                            os_path,
+                            path,
+                            PlanActionKind::Okay,
+                            PlanDirection::EncryptToRepo,
+                        );
+                    } else {
                         require_vault(engine, "encryption")?;
                         let enc_path = group_repo_dir.join(format!("{clean_rel}.enc"));
                         push_repo_preview(
@@ -241,24 +308,16 @@ pub fn tidy_groups_with_observer(
                             group_name: group_name.clone(),
                             group_base: group_base.clone(),
                             rel_path: clean_rel.to_string(),
-                            kind: RepoTidyKind::Encrypt {
-                                plain_path: path.to_path_buf(),
+                            kind: RepoTidyKind::ConvertToContentEnc {
+                                src_path: path.to_path_buf(),
+                                src_kind,
                                 enc_path,
                             },
                         });
-                    } else {
-                        push_repo_preview(
-                            &mut preview_entries,
-                            group_name,
-                            os_path,
-                            path,
-                            PlanActionKind::Okay,
-                            PlanDirection::EncryptToRepo,
-                        );
                     }
                 }
                 Some(m) if m.is_included() => {
-                    if is_enc_ext {
+                    if is_enc_artifact {
                         require_vault(engine, "decryption")?;
                         let plain_path = group_repo_dir.join(clean_rel);
                         push_repo_preview(
@@ -275,6 +334,7 @@ pub fn tidy_groups_with_observer(
                             rel_path: clean_rel.to_string(),
                             kind: RepoTidyKind::Decrypt {
                                 enc_path: path.to_path_buf(),
+                                src_kind,
                                 plain_path,
                             },
                         });
@@ -301,7 +361,7 @@ pub fn tidy_groups_with_observer(
                     repo_ops.push(PlannedRepoTidyOp {
                         group_name: group_name.clone(),
                         group_base: group_base.clone(),
-                        rel_path: rel_str,
+                        rel_path: clean_rel.to_string(),
                         kind: RepoTidyKind::RemoveExcluded {
                             repo_path: path.to_path_buf(),
                         },
@@ -467,7 +527,9 @@ fn summarize_tidy_dry_run(
     let mut sim = TidyReport::default();
     for op in repo_ops {
         match op.kind {
-            RepoTidyKind::Encrypt { .. } => sim.encrypted_in_repo += 1,
+            RepoTidyKind::ConvertToContentEnc { .. } | RepoTidyKind::ConvertToFullEnc { .. } => {
+                sim.encrypted_in_repo += 1
+            }
             RepoTidyKind::Decrypt { .. } => sim.decrypted_in_repo += 1,
             RepoTidyKind::RemoveExcluded { .. } | RepoTidyKind::RemoveDeleted { .. } => {
                 sim.removed_from_repo += 1
@@ -527,43 +589,90 @@ fn resolve_orphan_group_base(
     engine.group_base_for(group_name)
 }
 
+fn read_tidy_source_plaintext(
+    engine: &SyncEngine,
+    src_path: &Path,
+    src_kind: RepoArtifactKind,
+) -> Result<Vec<u8>, EngineError> {
+    match src_kind {
+        RepoArtifactKind::Plain => Ok(fs::read(src_path)?),
+        RepoArtifactKind::ContentEnc => {
+            let vault_key = require_vault(engine, "decryption")?;
+            let raw = fs::read(src_path)?;
+            let enc = EncryptedFile::from_bytes(&raw)?;
+            Ok(vault_key.decrypt_file(&enc)?.expose_secret().clone())
+        }
+        RepoArtifactKind::FullEnc => {
+            let vault_key = require_vault(engine, "decryption")?;
+            let fname = src_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            let raw = fs::read(src_path)?;
+            let fenc = FullEncryptedFile::from_bytes(&raw)?;
+            let (_, plain) = vault_key.decrypt_full_file(fname, &fenc)?;
+            Ok(plain.expose_secret().clone())
+        }
+    }
+}
+
 fn execute_repo_tidy_op(
     engine: &SyncEngine,
     group_name: &str,
     kind: &RepoTidyKind,
     report: &mut TidyReport,
 ) -> Result<Option<u64>, EngineError> {
+    let group_repo_dir = engine.repo_dir.join(group_name);
     match kind {
-        RepoTidyKind::Encrypt {
-            plain_path,
+        RepoTidyKind::ConvertToContentEnc {
+            src_path,
+            src_kind,
             enc_path,
         } => {
             let vault_key = require_vault(engine, "encryption")?;
-            let plaintext = fs::read(plain_path)?;
+            let plaintext = read_tidy_source_plaintext(engine, src_path, *src_kind)?;
             let len = plaintext.len() as u64;
             let enc = vault_key.encrypt_file(&plaintext)?;
             write_file_safe(enc_path, &enc.to_bytes())?;
-            let _ = fs::remove_file(plain_path);
+            if src_path != enc_path {
+                let _ = fs::remove_file(src_path);
+                prune_empty_parent_dirs(src_path, &group_repo_dir);
+            }
+            report.encrypted_in_repo += 1;
+            Ok(Some(len))
+        }
+        RepoTidyKind::ConvertToFullEnc {
+            src_path,
+            src_kind,
+            clean_rel,
+            fenc_path,
+        } => {
+            let vault_key = require_vault(engine, "encryption")?;
+            let plaintext = read_tidy_source_plaintext(engine, src_path, *src_kind)?;
+            let len = plaintext.len() as u64;
+            let (_, fenc) = vault_key.encrypt_full_file(clean_rel, &plaintext)?;
+            write_file_safe(fenc_path, &fenc.to_bytes())?;
+            if src_path != fenc_path {
+                let _ = fs::remove_file(src_path);
+                prune_empty_parent_dirs(src_path, &group_repo_dir);
+            }
             report.encrypted_in_repo += 1;
             Ok(Some(len))
         }
         RepoTidyKind::Decrypt {
             enc_path,
+            src_kind,
             plain_path,
         } => {
-            let vault_key = require_vault(engine, "decryption")?;
-            let raw_enc = fs::read(enc_path)?;
-            let enc = EncryptedFile::from_bytes(&raw_enc)?;
-            let decrypted = vault_key.decrypt_file(&enc)?;
-            let len = decrypted.expose_secret().len() as u64;
-            write_file_safe(plain_path, decrypted.expose_secret())?;
-            let _ = fs::remove_file(enc_path);
+            let decrypted = read_tidy_source_plaintext(engine, enc_path, *src_kind)?;
+            let len = decrypted.len() as u64;
+            write_file_safe(plain_path, &decrypted)?;
+            if enc_path != plain_path {
+                let _ = fs::remove_file(enc_path);
+                prune_empty_parent_dirs(enc_path, &group_repo_dir);
+            }
             report.decrypted_in_repo += 1;
             Ok(Some(len))
         }
         RepoTidyKind::RemoveExcluded { repo_path } => {
             let _ = fs::remove_file(repo_path);
-            let group_repo_dir = engine.repo_dir.join(group_name);
             prune_empty_parent_dirs(repo_path, &group_repo_dir);
             report.removed_from_repo += 1;
             Ok(None)
@@ -575,7 +684,6 @@ fn execute_repo_tidy_op(
             if repo_path.is_file() {
                 fs::remove_file(repo_path)?;
             }
-            let group_repo_dir = engine.repo_dir.join(group_name);
             prune_empty_parent_dirs(repo_path, &group_repo_dir);
             engine.state_db.remove_synced_file(target_path_str)?;
             report.removed_from_repo += 1;

@@ -835,3 +835,439 @@ fn test_e2e_multi_vault_keyring_isolation_shared_init_and_fallback() {
     assert_eq!(k_shared.vault_id(), vid_pub);
     assert_eq!(k_priv.vault_id(), vid_priv);
 }
+
+#[test]
+fn test_full_encryption_enc_full_import_export_tidy_check_and_literal_warning() {
+    use std::fs;
+    use std::process::{Command, Stdio};
+
+    let temp = tempfile::tempdir().unwrap();
+    let home_dir = temp.path().join("home");
+    let repo_dir = home_dir.join("dotfiles");
+    let ssh_os = home_dir.join(".ssh");
+    fs::create_dir_all(ssh_os.join("clients/acme-corp")).unwrap();
+    fs::create_dir_all(&repo_dir).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_dotler");
+    let pass = "full-enc-master-pass-789";
+    let run_cli = |args: &[&str], stdin_str: Option<&str>| {
+        let mut cmd = Command::new(bin);
+        cmd.current_dir(&repo_dir)
+            .env("HOME", &home_dir)
+            .env("USERPROFILE", &home_dir)
+            .env("DOTLER_PASSPHRASE", pass)
+            .args(args);
+        if let Some(s) = stdin_str {
+            cmd.stdin(Stdio::piped());
+            let mut child = cmd.spawn().unwrap();
+            if let Some(mut pipe) = child.stdin.take() {
+                use std::io::Write;
+                let _ = pipe.write_all(s.as_bytes());
+            }
+            child.wait_with_output().unwrap()
+        } else {
+            cmd.stdin(Stdio::null());
+            cmd.output().unwrap()
+        }
+    };
+
+    assert_eq!(
+        run_cli(&["init", "--label", "dots", "--json"], None)
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run_cli(
+            &["vault", "init", "--password-stdin", "--json"],
+            Some("full-enc-master-pass-789\n")
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+
+    fs::write(
+        ssh_os.join("clients/acme-corp/secret_key"),
+        b"PRIVATE_CLIENT_KEY_MATERIAL",
+    )
+    .unwrap();
+    let conf_plain = format!(
+        "IdentityFile {}/.ssh/clients/acme-corp/secret_key\n",
+        home_dir.display()
+    );
+    fs::write(
+        ssh_os.join("clients/acme-corp/client.conf"),
+        conf_plain.as_bytes(),
+    )
+    .unwrap();
+    fs::write(ssh_os.join("id_ed25519"), b"STANDARD_SSH_PRIVATE_KEY").unwrap();
+    fs::write(ssh_os.join("id_ed25519.pub"), b"ssh-ed25519 AAAA...").unwrap();
+    fs::write(ssh_os.join("known_hosts"), b"example.com ssh-ed25519 ...").unwrap();
+
+    let base_manifest = fs::read_to_string(repo_dir.join("dotler.toml")).unwrap();
+    let manifest_full = format!(
+        "{base_manifest}\n[ssh]\nos-nux = \"~/.ssh\"\nos-mac = \"~/.ssh\"\nos-win = \"~/.ssh\"\nos-bsd = \"~/.ssh\"\nfiles = \"\"\"\n* enc=full\n*.conf enc=full tmpl\nid_ed25519 enc=cont\n*.pub\n!known_hosts*\n\"\"\"\n"
+    );
+    fs::write(repo_dir.join("dotler.toml"), &manifest_full).unwrap();
+
+    // Wildcard enc=full rules must pass check with zero warnings
+    let chk_ok = run_cli(&["check", "--json"], None);
+    assert_eq!(chk_ok.status.code(), Some(0));
+    let chk_json: serde_json::Value = serde_json::from_slice(&chk_ok.stdout).unwrap();
+    assert!(chk_json["data"]["warnings"].is_null());
+
+    // First import
+    let imp1 = run_cli(&["import", "-y", "--json"], None);
+    assert_eq!(
+        imp1.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&imp1.stderr)
+    );
+
+    let ssh_repo = repo_dir.join("ssh");
+    assert!(ssh_repo.join("id_ed25519.enc").is_file());
+    assert!(ssh_repo.join("id_ed25519.pub").is_file());
+    assert!(
+        !ssh_repo.join("clients").exists(),
+        "nested directory names must be hidden"
+    );
+
+    let fenc_files: Vec<_> = fs::read_dir(&ssh_repo)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("fenc"))
+        .collect();
+    assert_eq!(fenc_files.len(), 2);
+    for entry in &fenc_files {
+        let name = entry.file_name().to_string_lossy().to_string();
+        assert!(!name.contains("acme") && !name.contains("secret"));
+        let raw = fs::read(entry.path()).unwrap();
+        assert!(!String::from_utf8_lossy(&raw).contains("acme"));
+        assert!(!String::from_utf8_lossy(&raw).contains(&home_dir.to_string_lossy().to_string()));
+    }
+
+    // Second import must skip unchanged .fenc files with zero byte churn
+    let snap_before: Vec<(String, Vec<u8>)> = fenc_files
+        .iter()
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().to_string(),
+                fs::read(e.path()).unwrap(),
+            )
+        })
+        .collect();
+    let imp2 = run_cli(&["import", "-y", "--json"], None);
+    assert_eq!(imp2.status.code(), Some(0));
+    for (fname, before_bytes) in snap_before {
+        assert_eq!(fs::read(ssh_repo.join(fname)).unwrap(), before_bytes);
+    }
+
+    // Delete OS files and export back from .fenc archives
+    fs::remove_dir_all(ssh_os.join("clients")).unwrap();
+    let exp = run_cli(&["export", "-y", "--json"], None);
+    assert_eq!(
+        exp.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&exp.stderr)
+    );
+    assert_eq!(
+        fs::read(ssh_os.join("clients/acme-corp/secret_key")).unwrap(),
+        b"PRIVATE_CLIENT_KEY_MATERIAL"
+    );
+    assert_eq!(
+        fs::read_to_string(ssh_os.join("clients/acme-corp/client.conf")).unwrap(),
+        conf_plain
+    );
+
+    // Switch * enc=full -> * enc=cont: check must detect mismatch (even without passphrase!), tidy reconciles
+    let manifest_cont = format!(
+        "{base_manifest}\n[ssh]\nos-nux = \"~/.ssh\"\nos-mac = \"~/.ssh\"\nos-win = \"~/.ssh\"\nos-bsd = \"~/.ssh\"\nfiles = \"\"\"\n* enc=cont\n*.conf enc=cont tmpl\n*.pub\n!known_hosts*\n\"\"\"\n"
+    );
+    fs::write(repo_dir.join("dotler.toml"), &manifest_cont).unwrap();
+
+    let mut locked_check = Command::new(bin);
+    let locked_out = locked_check
+        .current_dir(&repo_dir)
+        .env("HOME", &home_dir)
+        .env_remove("DOTLER_PASSPHRASE")
+        .args(["check", "--json"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(locked_out.status.code(), Some(1));
+
+    let tidy_to_cont = run_cli(&["tidy", "-y", "--json"], None);
+    assert_eq!(tidy_to_cont.status.code(), Some(0));
+    assert!(ssh_repo.join("clients/acme-corp/secret_key.enc").is_file());
+    assert!(ssh_repo.join("clients/acme-corp/client.conf.enc").is_file());
+    assert_eq!(
+        fs::read_dir(&ssh_repo)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("fenc"))
+            .count(),
+        0
+    );
+
+    // Switch back to * enc=full: tidy converts .enc -> .fenc and prunes empty clients/acme-corp/ subdir
+    fs::write(repo_dir.join("dotler.toml"), &manifest_full).unwrap();
+    let tidy_to_full = run_cli(&["tidy", "-y", "--json"], None);
+    assert_eq!(tidy_to_full.status.code(), Some(0));
+    assert!(!ssh_repo.join("clients").exists());
+    assert_eq!(run_cli(&["check", "--json"], None).status.code(), Some(0));
+
+    // Literal path with enc=full is allowed (exit 0) and emits warning/hint
+    let manifest_literal = format!(
+        "{base_manifest}\n[ssh]\nos-nux = \"~/.ssh\"\nos-mac = \"~/.ssh\"\nos-win = \"~/.ssh\"\nos-bsd = \"~/.ssh\"\nfiles = \"\"\"\nclients/acme-corp/secret_key enc=full\nclients/acme-corp/client.conf enc=full tmpl\nid_ed25519 enc=cont\n*.pub\n!known_hosts*\n\"\"\"\n"
+    );
+    fs::write(repo_dir.join("dotler.toml"), &manifest_literal).unwrap();
+    let chk_warn_json = run_cli(&["check", "--json"], None);
+    assert_eq!(chk_warn_json.status.code(), Some(0));
+    let warn_val: serde_json::Value = serde_json::from_slice(&chk_warn_json.stdout).unwrap();
+    let warnings = warn_val["data"]["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 2);
+    assert!(
+        warnings[0]
+            .as_str()
+            .unwrap()
+            .contains("clients/acme-corp/secret_key")
+    );
+
+    let chk_warn_inline = run_cli(&["check"], None);
+    assert_eq!(chk_warn_inline.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&chk_warn_inline.stdout).contains("Hint:"));
+}
+
+#[test]
+fn test_full_encryption_rekeying_on_vault_from_and_remote_git_install() {
+    use dotler::config::{DotlerLock, StateDb};
+    use dotler::engine::observer::NoopObserver;
+    use dotler::engine::remote::{install_remote_with_options, parse_url, uninstall_remote};
+    use std::fs;
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().unwrap();
+    let home_dir = temp.path().join("home");
+    let repo_a = home_dir.join("repo_a");
+    let repo_b = home_dir.join("repo_b");
+    let app_os = home_dir.join(".config/secret_app");
+    fs::create_dir_all(app_os.join("nested")).unwrap();
+    fs::create_dir_all(&repo_a).unwrap();
+    fs::create_dir_all(&repo_b).unwrap();
+
+    fs::write(
+        app_os.join("nested/token.conf"),
+        format!("HOME_PATH={}\nTOKEN=xyz\n", home_dir.display()).as_bytes(),
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_dotler");
+    let run_in = |cwd: &std::path::Path, pass: &str, args: &[&str], stdin_str: Option<&str>| {
+        let mut cmd = Command::new(bin);
+        cmd.current_dir(cwd)
+            .env("HOME", &home_dir)
+            .env("USERPROFILE", &home_dir)
+            .env("DOTLER_PASSPHRASE", pass)
+            .args(args);
+        if let Some(s) = stdin_str {
+            cmd.stdin(Stdio::piped());
+            let mut child = cmd.spawn().unwrap();
+            if let Some(mut pipe) = child.stdin.take() {
+                use std::io::Write;
+                let _ = pipe.write_all(s.as_bytes());
+            }
+            child.wait_with_output().unwrap()
+        } else {
+            cmd.stdin(Stdio::null());
+            cmd.output().unwrap()
+        }
+    };
+
+    assert_eq!(
+        run_in(
+            &repo_a,
+            "pass-a-111",
+            &["init", "--label", "a", "--json"],
+            None
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run_in(
+            &repo_a,
+            "pass-a-111",
+            &["vault", "init", "--password-stdin", "--json"],
+            Some("pass-a-111\n")
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run_in(
+            &repo_b,
+            "pass-b-222",
+            &["init", "--label", "b", "--json"],
+            None
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run_in(
+            &repo_b,
+            "pass-b-222",
+            &["vault", "init", "--password-stdin", "--json"],
+            Some("pass-b-222\n")
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+
+    let mut toml_a = fs::read_to_string(repo_a.join("dotler.toml")).unwrap();
+    toml_a.push_str(
+        "\n[app]\nos-nux = \"~/.config/secret_app\"\nos-mac = \"~/.config/secret_app\"\nos-win = \"~/.config/secret_app\"\nos-bsd = \"~/.config/secret_app\"\nfiles = \"* enc=full tmpl\"\n",
+    );
+    fs::write(repo_a.join("dotler.toml"), toml_a).unwrap();
+
+    assert_eq!(
+        run_in(&repo_a, "pass-a-111", &["import", "-y", "--json"], None)
+            .status
+            .code(),
+        Some(0)
+    );
+    let old_fenc: Vec<_> = fs::read_dir(repo_a.join("app"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(old_fenc.len(), 1);
+
+    // Re-key repo_a to vault B via `vault from file`
+    // Provide vault B pass via stdin; vault A unlocks via keyring/env? Let's pass vault A via env?
+    // Note: in `vault from`, `--password-stdin` supplies new vault passphrase (pass-b-222),
+    // and `DOTLER_PASSPHRASE` supplies old vault passphrase (pass-a-111) for `unlock_vault_if_needed`!
+    let rekey_out = run_in(
+        &repo_a,
+        "pass-a-111",
+        &["vault", "from", "file", "b", "--password-stdin", "--json"],
+        Some("pass-b-222\n"),
+    );
+    assert_eq!(
+        rekey_out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&rekey_out.stderr)
+    );
+    let new_fenc: Vec<_> = fs::read_dir(repo_a.join("app"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(new_fenc.len(), 1);
+    assert_ne!(
+        old_fenc[0], new_fenc[0],
+        "re-keying must re-derive .fenc token"
+    );
+    assert!(
+        !old_fenc[0].exists(),
+        "stale .fenc from old vault must be removed"
+    );
+
+    // Verify `git install` deploys .fenc + tmpl cleanly and `git uninstall` restores
+    let cfg_b = dotler::config::RepoConfig::load(&repo_a.join("dotler.toml")).unwrap();
+    let vcfg_b = cfg_b.vault.as_ref().unwrap();
+    let slot_b = dotler::crypto::VaultSlot::from_base64(&vcfg_b.password_slot).unwrap();
+    let key_b = slot_b
+        .unwrap(
+            &SecretString::new("pass-b-222".to_string()),
+            Some(&vcfg_b.vault_id),
+        )
+        .unwrap();
+
+    // Commit repo_a into a real Git repository so `install_remote_with_options` clones it cleanly
+    assert!(
+        Command::new("git")
+            .args(["init"])
+            .current_dir(&repo_a)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&repo_a)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&repo_a)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo_a)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo_a)
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let sandbox_home = temp.path().join("target_home");
+    let dotler_cfg_dir = sandbox_home.join(".config/dotler");
+    fs::create_dir_all(&dotler_cfg_dir).unwrap();
+    let state_db = StateDb::open(&dotler_cfg_dir.join("state.db")).unwrap();
+    let lock = DotlerLock::new(dotler_cfg_dir.join("dotler.lock"))
+        .acquire(Duration::from_millis(500), Duration::from_millis(10))
+        .unwrap();
+
+    let url = parse_url(&format!("file://{}", repo_a.display())).unwrap();
+    let mut noop = NoopObserver;
+    let inst_rep = install_remote_with_options(
+        &url,
+        &["app".to_string()],
+        None,
+        None,
+        &[],
+        &state_db,
+        &lock,
+        false,
+        false,
+        false,
+        Some(&key_b),
+        &mut noop,
+    )
+    .unwrap();
+    let expected_installed = sandbox_home.join(".config/secret_app/nested/token.conf");
+    assert_eq!(inst_rep.installed_files, vec![expected_installed.clone()]);
+    assert_eq!(
+        fs::read_to_string(&expected_installed).unwrap(),
+        format!("HOME_PATH={}\nTOKEN=xyz\n", sandbox_home.display())
+    );
+
+    let uninst_rep = uninstall_remote(&["app".to_string()], &state_db, &lock, false).unwrap();
+    assert_eq!(uninst_rep.removed_files, vec![expected_installed.clone()]);
+    assert!(!expected_installed.exists());
+}

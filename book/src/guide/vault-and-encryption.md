@@ -70,23 +70,27 @@ dotler vault from file ./vault.json
 
 In all three subcommands (`file`, `git`, `url`), any `[<group>]` sections in the source file are ignored. If the imported `vault_id` is already registered in your OS keyring, `dotler vault from` unlocks `password_slot` without prompting; otherwise it prompts for the passphrase, verifies `password_slot`, and stores the `vault_id` entry in your OS keyring before writing the vault configuration to the target `dotler.toml`. If the target repository already has `.enc` files encrypted under a different vault, `dotler vault from` automatically decrypts them with the previous vault key and re-encrypts them in memory under the newly imported vault before atomically updating `dotler.toml`.
 
-## 3. Encrypting & Decrypting Files
+## 3. Encrypting & Decrypting Files (`enc` / `enc=cont` & `enc=full`)
 
-Add the `enc` attribute (or `enc tmpl` when combining with `{{ $HOME }}` template substitution) to selection rules in `dotler.toml`:
+Add `enc` (`enc=cont` for content-only encryption) or `enc=full` (to encrypt both file/subdirectory names and file contents) to selection rules in `dotler.toml` (combinable with `tmpl` for `{{ $HOME }}` substitution):
 
 ```toml
-[gh]
-os-nux = "~/.config/gh"
-os-mac = "~/.config/gh"
+[ssh]
+os-nux = "~/.ssh"
+os-mac = "~/.ssh"
 files = """
-config.yml
-hosts.yml enc
+* enc=full
+id_ed25519 enc=cont
+config tmpl
+*.pub
+!known_hosts*
 """
 ```
 
-- `dotler import`: Encrypts `hosts.yml` from your system and stores it as `gh/hosts.yml.enc` in the repository.
-- `dotler export`: Decrypts `gh/hosts.yml.enc` from the repository and writes plaintext `hosts.yml` to `~/.config/gh/hosts.yml`.
-- `dotler tidy`: If you add or remove the `enc` attribute on a file that is already in the repository, run `dotler tidy` to convert existing repository files between plaintext and `.enc` in place.
+- `enc` / `enc=cont` (Content Encryption): Stores `<group>/<rel_path>.enc` in the repository while keeping relative paths readable.
+- `enc=full` (Full Path + Content Encryption): Stores `<group>/<32-hex>.fenc` flattened at the group root with the original relative path encrypted inside the archive (use wildcard or directory rules such as `* enc=full` or `*.pem enc=full` so literal filenames do not appear in `dotler.toml`; `dotler check` emits a hint if a literal filename is written directly with `enc=full`).
+- `dotler import` & `dotler export`: Automatically encrypt and decrypt `.enc` and `.fenc` files (restoring original nested subdirectories on `export`).
+- `dotler tidy`: Converts existing repository files in place across plaintext, `.enc`, and `.fenc` whenever selection rules change, pruning empty subdirectories automatically.
 
 ## 4. OS Keyring Integration
 

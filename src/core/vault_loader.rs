@@ -49,7 +49,15 @@ pub fn has_encrypted_rules(repo_cfg: &RepoConfig) -> bool {
     false
 }
 
-/// Returns `true` if any group directory in `repo_path` contains a `.enc` file.
+/// Returns `true` if `path` has a recognized encrypted dotfile extension (`.enc` or `.fenc`).
+pub fn is_encrypted_repo_extension(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|s| s.to_str()),
+        Some("enc" | "fenc")
+    )
+}
+
+/// Returns `true` if any group directory in `repo_path` contains a `.enc` or `.fenc` file.
 pub fn has_encrypted_repo_files(repo_path: &Path, repo_cfg: &RepoConfig) -> bool {
     for g_name in repo_cfg.groups.keys() {
         let group_dir = repo_path.join(g_name);
@@ -57,9 +65,7 @@ pub fn has_encrypted_repo_files(repo_path: &Path, repo_cfg: &RepoConfig) -> bool
             continue;
         }
         for entry in WalkDir::new(&group_dir).into_iter().filter_map(|e| e.ok()) {
-            if entry.file_type().is_file()
-                && entry.path().extension().and_then(|s| s.to_str()) == Some("enc")
-            {
+            if entry.file_type().is_file() && is_encrypted_repo_extension(entry.path()) {
                 return true;
             }
         }

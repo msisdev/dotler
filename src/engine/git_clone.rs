@@ -14,9 +14,9 @@ use crate::config::repo::{
 };
 use crate::config::state::{DotlerLockGuard, write_file_safe};
 use crate::core::context::CoreContext;
-use crate::core::vault_loader::unlock_vault_if_needed;
+use crate::core::vault_loader::{is_encrypted_repo_extension, unlock_vault_if_needed};
 use crate::crypto::ExposeSecret;
-use crate::crypto::vault::{EncryptedFile, VaultKey};
+use crate::crypto::vault::{EncryptedFile, FullEncryptedFile, VaultKey};
 use crate::engine::EngineError;
 use crate::engine::git_transport::GitRunner;
 use crate::engine::observer::{
@@ -307,7 +307,7 @@ fn build_clone_preview(
                 .unwrap_or(entry.path())
                 .to_string_lossy()
                 .to_string();
-            let is_enc = entry.path().extension().and_then(|s| s.to_str()) == Some("enc");
+            let is_enc = is_encrypted_repo_extension(entry.path());
             let size = fs::metadata(entry.path()).map(|m| m.len()).unwrap_or(0);
             preview_entries.push(PlanPreviewEntry {
                 group_name: effective_name.clone(),
@@ -397,17 +397,53 @@ fn rekey_cloned_vault_files(
     remote_key: &VaultKey,
     local_key: &VaultKey,
 ) -> Result<(), EngineError> {
-    for entry in WalkDir::new(manifest_dir).min_depth(1) {
-        let entry = entry?;
-        if entry.file_type().is_file()
-            && entry.path().extension().and_then(|s| s.to_str()) == Some("enc")
-        {
-            let enc_bytes = fs::read(entry.path())?;
-            let enc_file = EncryptedFile::from_bytes(&enc_bytes)?;
-            let decrypted = remote_key.decrypt_file(&enc_file)?;
-            let re_encrypted = local_key.encrypt_file(decrypted.expose_secret())?;
-            write_file_safe(entry.path(), &re_encrypted.to_bytes())?;
+    let entries: Vec<PathBuf> = WalkDir::new(manifest_dir)
+        .min_depth(1)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file() && is_encrypted_repo_extension(e.path()))
+        .map(|e| e.path().to_path_buf())
+        .collect();
+
+    let mut pending_writes: Vec<(PathBuf, Vec<u8>, Option<PathBuf>)> = Vec::new();
+    for path in entries {
+        match path.extension().and_then(|s| s.to_str()) {
+            Some("enc") => {
+                let enc_bytes = fs::read(&path)?;
+                let enc_file = EncryptedFile::from_bytes(&enc_bytes)?;
+                let decrypted = remote_key.decrypt_file(&enc_file)?;
+                let re_encrypted = local_key.encrypt_file(decrypted.expose_secret())?;
+                pending_writes.push((path, re_encrypted.to_bytes(), None));
+            }
+            Some("fenc") => {
+                let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                let fenc_bytes = fs::read(&path)?;
+                let fenc_file = FullEncryptedFile::from_bytes(&fenc_bytes)?;
+                let (rel_path, decrypted) = remote_key.decrypt_full_file(fname, &fenc_file)?;
+                let (new_fname, re_encrypted) =
+                    local_key.encrypt_full_file(&rel_path, decrypted.expose_secret())?;
+                let parent = path.parent().unwrap_or(manifest_dir);
+                let new_path = parent.join(new_fname);
+                let stale = (new_path != path).then_some(path);
+                pending_writes.push((new_path, re_encrypted.to_bytes(), stale));
+            }
+            _ => {}
         }
+    }
+
+    let written_paths: std::collections::HashSet<PathBuf> =
+        pending_writes.iter().map(|(p, _, _)| p.clone()).collect();
+    let mut stale_to_remove = Vec::new();
+    for (dst_path, bytes, stale_opt) in pending_writes {
+        write_file_safe(&dst_path, &bytes)?;
+        if let Some(old_path) = stale_opt
+            && !written_paths.contains(&old_path)
+        {
+            stale_to_remove.push(old_path);
+        }
+    }
+    for old_path in stale_to_remove {
+        let _ = fs::remove_file(old_path);
     }
     Ok(())
 }
@@ -417,9 +453,7 @@ fn has_any_enc_files(manifest_dir: &Path) -> bool {
         .min_depth(1)
         .into_iter()
         .filter_map(|e| e.ok())
-        .any(|e| {
-            e.file_type().is_file() && e.path().extension().and_then(|s| s.to_str()) == Some("enc")
-        })
+        .any(|e| e.file_type().is_file() && is_encrypted_repo_extension(e.path()))
 }
 
 fn rekey_cloned_manifest_for_local_vault(

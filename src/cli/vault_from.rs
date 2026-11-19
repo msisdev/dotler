@@ -11,7 +11,7 @@ use crate::config::repo::{
 use crate::config::state::write_file_safe;
 use crate::core::vault_loader::{read_new_passphrase, unlock_vault_if_needed};
 use crate::crypto::keyring::{OsKeyring, PASSPHRASE_ENV_VAR};
-use crate::crypto::vault::{EncryptedFile, VaultKey, VaultSlot};
+use crate::crypto::vault::{EncryptedFile, FullEncryptedFile, VaultKey, VaultSlot};
 use crate::crypto::{ExposeSecret, SecretString};
 use crate::engine::EngineError;
 use crate::engine::remote::{GitRunner, REMOTE_TOML_FETCH_MAX_BYTES, fetch_http_text, parse_url};
@@ -139,28 +139,52 @@ pub(crate) fn handle_vault_from<W: Write>(
         vault_hint: explicit_hint.or(ext_vault.vault_hint),
     };
 
-    // Scan existing .enc files in group directories and collect any belonging to another vault.
-    let mut mismatched_enc_files: Vec<(std::path::PathBuf, EncryptedFile)> = Vec::new();
+    // Scan existing .enc and .fenc files in group directories belonging to another vault.
+    enum MismatchedArtifact {
+        Content(std::path::PathBuf, EncryptedFile),
+        Full(std::path::PathBuf, String, FullEncryptedFile),
+    }
+    let mut mismatched_files: Vec<MismatchedArtifact> = Vec::new();
     for g_name in repo_cfg.groups.keys() {
         let group_dir = repo_path.join(g_name);
         if !group_dir.is_dir() {
             continue;
         }
         for entry in WalkDir::new(&group_dir).into_iter().filter_map(|e| e.ok()) {
-            if entry.file_type().is_file()
-                && entry.path().extension().and_then(|s| s.to_str()) == Some("enc")
-            {
-                let bytes = std::fs::read(entry.path())?;
-                let enc_file = EncryptedFile::from_bytes(&bytes)?;
-                if enc_file.vault_id != new_vid_bytes {
-                    mismatched_enc_files.push((entry.path().to_path_buf(), enc_file));
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            match entry.path().extension().and_then(|s| s.to_str()) {
+                Some("enc") => {
+                    let bytes = std::fs::read(entry.path())?;
+                    let enc_file = EncryptedFile::from_bytes(&bytes)?;
+                    if enc_file.vault_id != new_vid_bytes {
+                        mismatched_files.push(MismatchedArtifact::Content(
+                            entry.path().to_path_buf(),
+                            enc_file,
+                        ));
+                    }
                 }
+                Some("fenc") => {
+                    let bytes = std::fs::read(entry.path())?;
+                    let fenc_file = FullEncryptedFile::from_bytes(&bytes)?;
+                    if fenc_file.vault_id != new_vid_bytes {
+                        let fname = entry.file_name().to_string_lossy().to_string();
+                        mismatched_files.push(MismatchedArtifact::Full(
+                            entry.path().to_path_buf(),
+                            fname,
+                            fenc_file,
+                        ));
+                    }
+                }
+                _ => {}
             }
         }
     }
 
-    let mut rekeyed_writes: Vec<(std::path::PathBuf, Vec<u8>)> = Vec::new();
-    if !mismatched_enc_files.is_empty() {
+    let mut rekeyed_writes: Vec<(std::path::PathBuf, Vec<u8>, Option<std::path::PathBuf>)> =
+        Vec::new();
+    if !mismatched_files.is_empty() {
         let old_vcfg = repo_cfg.vault.as_ref().ok_or(EngineError::Config(
             crate::config::ConfigError::MissingVaultConfig,
         ))?;
@@ -173,16 +197,40 @@ pub(crate) fn handle_vault_from<W: Write>(
             )?
         };
 
-        for (enc_path, enc_file) in mismatched_enc_files {
-            let plain = old_vault_key.decrypt_file(&enc_file)?;
-            let rekeyed = new_vault_key.encrypt_file(plain.expose_secret())?;
-            rekeyed_writes.push((enc_path, rekeyed.to_bytes()));
+        for item in mismatched_files {
+            match item {
+                MismatchedArtifact::Content(enc_path, enc_file) => {
+                    let plain = old_vault_key.decrypt_file(&enc_file)?;
+                    let rekeyed = new_vault_key.encrypt_file(plain.expose_secret())?;
+                    rekeyed_writes.push((enc_path, rekeyed.to_bytes(), None));
+                }
+                MismatchedArtifact::Full(old_path, fname, fenc_file) => {
+                    let (rel_path, plain) = old_vault_key.decrypt_full_file(&fname, &fenc_file)?;
+                    let (new_fname, rekeyed) =
+                        new_vault_key.encrypt_full_file(&rel_path, plain.expose_secret())?;
+                    let parent = old_path.parent().unwrap_or(&repo_path);
+                    let new_path = parent.join(new_fname);
+                    let stale = (new_path != old_path).then_some(old_path);
+                    rekeyed_writes.push((new_path, rekeyed.to_bytes(), stale));
+                }
+            }
         }
     }
 
     let rekeyed_files = rekeyed_writes.len();
-    for (enc_path, bytes) in rekeyed_writes {
-        write_file_safe(&enc_path, &bytes)?;
+    let written_paths: std::collections::HashSet<std::path::PathBuf> =
+        rekeyed_writes.iter().map(|(p, _, _)| p.clone()).collect();
+    let mut stale_to_remove = Vec::new();
+    for (dst_path, bytes, stale_opt) in rekeyed_writes {
+        write_file_safe(&dst_path, &bytes)?;
+        if let Some(old_path) = stale_opt
+            && !written_paths.contains(&old_path)
+        {
+            stale_to_remove.push(old_path);
+        }
+    }
+    for old_path in stale_to_remove {
+        let _ = std::fs::remove_file(old_path);
     }
 
     let vault_id = imported_cfg.vault_id.clone();

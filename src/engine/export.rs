@@ -9,7 +9,7 @@ use crate::core::vault_loader::{
     has_encrypted_repo_files, has_encrypted_rules, unlock_vault_if_needed,
 };
 use crate::crypto::ExposeSecret;
-use crate::crypto::vault::EncryptedFile;
+use crate::crypto::vault::{EncryptedFile, FullEncryptedFile};
 use crate::engine::EngineError;
 use crate::engine::check::{FileActionPlan, FileSyncStatus};
 use crate::engine::observer::{
@@ -160,6 +160,25 @@ fn read_repo_plaintext(engine: &SyncEngine, plan: &FileActionPlan) -> Result<Vec
         reason: "encrypted files detected but no vault key was provided".into(),
     })?;
     let raw_enc = fs::read(&plan.repo_file_path)?;
+    if plan.is_full_encrypted {
+        let fname = plan
+            .repo_file_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        let fenc_file = FullEncryptedFile::from_bytes(&raw_enc)?;
+        let (dec_rel, plain) = vault_key.decrypt_full_file(fname, &fenc_file)?;
+        if dec_rel != plan.relative_path {
+            return Err(EngineError::EncryptionMismatch {
+                path: plan.repo_file_path.clone(),
+                reason: format!(
+                    "Decrypted relative path '{dec_rel}' does not match planned path '{}'.",
+                    plan.relative_path
+                ),
+            });
+        }
+        return Ok(plain.expose_secret().clone());
+    }
     let enc_file = EncryptedFile::from_bytes(&raw_enc)?;
     Ok(vault_key.decrypt_file(&enc_file)?.expose_secret().clone())
 }

@@ -9,7 +9,7 @@ use crate::config::local::{WalkDir, expand_tilde, resolve_home_for_config_path};
 use crate::config::repo::{
     OsInfo, SelectionMode, evaluate_selection, is_symlink, parse_selection_rules,
     prune_empty_parent_dirs, render_home_template, resolve_group_target_path, validate_os_dir_path,
-    validate_os_target_path, validate_path_security,
+    validate_os_target_path, validate_path_security, validate_rule_pattern,
 };
 use crate::config::state::{
     BACKUPS_DIR_PATH, DotlerLockGuard, InstalledFileRecord, StateDb, write_file_safe,
@@ -17,7 +17,7 @@ use crate::config::state::{
 use crate::core::context::CoreContext;
 use crate::core::vault_loader::unlock_vault_if_needed;
 use crate::crypto::ExposeSecret;
-use crate::crypto::vault::{EncryptedFile, VaultKey};
+use crate::crypto::vault::{EncryptedFile, FullEncryptedFile, VaultKey};
 use crate::engine::EngineError;
 use crate::engine::git_transport::{GitRunner, TempDirGuard};
 use crate::engine::observer::{
@@ -190,35 +190,11 @@ pub fn install_remote_with_options(
                 .unwrap()
                 .to_string_lossy()
                 .to_string();
-            let is_enc = rel_path_str.ends_with(".enc");
-            let clean_rel = rel_path_str
-                .strip_suffix(".enc")
-                .map(str::to_string)
-                .unwrap_or_else(|| rel_path_str.clone());
-
-            let mode = evaluate_selection(&rules, &clean_rel)
-                .or_else(|| evaluate_selection(&rules, &rel_path_str));
-            if !rules.is_empty() && matches!(mode, None | Some(SelectionMode::Exclude)) {
-                continue;
-            }
-            if let Some(m) = mode {
-                let enc_conflict = (m.is_encrypted() && !is_enc)
-                    || (m.is_included() && !m.is_encrypted() && is_enc);
-                if enc_conflict {
-                    return Err(EngineError::EncryptionMismatch {
-                        path: entry.path().to_path_buf(),
-                        reason: format!(
-                            "Remote repository file '{rel_path_str}' conflicts with encryption rule in dotler.toml."
-                        ),
-                    });
-                }
-            }
-
-            let target_file_path = target_base.join(&clean_rel);
-            validate_os_target_path(&target_file_path, &home)?;
-
             let raw_content = fs::read(entry.path())?;
-            let plaintext_bytes = if is_enc {
+            let is_fenc = rel_path_str.ends_with(".fenc");
+            let is_enc = rel_path_str.ends_with(".enc");
+
+            let (clean_rel, mode, plaintext_bytes) = if is_fenc {
                 let key = if let Some(override_key) = vault_key_override {
                     override_key
                 } else {
@@ -230,11 +206,74 @@ pub fn install_remote_with_options(
                         crate::config::ConfigError::MissingVaultConfig,
                     ))?
                 };
-                let enc_file = EncryptedFile::from_bytes(&raw_content)?;
-                key.decrypt_file(&enc_file)?.expose_secret().clone()
+                let fname = entry.file_name().to_string_lossy();
+                let fenc_file = FullEncryptedFile::from_bytes(&raw_content)?;
+                let (dec_rel, plain_sec) = key.decrypt_full_file(&fname, &fenc_file)?;
+                validate_rule_pattern(&dec_rel)?;
+                let mode = evaluate_selection(&rules, &dec_rel);
+                if !rules.is_empty() && matches!(mode, None | Some(SelectionMode::Exclude)) {
+                    continue;
+                }
+                if let Some(m) = mode
+                    && !m.is_full_encrypted()
+                {
+                    return Err(EngineError::EncryptionMismatch {
+                        path: entry.path().to_path_buf(),
+                        reason: format!(
+                            "Remote repository file '{rel_path_str}' (.fenc) conflicts with selection rule in dotler.toml."
+                        ),
+                    });
+                }
+                (dec_rel, mode, plain_sec.expose_secret().clone())
             } else {
-                raw_content
+                let clean_rel = rel_path_str
+                    .strip_suffix(".enc")
+                    .map(str::to_string)
+                    .unwrap_or_else(|| rel_path_str.clone());
+                let mode = evaluate_selection(&rules, &clean_rel)
+                    .or_else(|| evaluate_selection(&rules, &rel_path_str));
+                if !rules.is_empty() && matches!(mode, None | Some(SelectionMode::Exclude)) {
+                    continue;
+                }
+                if let Some(m) = mode {
+                    let enc_conflict = (is_enc && m.is_included() && !m.is_content_encrypted())
+                        || (!is_enc && m.is_encrypted());
+                    if enc_conflict {
+                        return Err(EngineError::EncryptionMismatch {
+                            path: entry.path().to_path_buf(),
+                            reason: format!(
+                                "Remote repository file '{rel_path_str}' conflicts with encryption rule in dotler.toml."
+                            ),
+                        });
+                    }
+                }
+                let plain = if is_enc {
+                    let key = if let Some(override_key) = vault_key_override {
+                        override_key
+                    } else {
+                        if unlocked_vault_key.is_none() {
+                            unlocked_vault_key = unlock_vault_if_needed(
+                                repo_config,
+                                use_keyring,
+                                is_interactive,
+                                true,
+                            )?;
+                        }
+                        unlocked_vault_key.as_ref().ok_or(EngineError::Config(
+                            crate::config::ConfigError::MissingVaultConfig,
+                        ))?
+                    };
+                    let enc_file = EncryptedFile::from_bytes(&raw_content)?;
+                    key.decrypt_file(&enc_file)?.expose_secret().clone()
+                } else {
+                    raw_content
+                };
+                (clean_rel, mode, plain)
             };
+
+            let target_file_path = target_base.join(&clean_rel);
+            validate_os_target_path(&target_file_path, &home)?;
+
             let is_template = mode.is_some_and(|m| m.is_template());
             let file_content = if is_template {
                 render_home_template(&plaintext_bytes, &home, &clean_rel)?
@@ -254,7 +293,7 @@ pub fn install_remote_with_options(
                 os_action,
                 repo_path: PathBuf::from(format!("{}/{}/{}", url.raw, g_name, rel_path_str)),
                 repo_action: PlanActionKind::Okay,
-                direction: if is_enc {
+                direction: if is_enc || is_fenc {
                     PlanDirection::DecryptToOs
                 } else {
                     PlanDirection::PlainToOs

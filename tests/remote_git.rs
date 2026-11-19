@@ -545,3 +545,105 @@ fn test_cli_git_clone_with_local_repo_override_rekeys_enc() {
         b"SECRET_KEY=remote_val\n"
     );
 }
+
+#[test]
+fn test_cli_git_install_and_uninstall_with_cwd_group_and_dot_path_override() {
+    let sb = common::CliTestSandbox::new();
+    let project_dir = sb.home_dir.parent().unwrap().join("cwd_install_project");
+    fs::create_dir_all(project_dir.join("nested")).unwrap();
+    fs::write(project_dir.join("nested/app.env"), b"ORIGINAL_ENV=1\n").unwrap();
+
+    let remote_toml = r#"[proj]
+os-nux = "."
+os-mac = "."
+os-win = "."
+os-bsd = "."
+files = """
+nested/app.env
+fresh/new.env
+"""
+"#;
+    let mock_remote = MockBareRepo::new(
+        remote_toml,
+        &[
+            ("proj/nested/app.env", b"REMOTE_ENV=2\n"),
+            ("proj/fresh/new.env", b"FRESH=1\n"),
+        ],
+    );
+
+    let install_out = sb
+        .bin_cmd()
+        .current_dir(&project_dir)
+        .args(["git", "install", &mock_remote.clone_url, "proj", "-y"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        install_out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&install_out.stderr)
+    );
+    assert_eq!(
+        fs::read(project_dir.join("nested/app.env")).unwrap(),
+        b"REMOTE_ENV=2\n"
+    );
+    assert_eq!(
+        fs::read(project_dir.join("fresh/new.env")).unwrap(),
+        b"FRESH=1\n"
+    );
+
+    let uninstall_out = sb
+        .bin_cmd()
+        .current_dir(&project_dir)
+        .args(["git", "uninstall", "proj", "-y"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        uninstall_out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&uninstall_out.stderr)
+    );
+    assert_eq!(
+        fs::read(project_dir.join("nested/app.env")).unwrap(),
+        b"ORIGINAL_ENV=1\n"
+    );
+    assert!(!project_dir.join("fresh").exists());
+
+    // `-p ./sub_target` installs relative to current working directory, while `-p ./../escape` blocks.
+    let escape_out = sb
+        .bin_cmd()
+        .current_dir(&project_dir)
+        .args([
+            "git",
+            "install",
+            &mock_remote.clone_url,
+            "proj",
+            "-p",
+            "./../escape",
+            "-y",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(escape_out.status.code(), Some(3));
+
+    let override_out = sb
+        .bin_cmd()
+        .current_dir(&project_dir)
+        .args([
+            "git",
+            "install",
+            &mock_remote.clone_url,
+            "proj",
+            "-p",
+            "./sub_target",
+            "-y",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(override_out.status.code(), Some(0));
+    assert_eq!(
+        fs::read(project_dir.join("sub_target/nested/app.env")).unwrap(),
+        b"REMOTE_ENV=2\n"
+    );
+}

@@ -9,10 +9,12 @@ use crate::agent::briefing::{DEFAULT_DOTLER_TOML, INIT_AI_HINT};
 use crate::config::local::{
     WalkDir, expand_tilde, format_home_repo_path, resolve_home_for_config_path,
 };
+use crate::config::path_security::resolve_with_existing_ancestors;
 use crate::config::repo::{
-    SelectionMode, evaluate_selection, find_literal_full_enc_rules, parse_selection_rules,
-    render_home_template, resolve_group_target_path, rules_have_effective_full_encryption,
-    validate_dir_no_symlinks, validate_os_dir_path, validate_path_security, validate_rule_pattern,
+    SelectionMode, evaluate_selection, find_literal_full_enc_rules, is_cwd_group_path,
+    is_home_group_path, parse_selection_rules, render_home_template, resolve_group_target_path,
+    rules_have_effective_full_encryption, validate_dir_no_symlinks, validate_os_dir_path_with_home,
+    validate_path_security, validate_repo_target_disjointness, validate_rule_pattern,
 };
 use crate::config::state::{DotlerLockGuard, TMP_FILE_PREFIX, write_file_safe};
 use crate::core::context::CoreContext;
@@ -148,11 +150,23 @@ pub fn run_check(
         parse_selection_rules(&g_cfg.files)?;
     }
 
-    // 3. Detect cross-group target file collisions
+    let home_dir = ctx
+        .state_db
+        .get()
+        .map(|db| resolve_home_for_config_path(db.path()))
+        .unwrap_or_else(|_| expand_tilde("~"));
+    let cwd = ctx.effective_cwd()?;
+
+    // 3. Detect cross-group target file collisions (static manifest + expanded roots)
     repo_cfg.detect_cross_group_collisions(&resolved.devices, &resolved.os_info)?;
+    repo_cfg.detect_cross_group_collisions_with_roots(
+        &resolved.devices,
+        &resolved.os_info,
+        &home_dir,
+        &cwd,
+    )?;
 
     // 4. Reject symlinks in repository, collect literal enc=full warnings, and detect .dotler.enc/.dotler.fenc mismatches
-    let home_dir = expand_tilde("~");
     let use_keyring = ctx
         .local_config
         .get()
@@ -167,6 +181,7 @@ pub fn run_check(
     };
     let mut warnings = Vec::new();
     let expected_vid_opt = repo_cfg.vault.as_ref().map(|v| v.vault_id.as_str());
+    let canon_repo = resolve_with_existing_ancestors(repo_path);
 
     for (g_name, g_cfg) in &repo_cfg.groups {
         if let Some(filter) = group_filter
@@ -176,20 +191,69 @@ pub fn run_check(
         }
         let group_repo_dir = repo_path.join(g_name);
         validate_dir_no_symlinks(&group_repo_dir)?;
-        let target_base_opt =
+        let target_and_boundary =
             resolve_group_target_path(g_cfg, &resolved.devices, &resolved.os_info).map(|s| {
-                if s == "~" {
-                    home_dir.clone()
-                } else if let Some(stripped) = s.strip_prefix("~/") {
-                    home_dir.join(stripped)
+                if is_home_group_path(&s) {
+                    let rel = s.strip_prefix("~/").unwrap_or("").trim_matches('/');
+                    let target = if rel.is_empty() {
+                        home_dir.clone()
+                    } else {
+                        home_dir.join(rel)
+                    };
+                    (target, home_dir.clone())
+                } else if is_cwd_group_path(&s) {
+                    let mut rel = s.strip_prefix('.').unwrap_or(&s).trim_start_matches('/');
+                    while let Some(next) = rel.strip_prefix("./") {
+                        rel = next.trim_start_matches('/');
+                    }
+                    let rel = rel.trim_end_matches('/');
+                    let target = if rel.is_empty() || rel == "." {
+                        cwd.clone()
+                    } else {
+                        cwd.join(rel)
+                    };
+                    (target, cwd.clone())
                 } else {
-                    PathBuf::from(s)
+                    (PathBuf::from(s), home_dir.clone())
                 }
             });
-        if let Some(ref target_base_path) = target_base_opt {
-            validate_os_dir_path(target_base_path, &home_dir)?;
+        let target_base_opt = target_and_boundary.as_ref().map(|(t, _)| t.clone());
+        if let Some((ref target_base_path, ref boundary_dir)) = target_and_boundary {
+            validate_os_dir_path_with_home(target_base_path, boundary_dir, &home_dir)?;
+            validate_repo_target_disjointness(
+                repo_path,
+                repo_cfg.groups.keys().map(String::as_str),
+                target_base_path,
+            )?;
         }
         let rules = parse_selection_rules(&g_cfg.files)?;
+        if let Some(ref target_base_path) = target_base_opt {
+            let in_project_repo =
+                resolve_with_existing_ancestors(target_base_path).starts_with(&canon_repo);
+            if in_project_repo {
+                for rule in &rules {
+                    if rule.mode == SelectionMode::Exclude {
+                        continue;
+                    }
+                    let clean = rule.pattern.trim_start_matches("./").trim_end_matches('/');
+                    if clean.is_empty()
+                        || clean.contains('*')
+                        || clean.contains('?')
+                        || clean.contains('[')
+                    {
+                        continue;
+                    }
+                    if evaluate_selection(&rules, clean).is_some_and(|m| m.is_included()) {
+                        let candidate_target = target_base_path.join(clean);
+                        validate_repo_target_disjointness(
+                            repo_path,
+                            repo_cfg.groups.keys().map(String::as_str),
+                            &candidate_target,
+                        )?;
+                    }
+                }
+            }
+        }
         for (line_no, literal_pat) in
             find_literal_full_enc_rules(&rules, target_base_opt.as_deref(), Some(&group_repo_dir))
         {
@@ -523,5 +587,91 @@ files = ".bashrc"
                 .map(String::as_str),
             Some("~/my-dots")
         );
+    }
+
+    #[test]
+    fn run_check_validates_in_project_cwd_repo_and_blocks_storage_overlap_and_home_collision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let dotler_dir = home_dir.join(".config").join("dotler");
+        let project_dir = tmp.path().join("project");
+        fs::create_dir_all(&dotler_dir).unwrap();
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let lock_path = dotler_dir.join("dotler.lock");
+        let lock = DotlerLock::new(lock_path.clone())
+            .acquire(Duration::from_millis(500), Duration::from_millis(10))
+            .unwrap();
+
+        let pass = crate::crypto::SecretString::new("in-project-check-pass".to_string());
+        let (vcfg, _, _) = crate::crypto::vault::init_vault(&pass).unwrap();
+
+        // 1. Valid in-project repo using `.` for `[secrets]`.
+        fs::write(
+            project_dir.join("dotler.toml"),
+            format!(
+                "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[secrets]\nos-nux = \".\"\nos-mac = \".\"\nos-win = \".\"\nos-bsd = \".\"\nfiles = \".env enc\"\n",
+                vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
+            ),
+        )
+        .unwrap();
+
+        let mut ctx = CoreContext::with_paths(
+            lock_path.clone(),
+            dotler_dir.join("config.toml"),
+            dotler_dir.join("state.db"),
+            None,
+            None,
+            false,
+        )
+        .with_cwd(&project_dir);
+        ctx.local_config = crate::core::resource::Resource::from_value(LocalConfig::default());
+
+        let ok_rep = run_check(&ctx, None, &lock).unwrap();
+        assert_eq!(ok_rep.status, "valid");
+
+        // 2. Overlapping `[config]` storage directory with `os-nux = "./config"` -> HardBlockedPath.
+        fs::write(
+            project_dir.join("dotler.toml"),
+            "[config]\nos-nux = \"./config\"\nos-mac = \"./config\"\nos-win = \"./config\"\nos-bsd = \"./config\"\nfiles = \"app.env\"\n",
+        )
+        .unwrap();
+        let overlap_err = run_check(&ctx, None, &lock).unwrap_err();
+        assert_eq!(overlap_err.exit_code(), 3);
+
+        // 3. Literal rule targeting `<repo>/<group>/...` with `os-nux = "."` -> HardBlockedPath.
+        fs::write(
+            project_dir.join("dotler.toml"),
+            "[config]\nos-nux = \".\"\nos-mac = \".\"\nos-win = \".\"\nos-bsd = \".\"\nfiles = \"config/secret.env\"\n",
+        )
+        .unwrap();
+        let nested_overlap_err = run_check(&ctx, None, &lock).unwrap_err();
+        assert_eq!(nested_overlap_err.exit_code(), 3);
+
+        // 4. `~` + `.env` vs `.` + `.env` fails when `cwd == home_dir`, passes in `project_dir`.
+        fs::write(
+            project_dir.join("dotler.toml"),
+            "[home_grp]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nos-bsd = \"~\"\nfiles = \".env\"\n\n[proj_grp]\nos-nux = \".\"\nos-mac = \".\"\nos-win = \".\"\nos-bsd = \".\"\nfiles = \".env\"\n",
+        )
+        .unwrap();
+        assert!(run_check(&ctx, None, &lock).is_ok());
+
+        let mut local_cfg_home = LocalConfig::default();
+        local_cfg_home.repos.insert(
+            "proj".to_string(),
+            project_dir.to_string_lossy().to_string(),
+        );
+        let mut ctx_at_home = CoreContext::with_paths(
+            lock_path,
+            dotler_dir.join("config.toml"),
+            dotler_dir.join("state.db"),
+            Some("proj".to_string()),
+            None,
+            false,
+        )
+        .with_cwd(&home_dir);
+        ctx_at_home.local_config = crate::core::resource::Resource::from_value(local_cfg_home);
+        let collision_err = run_check(&ctx_at_home, None, &lock).unwrap_err();
+        assert_eq!(collision_err.error_code(), "CONFIG_ERROR");
     }
 }

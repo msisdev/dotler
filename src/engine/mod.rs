@@ -259,7 +259,7 @@ impl EngineError {
             }
             EngineError::HardBlockedPath { path, .. } => {
                 format!(
-                    "Path '{}' violates path security rules. Ensure targets remain within home directory and contain no '..' traversal components.",
+                    "Path '{}' violates path security rules. Ensure targets remain within the group boundary ('~' or '.'), avoid repository storage overlaps, and contain no '..' traversal components.",
                     path.display()
                 )
             }

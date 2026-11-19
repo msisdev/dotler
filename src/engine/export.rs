@@ -2,7 +2,10 @@
 
 use std::fs;
 
-use crate::config::repo::{is_symlink, render_home_template, validate_os_target_path};
+use crate::config::repo::{
+    is_symlink, render_home_template, validate_os_target_path_with_home,
+    validate_repo_target_disjointness,
+};
 use crate::config::state::{DotlerLockGuard, write_file_safe};
 use crate::core::context::CoreContext;
 use crate::core::vault_loader::{
@@ -64,7 +67,13 @@ impl<'a> SyncEngine<'a> {
                 continue;
             }
 
-            validate_os_target_path(&plan.target_os_path, &home_dir)?;
+            let group_boundary = self.boundary_for_group(&plan.group_name)?;
+            validate_os_target_path_with_home(&plan.target_os_path, &group_boundary, &home_dir)?;
+            validate_repo_target_disjointness(
+                &self.repo_dir,
+                self.repo_config.groups.keys().map(String::as_str),
+                &plan.target_os_path,
+            )?;
             let raw_plain_bytes = read_repo_plaintext(self, plan)?;
             let plaintext_bytes = if plan.is_template {
                 render_home_template(&raw_plain_bytes, &home_dir, &plan.relative_path)?
@@ -244,7 +253,7 @@ pub fn run_export(
         needs_vault,
     )?;
 
-    let sync_engine = SyncEngine::new(
+    let mut sync_engine = SyncEngine::new(
         &resolved.label,
         &resolved.repo_path,
         &resolved.repo_config,
@@ -253,6 +262,9 @@ pub fn run_export(
         resolved.os_info,
         vault_key.as_ref(),
     );
+    if let Some(ref cwd) = ctx.cwd_override {
+        sync_engine = sync_engine.with_cwd(cwd);
+    }
 
     let plans = collect_group_plans(&sync_engine, groups, lock)?;
     for p in &plans {

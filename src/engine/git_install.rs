@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::local::{WalkDir, expand_tilde, resolve_home_for_config_path};
 use crate::config::repo::{
-    OsInfo, SelectionMode, evaluate_selection, is_symlink, parse_selection_rules,
-    prune_empty_parent_dirs, render_home_template, resolve_group_target_path, validate_os_dir_path,
-    validate_os_target_path, validate_path_security, validate_rule_pattern,
+    OsInfo, SelectionMode, evaluate_selection, is_cwd_group_path, is_home_group_path, is_symlink,
+    parse_selection_rules, prune_empty_parent_dirs, render_home_template,
+    resolve_group_target_path, validate_os_dir_path_with_home, validate_os_target_path_with_home,
+    validate_path_security, validate_rule_pattern,
 };
 use crate::config::state::{
     BACKUPS_DIR_PATH, DotlerLockGuard, InstalledFileRecord, StateDb, write_file_safe,
@@ -123,11 +124,45 @@ pub fn install_remote_with_options(
     branch: Option<&str>,
     devices: &[String],
     state: &StateDb,
+    lock: &DotlerLockGuard,
+    dry_run: bool,
+    use_keyring: bool,
+    is_interactive: bool,
+    vault_key_override: Option<&VaultKey>,
+    observer: &mut dyn CommandObserver,
+) -> Result<InstallReport, EngineError> {
+    install_remote_with_cwd(
+        url,
+        groups,
+        path_override,
+        branch,
+        devices,
+        state,
+        lock,
+        dry_run,
+        use_keyring,
+        is_interactive,
+        vault_key_override,
+        None,
+        observer,
+    )
+}
+
+/// Installs remote repository dotfiles with explicit working directory resolution for `.`/`./...` paths.
+#[allow(clippy::too_many_arguments)]
+pub fn install_remote_with_cwd(
+    url: &RemoteRepoUrl,
+    groups: &[String],
+    path_override: Option<&Path>,
+    branch: Option<&str>,
+    devices: &[String],
+    state: &StateDb,
     _lock: &DotlerLockGuard,
     dry_run: bool,
     use_keyring: bool,
     is_interactive: bool,
     vault_key_override: Option<&VaultKey>,
+    cwd_override: Option<&Path>,
     observer: &mut dyn CommandObserver,
 ) -> Result<InstallReport, EngineError> {
     let temp_dir = TempDirGuard::new().map_err(EngineError::Io)?;
@@ -153,22 +188,27 @@ pub fn install_remote_with_options(
 
     let os_info = OsInfo::detect();
     let home = resolve_home_for_config_path(state.path());
+    let cwd = match cwd_override {
+        Some(dir) => dir.to_path_buf(),
+        None => std::env::current_dir()?,
+    };
     let mut unlocked_vault_key: Option<VaultKey> = None;
     let mut planned = Vec::new();
     let mut preview_entries = Vec::new();
 
     for g_name in &target_groups {
         let group = &repo_config.groups[g_name];
-        let target_base = resolve_install_target_base(
+        let (target_base, boundary_dir) = resolve_install_target_base(
             g_name,
             group,
             path_override,
             devices,
             &os_info,
             &home,
+            &cwd,
             &repo_config.groups,
         )?;
-        validate_os_dir_path(&target_base, &home)?;
+        validate_os_dir_path_with_home(&target_base, &boundary_dir, &home)?;
 
         let group_dir = manifest_dir.join(g_name);
         if !group_dir.is_dir() {
@@ -274,7 +314,7 @@ pub fn install_remote_with_options(
             };
 
             let target_file_path = target_base.join(&clean_rel);
-            validate_os_target_path(&target_file_path, &home)?;
+            validate_os_target_path_with_home(&target_file_path, &boundary_dir, &home)?;
 
             let is_template = mode.is_some_and(|m| m.is_template());
             let file_content = if is_template {
@@ -330,6 +370,7 @@ pub fn install_remote_with_options(
     execute_install_wal(planned, url, state, observer)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_install_target_base(
     group_name: &str,
     group: &crate::config::repo::GroupConfig,
@@ -337,21 +378,45 @@ fn resolve_install_target_base(
     devices: &[String],
     os_info: &OsInfo,
     home: &Path,
+    cwd: &Path,
     all_groups: &std::collections::BTreeMap<String, crate::config::repo::GroupConfig>,
-) -> Result<PathBuf, EngineError> {
+) -> Result<(PathBuf, PathBuf), EngineError> {
     if let Some(override_path) = path_override {
         let path_str = override_path.to_string_lossy();
-        let check_path = if path_str == "~" || path_str.starts_with("~/") {
-            path_str.to_string()
-        } else if override_path == home {
-            "~".to_string()
-        } else if let Ok(rel) = override_path.strip_prefix(home) {
-            format!("~/{}", rel.to_string_lossy().trim_start_matches('/'))
-        } else {
-            path_str.to_string()
-        };
-        validate_path_security(&check_path)?;
-        return Ok(expand_with_home(&path_str, home, override_path));
+        if is_home_group_path(&path_str) {
+            validate_path_security(&path_str)?;
+            return Ok((
+                expand_with_home(&path_str, home, override_path),
+                home.to_path_buf(),
+            ));
+        }
+        if is_cwd_group_path(&path_str) {
+            validate_path_security(&path_str)?;
+            return Ok((expand_with_cwd(&path_str, cwd), cwd.to_path_buf()));
+        }
+        if override_path == home {
+            validate_path_security("~")?;
+            return Ok((home.to_path_buf(), home.to_path_buf()));
+        }
+        if let Ok(rel) = override_path.strip_prefix(home) {
+            let check_path = format!("~/{}", rel.to_string_lossy().trim_start_matches('/'));
+            validate_path_security(&check_path)?;
+            return Ok((override_path.to_path_buf(), home.to_path_buf()));
+        }
+        if override_path == cwd {
+            validate_path_security(".")?;
+            return Ok((cwd.to_path_buf(), cwd.to_path_buf()));
+        }
+        if let Ok(rel) = override_path.strip_prefix(cwd) {
+            let check_path = format!("./{}", rel.to_string_lossy().trim_start_matches('/'));
+            validate_path_security(&check_path)?;
+            return Ok((override_path.to_path_buf(), cwd.to_path_buf()));
+        }
+        validate_path_security(&path_str)?;
+        return Ok((
+            expand_with_home(&path_str, home, override_path),
+            home.to_path_buf(),
+        ));
     }
 
     let path_str = resolve_group_target_path(group, devices, os_info).ok_or_else(|| {
@@ -361,16 +426,40 @@ fn resolve_install_target_base(
         }
     })?;
     validate_path_security(&path_str)?;
-    Ok(expand_with_home(&path_str, home, Path::new(&path_str)))
+    if is_cwd_group_path(&path_str) {
+        return Ok((expand_with_cwd(&path_str, cwd), cwd.to_path_buf()));
+    }
+    Ok((
+        expand_with_home(&path_str, home, Path::new(&path_str)),
+        home.to_path_buf(),
+    ))
 }
 
 fn expand_with_home(raw: &str, home: &Path, fallback: &Path) -> PathBuf {
     if raw == "~" {
         home.to_path_buf()
     } else if let Some(stripped) = raw.strip_prefix("~/") {
-        home.join(stripped)
+        let rel = stripped.trim_matches('/');
+        if rel.is_empty() {
+            home.to_path_buf()
+        } else {
+            home.join(rel)
+        }
     } else {
         fallback.to_path_buf()
+    }
+}
+
+fn expand_with_cwd(raw: &str, cwd: &Path) -> PathBuf {
+    let mut rel = raw.strip_prefix('.').unwrap_or(raw).trim_start_matches('/');
+    while let Some(next) = rel.strip_prefix("./") {
+        rel = next.trim_start_matches('/');
+    }
+    let rel = rel.trim_end_matches('/');
+    if rel.is_empty() || rel == "." {
+        cwd.to_path_buf()
+    } else {
+        cwd.join(rel)
     }
 }
 
@@ -579,7 +668,8 @@ pub fn run_git_install(
     let local_cfg = ctx.local_config.get()?;
     let devices = ctx.effective_devices(local_cfg);
     let state = ctx.state_db.get()?;
-    install_remote_with_options(
+    let effective_cwd = ctx.effective_cwd()?;
+    install_remote_with_cwd(
         &url,
         groups,
         path_override,
@@ -591,6 +681,7 @@ pub fn run_git_install(
         local_cfg.use_keyring,
         ctx.is_interactive,
         None,
+        Some(&effective_cwd),
         observer,
     )
 }
@@ -646,7 +737,7 @@ fn resolve_installed_group_base(target: &Path, relative_path: &str, home: &Path)
                 break;
             }
         }
-        if matched && !base.as_os_str().is_empty() && base.starts_with(home) {
+        if matched && !base.as_os_str().is_empty() && base.parent().is_some() {
             return base;
         }
     }
@@ -840,6 +931,121 @@ files = "nested/new.conf"
                 .unwrap()
                 .count(),
             0
+        );
+    }
+
+    #[test]
+    fn install_remote_and_uninstall_support_cwd_group_and_relative_path_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let dotler_dir = home.join(".config").join("dotler");
+        let project_dir = tmp.path().join("project_outside_home");
+        fs::create_dir_all(&dotler_dir).unwrap();
+        fs::create_dir_all(project_dir.join("sub")).unwrap();
+        fs::write(project_dir.join("sub/existing.env"), b"OLD_VAL=1\n").unwrap();
+
+        let state = StateDb::open(&dotler_dir.join("state.db")).unwrap();
+        let lock = DotlerLock::new(dotler_dir.join("dotler.lock"))
+            .acquire(Duration::from_millis(500), Duration::from_millis(10))
+            .unwrap();
+
+        let remote_toml = r#"
+[proj]
+os-nux = "."
+os-mac = "."
+os-win = "."
+os-bsd = "."
+files = """
+sub/existing.env
+fresh/nested/new.env
+"""
+"#;
+        let (_git_tmp, url) = create_test_bare_repo(
+            remote_toml,
+            &[
+                ("proj/sub/existing.env", b"NEW_VAL=2\n"),
+                ("proj/fresh/nested/new.env", b"FRESH=1\n"),
+            ],
+        );
+
+        let mut obs = NoopObserver;
+        let rep = install_remote_with_cwd(
+            &url,
+            &["proj".to_string()],
+            None,
+            None,
+            &[],
+            &state,
+            &lock,
+            false,
+            false,
+            false,
+            None,
+            Some(&project_dir),
+            &mut obs,
+        )
+        .unwrap();
+        assert_eq!(rep.installed_files.len(), 2);
+        assert_eq!(
+            fs::read(project_dir.join("sub/existing.env")).unwrap(),
+            b"NEW_VAL=2\n"
+        );
+        assert_eq!(
+            fs::read(project_dir.join("fresh/nested/new.env")).unwrap(),
+            b"FRESH=1\n"
+        );
+
+        // Escaping cwd via `-p ./../escape` must be blocked with HardBlockedPath.
+        let escape_err = install_remote_with_cwd(
+            &url,
+            &["proj".to_string()],
+            Some(Path::new("./../escape")),
+            None,
+            &[],
+            &state,
+            &lock,
+            false,
+            false,
+            false,
+            None,
+            Some(&project_dir),
+            &mut obs,
+        )
+        .unwrap_err();
+        assert_eq!(escape_err.exit_code(), 3);
+
+        // Uninstall restores backed-up file, deletes fresh file, and prunes empty nested dirs up to `project_dir`.
+        let uninst = uninstall_remote(&["proj".to_string()], &state, &lock, false).unwrap();
+        assert_eq!(uninst.restored_backups.len(), 1);
+        assert_eq!(uninst.removed_files.len(), 1);
+        assert_eq!(
+            fs::read(project_dir.join("sub/existing.env")).unwrap(),
+            b"OLD_VAL=1\n"
+        );
+        assert!(!project_dir.join("fresh").exists());
+        assert!(project_dir.is_dir());
+
+        // Explicit `-p ./override_sub` deploys relative to `cwd`.
+        let rep2 = install_remote_with_cwd(
+            &url,
+            &["proj".to_string()],
+            Some(Path::new("./override_sub")),
+            None,
+            &[],
+            &state,
+            &lock,
+            false,
+            false,
+            false,
+            None,
+            Some(&project_dir),
+            &mut obs,
+        )
+        .unwrap();
+        assert_eq!(rep2.installed_files.len(), 2);
+        assert_eq!(
+            fs::read(project_dir.join("override_sub/sub/existing.env")).unwrap(),
+            b"NEW_VAL=2\n"
         );
     }
 }

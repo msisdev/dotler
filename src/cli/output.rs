@@ -229,7 +229,7 @@ impl CliError {
             | CliError::Config(crate::config::ConfigError::UnknownField { hint, .. })
             | CliError::Config(crate::config::ConfigError::UnknownOsKey { hint, .. }) => hint.clone(),
             CliError::Config(crate::config::ConfigError::HardBlockedPath { path, .. }) => format!(
-                "Path '{path}' violates path security rules. Ensure targets remain within home directory and contain no '..' components."
+                "Path '{path}' violates path security rules. Ensure targets remain within the group boundary ('~' or '.'), avoid repository storage overlaps, and contain no '..' components."
             ),
             CliError::Config(crate::config::ConfigError::CrossGroupFileCollision {
                 path,

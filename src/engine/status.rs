@@ -1,16 +1,18 @@
 //! 3-way synchronization status reconciliation across OS files, repository files, and `state.db`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::local::{WalkDir, expand_tilde};
+use crate::config::path_security::resolve_with_existing_ancestors;
 use crate::config::repo::{
-    GroupConfig, SelectionMode, SelectionRule, evaluate_selection, parse_selection_rules,
-    render_home_template, resolve_group_target_path, unrender_home_template,
-    validate_dir_no_symlinks, validate_os_dir_path, validate_os_target_path, validate_rule_pattern,
+    GroupConfig, SelectionMode, SelectionRule, evaluate_selection, is_cwd_group_path,
+    parse_selection_rules, render_home_template, resolve_group_target_path, unrender_home_template,
+    validate_dir_no_symlinks, validate_os_dir_path_with_home, validate_os_target_path_with_home,
+    validate_repo_target_disjointness, validate_rule_pattern,
 };
 use crate::config::state::{DotlerLockGuard, TMP_FILE_PREFIX};
 use crate::core::context::CoreContext;
@@ -77,7 +79,7 @@ pub fn run_status(
         has_enc && ctx.is_interactive,
     )?;
 
-    let sync_engine = SyncEngine::new(
+    let mut sync_engine = SyncEngine::new(
         &resolved.label,
         &resolved.repo_path,
         &resolved.repo_config,
@@ -86,6 +88,9 @@ pub fn run_status(
         resolved.os_info,
         vault_key.as_ref(),
     );
+    if let Some(ref cwd) = ctx.cwd_override {
+        sync_engine = sync_engine.with_cwd(cwd);
+    }
 
     plan(&sync_engine, group_filter, lock)
 }
@@ -117,6 +122,22 @@ pub fn plan(
         plan_group(engine, group_name, group_cfg, &home_dir, &mut plans)?;
     }
 
+    let mut seen_targets: BTreeMap<PathBuf, &str> = BTreeMap::new();
+    for p in &plans {
+        let resolved_target = resolve_with_existing_ancestors(&p.target_os_path);
+        if let Some(prev_group) = seen_targets.insert(resolved_target, p.group_name.as_str())
+            && prev_group != p.group_name
+        {
+            return Err(EngineError::Config(
+                crate::config::ConfigError::CrossGroupFileCollision {
+                    path: p.target_os_path.display().to_string(),
+                    group1: prev_group.to_string(),
+                    group2: p.group_name.clone(),
+                },
+            ));
+        }
+    }
+
     plans.sort_by(|a, b| a.target_os_path.cmp(&b.target_os_path));
     Ok(plans)
 }
@@ -133,13 +154,41 @@ fn plan_group(
             Some(base) => base,
             None => return Ok(()),
         };
-    let target_base_path = engine.expand_target_base(&target_base_str);
+    let (target_base_path, boundary_dir) = engine.expand_target_base_checked(&target_base_str)?;
+    validate_repo_target_disjointness(
+        &engine.repo_dir,
+        engine.repo_config.groups.keys().map(String::as_str),
+        &target_base_path,
+    )?;
+    let is_cwd_group = is_cwd_group_path(&target_base_str);
+    let canon_repo = resolve_with_existing_ancestors(&engine.repo_dir);
+    let canon_target_base = resolve_with_existing_ancestors(&target_base_path);
+    let in_project_repo = canon_target_base.starts_with(&canon_repo);
     let rules = parse_selection_rules(&group_cfg.files)?;
 
     let group_repo_dir = engine.repo_dir.join(group_name);
     let mut candidates = BTreeSet::new();
-    collect_repo_and_db_candidates(engine, group_name, &group_repo_dir, &mut candidates)?;
-    collect_os_candidates(engine, &target_base_path, home_dir, &rules, &mut candidates)?;
+    let cwd_scope = if is_cwd_group {
+        Some((target_base_path.as_path(), canon_target_base.as_path()))
+    } else {
+        None
+    };
+    collect_repo_and_db_candidates(
+        engine,
+        group_name,
+        &group_repo_dir,
+        cwd_scope,
+        &mut candidates,
+    )?;
+    collect_os_candidates(
+        engine,
+        &target_base_path,
+        &boundary_dir,
+        home_dir,
+        in_project_repo,
+        &rules,
+        &mut candidates,
+    )?;
     collect_single_file_rule_candidates(
         &target_base_path,
         &group_repo_dir,
@@ -152,13 +201,20 @@ fn plan_group(
             continue;
         }
         let target_os_path = target_base_path.join(&rel_path);
-        if target_os_path.starts_with(&engine.repo_dir) {
+        if in_project_repo {
+            validate_repo_target_disjointness(
+                &engine.repo_dir,
+                engine.repo_config.groups.keys().map(String::as_str),
+                &target_os_path,
+            )?;
+        } else if target_os_path.starts_with(&engine.repo_dir) {
             continue;
         }
         if let Some(entry) = build_file_plan(
             engine,
             group_name,
             &group_repo_dir,
+            &boundary_dir,
             home_dir,
             &rules,
             rel_path,
@@ -175,6 +231,7 @@ fn collect_repo_and_db_candidates(
     engine: &SyncEngine,
     group_name: &str,
     group_repo_dir: &Path,
+    cwd_scope: Option<(&Path, &Path)>,
     candidates: &mut BTreeSet<String>,
 ) -> Result<(), EngineError> {
     validate_dir_no_symlinks(group_repo_dir)?;
@@ -241,6 +298,14 @@ fn collect_repo_and_db_candidates(
 
     if let Ok(records) = engine.state_db.list_synced_files(Some(&engine.repo_label)) {
         for r in records.into_iter().filter(|r| r.group_name == group_name) {
+            if let Some((base_lex, base_canon)) = cwd_scope {
+                let rec_path = Path::new(&r.target_path);
+                if !rec_path.starts_with(base_lex)
+                    && !resolve_with_existing_ancestors(rec_path).starts_with(base_canon)
+                {
+                    continue;
+                }
+            }
             candidates.insert(r.relative_path);
         }
     }
@@ -251,11 +316,13 @@ fn collect_repo_and_db_candidates(
 fn collect_os_candidates(
     engine: &SyncEngine,
     target_base_path: &Path,
+    boundary_dir: &Path,
     home_dir: &Path,
+    in_project_repo: bool,
     rules: &[SelectionRule],
     candidates: &mut BTreeSet<String>,
 ) -> Result<(), EngineError> {
-    validate_os_dir_path(target_base_path, home_dir)?;
+    validate_os_dir_path_with_home(target_base_path, boundary_dir, home_dir)?;
     if !target_base_path.is_dir() {
         return Ok(());
     }
@@ -265,6 +332,35 @@ fn collect_os_candidates(
         .as_ref()
         .map(|h| h.join(".config").join("dotler"))
         .unwrap_or_else(|| expand_tilde("~/.config/dotler"));
+    let manifest_path = engine.repo_dir.join("dotler.toml");
+    let canon_manifest = resolve_with_existing_ancestors(&manifest_path);
+    let group_storage_dirs: Vec<(PathBuf, PathBuf)> = if in_project_repo {
+        engine
+            .repo_config
+            .groups
+            .keys()
+            .map(|g| {
+                let p = engine.repo_dir.join(g);
+                let c = resolve_with_existing_ancestors(&p);
+                (p, c)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let is_repo_internal = |p: &Path| -> bool {
+        if in_project_repo {
+            let rp = resolve_with_existing_ancestors(p);
+            p == manifest_path
+                || rp == canon_manifest
+                || group_storage_dirs
+                    .iter()
+                    .any(|(gp, gc)| p == gp || p.starts_with(gp) || rp == *gc || rp.starts_with(gc))
+        } else {
+            p == engine.repo_dir || p.starts_with(&engine.repo_dir)
+        }
+    };
 
     for entry in WalkDir::new(target_base_path)
         .filter_entry(|e| {
@@ -274,8 +370,7 @@ fn collect_os_candidates(
             let p = e.path();
             if p.starts_with(&dotler_config_dir)
                 || p == dotler_config_dir
-                || p.starts_with(&engine.repo_dir)
-                || p == engine.repo_dir
+                || is_repo_internal(p)
                 || e.file_name() == ".git"
             {
                 return false;
@@ -297,7 +392,7 @@ fn collect_os_candidates(
         if let Ok(rel) = entry.path().strip_prefix(target_base_path) {
             let rel_str = rel.to_string_lossy().to_string();
             if !is_reserved_dotler_or_git(&rel_str)
-                && !entry.path().starts_with(&engine.repo_dir)
+                && !is_repo_internal(entry.path())
                 && evaluate_selection(rules, &rel_str).is_some()
             {
                 candidates.insert(rel_str);
@@ -340,10 +435,12 @@ fn collect_single_file_rule_candidates(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_file_plan(
     engine: &SyncEngine,
     group_name: &str,
     group_repo_dir: &Path,
+    boundary_dir: &Path,
     home_dir: &Path,
     rules: &[SelectionRule],
     rel_path: String,
@@ -373,7 +470,7 @@ fn build_file_plan(
     }
 
     let mode_val = mode.unwrap();
-    validate_os_target_path(&target_os_path, home_dir)?;
+    validate_os_target_path_with_home(&target_os_path, boundary_dir, home_dir)?;
     let is_encrypted = mode_val.is_encrypted();
     let is_full_encrypted = mode_val.is_full_encrypted();
     let is_template = mode_val.is_template();
@@ -704,5 +801,77 @@ mod tests {
             plans4.is_empty(),
             "non-existent directory with sub-rule must not be planned as a single file: {plans4:?}"
         );
+    }
+
+    #[test]
+    fn plan_in_project_cwd_skips_manifest_and_group_storage_and_scopes_db_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let project_a = tmp.path().join("project_a");
+        let project_b = tmp.path().join("project_b");
+        fs::create_dir_all(&home_dir).unwrap();
+        fs::create_dir_all(project_a.join("secrets")).unwrap();
+        fs::create_dir_all(project_a.join("other")).unwrap();
+        fs::create_dir_all(project_a.join("nested")).unwrap();
+        fs::create_dir_all(&project_b).unwrap();
+
+        fs::write(project_a.join(".env"), b"A=1\n").unwrap();
+        fs::write(project_a.join("nested/app.env"), b"B=2\n").unwrap();
+        fs::write(project_a.join("other/ignored_storage_file"), b"cipher\n").unwrap();
+        fs::write(project_b.join(".env"), b"B_ONLY=1\n").unwrap();
+
+        let toml = "[secrets]\nos-nux = \".\"\nos-mac = \".\"\nos-win = \".\"\nos-bsd = \".\"\nfiles = \"*\"\n\n[other]\nos-nux = \"./other_target\"\nos-mac = \"./other_target\"\nos-win = \"./other_target\"\nos-bsd = \"./other_target\"\nfiles = \"*.conf\"\n";
+        fs::write(project_a.join("dotler.toml"), toml).unwrap();
+        let repo_cfg = RepoConfig::parse(toml).unwrap();
+
+        let state_db = StateDb::open(&tmp.path().join("state.db")).unwrap();
+        state_db
+            .upsert_synced_file(&crate::config::state::SyncedFileRecord {
+                target_path: project_a
+                    .join("only_in_a.env")
+                    .to_string_lossy()
+                    .to_string(),
+                repo_label: "proj".to_string(),
+                group_name: "secrets".to_string(),
+                relative_path: "only_in_a.env".to_string(),
+                file_hash: "deadbeef".to_string(),
+                updated_at: 100,
+            })
+            .unwrap();
+        let lock = DotlerLock::new(tmp.path().join("dotler.lock"))
+            .acquire(Duration::from_millis(500), Duration::from_millis(10))
+            .unwrap();
+
+        // Planning in project_a ignores `dotler.toml` and group storage (`other/`), while keeping `project_a` DB record.
+        let engine_a = SyncEngine::new(
+            "proj",
+            &project_a,
+            &repo_cfg,
+            &state_db,
+            vec![],
+            OsInfo::detect(),
+            None,
+        )
+        .with_home_dir(&home_dir)
+        .with_cwd(&project_a);
+        let plans_a = plan(&engine_a, Some("secrets"), &lock).unwrap();
+        let rel_a: Vec<&str> = plans_a.iter().map(|p| p.relative_path.as_str()).collect();
+        assert_eq!(rel_a, vec![".env", "nested/app.env", "only_in_a.env"]);
+
+        // Planning in project_b scopes out `project_a`'s DB record (`only_in_a.env`).
+        let engine_b = SyncEngine::new(
+            "proj",
+            &project_a,
+            &repo_cfg,
+            &state_db,
+            vec![],
+            OsInfo::detect(),
+            None,
+        )
+        .with_home_dir(&home_dir)
+        .with_cwd(&project_b);
+        let plans_b = plan(&engine_b, Some("secrets"), &lock).unwrap();
+        let rel_b: Vec<&str> = plans_b.iter().map(|p| p.relative_path.as_str()).collect();
+        assert_eq!(rel_b, vec![".env"]);
     }
 }

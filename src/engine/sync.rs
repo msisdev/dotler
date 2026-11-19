@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::local::expand_tilde;
 use crate::config::repo::{
-    OsInfo, RepoConfig, is_symlink, prune_empty_parent_dirs, resolve_group_target_path,
-    unrender_home_template, validate_os_target_path,
+    OsInfo, RepoConfig, is_cwd_group_path, is_home_group_path, is_symlink, prune_empty_parent_dirs,
+    resolve_group_target_path, unrender_home_template, validate_os_target_path_with_home,
+    validate_repo_target_disjointness,
 };
 pub use crate::config::state::{ATOMIC_REPLACE_RETRIES, TMP_FILE_PREFIX, write_file_safe};
 use crate::config::state::{DotlerLockGuard, StateDb, SyncedFileRecord};
@@ -46,6 +47,7 @@ pub struct SyncEngine<'a> {
     pub os_info: OsInfo,
     pub vault_key: Option<&'a VaultKey>,
     pub home_dir: Option<PathBuf>,
+    pub cwd: Option<PathBuf>,
 }
 
 struct PreparedImport<'p> {
@@ -84,11 +86,17 @@ impl<'a> SyncEngine<'a> {
             os_info,
             vault_key,
             home_dir: None,
+            cwd: None,
         }
     }
 
     pub fn with_home_dir(mut self, home: impl Into<PathBuf>) -> Self {
         self.home_dir = Some(home.into());
+        self
+    }
+
+    pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(cwd.into());
         self
     }
 
@@ -100,18 +108,63 @@ impl<'a> SyncEngine<'a> {
         }
     }
 
-    pub(crate) fn expand_target_base(&self, base_str: &str) -> PathBuf {
-        if let Some(ref home) = self.home_dir {
-            if base_str == "~" {
-                home.clone()
-            } else if let Some(stripped) = base_str.strip_prefix("~/") {
-                home.join(stripped)
-            } else {
-                PathBuf::from(base_str)
-            }
-        } else {
-            expand_tilde(base_str)
+    pub(crate) fn effective_cwd(&self) -> Result<PathBuf, EngineError> {
+        match &self.cwd {
+            Some(cwd) => Ok(cwd.clone()),
+            None => Ok(std::env::current_dir()?),
         }
+    }
+
+    pub(crate) fn expand_target_base_checked(
+        &self,
+        base_str: &str,
+    ) -> Result<(PathBuf, PathBuf), EngineError> {
+        if is_home_group_path(base_str) {
+            let home = self.effective_home_dir();
+            let rel = base_str.strip_prefix("~/").unwrap_or("").trim_matches('/');
+            let target = if rel.is_empty() {
+                home.clone()
+            } else {
+                home.join(rel)
+            };
+            return Ok((target, home));
+        }
+
+        if is_cwd_group_path(base_str) {
+            let cwd = self.effective_cwd()?;
+            let mut rel = base_str
+                .strip_prefix('.')
+                .unwrap_or(base_str)
+                .trim_start_matches('/');
+            while let Some(next) = rel.strip_prefix("./") {
+                rel = next.trim_start_matches('/');
+            }
+            let rel = rel.trim_end_matches('/');
+            let target = if rel.is_empty() || rel == "." {
+                cwd.clone()
+            } else {
+                cwd.join(rel)
+            };
+            return Ok((target, cwd));
+        }
+
+        Ok((PathBuf::from(base_str), self.effective_home_dir()))
+    }
+
+    pub(crate) fn expand_target_base(&self, base_str: &str) -> PathBuf {
+        self.expand_target_base_checked(base_str)
+            .map(|(target, _)| target)
+            .unwrap_or_else(|_| PathBuf::from(base_str))
+    }
+
+    pub(crate) fn boundary_for_group(&self, group_name: &str) -> Result<PathBuf, EngineError> {
+        if let Some(group) = self.repo_config.groups.get(group_name)
+            && let Some(base_str) = resolve_group_target_path(group, &self.devices, &self.os_info)
+        {
+            let (_, boundary) = self.expand_target_base_checked(&base_str)?;
+            return Ok(boundary);
+        }
+        Ok(self.effective_home_dir())
     }
 
     pub(crate) fn group_base_for(&self, group_name: &str) -> PathBuf {
@@ -194,7 +247,13 @@ impl<'a> SyncEngine<'a> {
                     reason: "symbolic links are prohibited inside a dotler repository".to_string(),
                 });
             }
-            validate_os_target_path(&plan.target_os_path, &home_dir)?;
+            let group_boundary = self.boundary_for_group(&plan.group_name)?;
+            validate_os_target_path_with_home(&plan.target_os_path, &group_boundary, &home_dir)?;
+            validate_repo_target_disjointness(
+                &self.repo_dir,
+                self.repo_config.groups.keys().map(String::as_str),
+                &plan.target_os_path,
+            )?;
             if is_symlink(&plan.target_os_path) && !plan.target_os_path.is_file() {
                 return Err(EngineError::HardBlockedPath {
                     path: plan.target_os_path.clone(),
@@ -555,7 +614,7 @@ pub fn run_import(
         needs_vault,
     )?;
 
-    let sync_engine = SyncEngine::new(
+    let mut sync_engine = SyncEngine::new(
         &resolved.label,
         &resolved.repo_path,
         &resolved.repo_config,
@@ -564,6 +623,9 @@ pub fn run_import(
         resolved.os_info,
         vault_key.as_ref(),
     );
+    if let Some(ref cwd) = ctx.cwd_override {
+        sync_engine = sync_engine.with_cwd(cwd);
+    }
 
     let plans = collect_group_plans(&sync_engine, groups, lock)?;
     sync_engine.import_files_with_options(&plans, lock, force, dry_run, observer)
@@ -896,5 +958,75 @@ mod tests {
             .unwrap();
         assert_eq!(cap_obs.entries.len(), 1);
         assert_eq!(cap_obs.entries[0].repo_action, PlanActionKind::Create);
+    }
+
+    #[test]
+    fn in_project_cwd_import_and_export_roundtrip_with_content_and_full_encryption() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let project_dir = tmp.path().join("my-app");
+        fs::create_dir_all(&home_dir).unwrap();
+        fs::create_dir_all(project_dir.join("private")).unwrap();
+
+        let pass = crate::crypto::SecretString::new("project-local-enc-pass".to_string());
+        let (vcfg, vkey, _) = crate::crypto::vault::init_vault(&pass).unwrap();
+        let toml = format!(
+            "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[secrets]\nos-nux = \".\"\nos-mac = \".\"\nos-win = \".\"\nos-bsd = \".\"\nfiles = \"\"\"\n.env enc\nprivate/* enc=full\n\"\"\"\n",
+            vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
+        );
+        fs::write(project_dir.join("dotler.toml"), &toml).unwrap();
+        fs::write(project_dir.join(".env"), b"DB_PASS=secret123\n").unwrap();
+        fs::write(project_dir.join("private/api.key"), b"KEY_XYZ\n").unwrap();
+
+        let repo_cfg = RepoConfig::parse(&toml).unwrap();
+        let state_db = StateDb::open(&tmp.path().join("state.db")).unwrap();
+        let lock = DotlerLock::new(tmp.path().join("dotler.lock"))
+            .acquire(Duration::from_millis(500), Duration::from_millis(10))
+            .unwrap();
+
+        let engine = SyncEngine::new(
+            "my-app",
+            &project_dir,
+            &repo_cfg,
+            &state_db,
+            vec![],
+            OsInfo::detect(),
+            Some(&vkey),
+        )
+        .with_home_dir(&home_dir)
+        .with_cwd(&project_dir);
+
+        let plans = engine.plan(None, &lock).unwrap();
+        assert_eq!(plans.len(), 2);
+        let imp = engine.import_files(&plans, &lock, false).unwrap();
+        assert_eq!(imp.processed, 2);
+        assert!(project_dir.join("secrets/.env.dotler.enc").is_file());
+        let expected_fenc = project_dir
+            .join("secrets")
+            .join(vkey.derive_full_enc_filename("private/api.key"));
+        assert!(expected_fenc.is_file());
+
+        // Remove local plaintext files and restore them cleanly via export.
+        fs::remove_file(project_dir.join(".env")).unwrap();
+        fs::remove_file(project_dir.join("private/api.key")).unwrap();
+        fs::remove_dir(project_dir.join("private")).unwrap();
+
+        let export_plans = engine.plan(None, &lock).unwrap();
+        let exp = engine
+            .export_files(&export_plans, &lock, false, false)
+            .unwrap();
+        assert_eq!(exp.processed, 2);
+        assert_eq!(
+            fs::read(project_dir.join(".env")).unwrap(),
+            b"DB_PASS=secret123\n"
+        );
+        assert_eq!(
+            fs::read(project_dir.join("private/api.key")).unwrap(),
+            b"KEY_XYZ\n"
+        );
+        assert_eq!(
+            fs::read_to_string(project_dir.join("dotler.toml")).unwrap(),
+            toml
+        );
     }
 }

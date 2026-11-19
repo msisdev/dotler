@@ -7,9 +7,11 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::config::local::WalkDir;
+use crate::config::path_security::resolve_with_existing_ancestors;
 use crate::config::repo::{
-    evaluate_selection, is_symlink, parse_selection_rules, prune_empty_parent_dirs,
-    resolve_group_target_path, validate_dir_no_symlinks, validate_rule_pattern,
+    evaluate_selection, is_cwd_group_path, is_symlink, parse_selection_rules,
+    prune_empty_parent_dirs, resolve_group_target_path, validate_dir_no_symlinks,
+    validate_rule_pattern,
 };
 use crate::config::state::{DotlerLockGuard, TMP_FILE_PREFIX, write_file_safe};
 use crate::core::context::CoreContext;
@@ -117,7 +119,7 @@ pub fn run_tidy(
         needs_vault,
     )?;
 
-    let sync_engine = SyncEngine::new(
+    let mut sync_engine = SyncEngine::new(
         &resolved.label,
         &resolved.repo_path,
         &resolved.repo_config,
@@ -126,6 +128,9 @@ pub fn run_tidy(
         resolved.os_info,
         vault_key.as_ref(),
     );
+    if let Some(ref cwd) = ctx.cwd_override {
+        sync_engine = sync_engine.with_cwd(cwd);
+    }
 
     tidy_groups_with_observer(&sync_engine, groups, lock, policy, dry_run, observer)
 }
@@ -176,9 +181,11 @@ pub fn tidy_groups_with_observer(
 
         let resolved_target_base =
             resolve_group_target_path(group_cfg, &engine.devices, &engine.os_info)
-                .map(|s| engine.expand_target_base(&s));
+                .map(|s| engine.expand_target_base_checked(&s))
+                .transpose()?;
         let group_base = resolved_target_base
-            .clone()
+            .as_ref()
+            .map(|(b, _)| b.clone())
             .unwrap_or_else(|| engine.effective_home_dir());
 
         let rules = parse_selection_rules(&group_cfg.files)?;
@@ -421,10 +428,27 @@ pub fn tidy_groups_with_observer(
         .map(|p| p.target_os_path.to_string_lossy().to_string())
         .collect();
 
+    let effective_cwd = engine.effective_cwd()?;
+    let canon_cwd = resolve_with_existing_ancestors(&effective_cwd);
+
     let mut orphan_ops: Vec<PlannedOrphanOp> = Vec::new();
     for rec in all_synced {
         if !group_filters.is_empty() && !group_filters.iter().any(|g| g == &rec.group_name) {
             continue;
+        }
+        let is_cwd_group = engine
+            .repo_config
+            .groups
+            .get(&rec.group_name)
+            .and_then(|g| resolve_group_target_path(g, &engine.devices, &engine.os_info))
+            .is_some_and(|s| is_cwd_group_path(&s));
+        if is_cwd_group {
+            let rec_path = Path::new(&rec.target_path);
+            if !rec_path.starts_with(&effective_cwd)
+                && !resolve_with_existing_ancestors(rec_path).starts_with(&canon_cwd)
+            {
+                continue;
+            }
         }
         if pruned_repo_targets.contains(&rec.target_path)
             || active_target_paths.contains(&rec.target_path)
@@ -606,12 +630,8 @@ fn resolve_orphan_group_base(
                 break;
             }
         }
-        if matched && !base.as_os_str().is_empty() {
-            let home = engine.effective_home_dir();
-            if base.starts_with(&home) {
-                return base;
-            }
-            return home;
+        if matched && !base.as_os_str().is_empty() && base.parent().is_some() {
+            return base;
         }
     }
 
@@ -1005,6 +1025,91 @@ mod tests {
                 .get_synced_file(&notes_os.join("keep.md").to_string_lossy())
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn tidy_purge_on_cwd_group_isolates_other_projects_and_prunes_empty_subdirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let repo_dir = tmp.path().join("repo");
+        let project_a = tmp.path().join("project_a");
+        let project_b = tmp.path().join("project_b");
+        fs::create_dir_all(&home_dir).unwrap();
+        fs::create_dir_all(repo_dir.join("proj/nested")).unwrap();
+        fs::create_dir_all(repo_dir.join("proj/old")).unwrap();
+        fs::create_dir_all(&project_a).unwrap();
+        fs::create_dir_all(&project_b).unwrap();
+
+        fs::write(repo_dir.join("proj/nested/app.env"), b"KEEP=1\n").unwrap();
+        fs::write(repo_dir.join("proj/old/legacy.env"), b"OLD=1\n").unwrap();
+
+        let state_db = StateDb::open(&tmp.path().join("state.db")).unwrap();
+        let lock = DotlerLock::new(tmp.path().join("dotler.lock"))
+            .acquire(Duration::from_millis(500), Duration::from_millis(10))
+            .unwrap();
+
+        let initial_toml = "[proj]\nos-nux = \".\"\nos-mac = \".\"\nos-win = \".\"\nos-bsd = \".\"\nfiles = \"\"\"\nnested/app.env\nold/legacy.env\n\"\"\"\n";
+        let initial_cfg = RepoConfig::parse(initial_toml).unwrap();
+
+        // Export in project_a and project_b.
+        for proj_dir in [&project_a, &project_b] {
+            let eng = SyncEngine::new(
+                "shared",
+                &repo_dir,
+                &initial_cfg,
+                &state_db,
+                vec![],
+                OsInfo::detect(),
+                None,
+            )
+            .with_home_dir(&home_dir)
+            .with_cwd(proj_dir);
+            let plans = plan(&eng, None, &lock).unwrap();
+            eng.export_files(&plans, &lock, false, false).unwrap();
+        }
+        assert!(project_a.join("old/legacy.env").is_file());
+        assert!(project_b.join("old/legacy.env").is_file());
+
+        // Remove `old/legacy.env` from rules and run `tidy --purge` inside `project_b`.
+        let updated_toml = "[proj]\nos-nux = \".\"\nos-mac = \".\"\nos-win = \".\"\nos-bsd = \".\"\nfiles = \"nested/app.env\"\n";
+        let updated_cfg = RepoConfig::parse(updated_toml).unwrap();
+        let eng_b = SyncEngine::new(
+            "shared",
+            &repo_dir,
+            &updated_cfg,
+            &state_db,
+            vec![],
+            OsInfo::detect(),
+            None,
+        )
+        .with_home_dir(&home_dir)
+        .with_cwd(&project_b);
+
+        let rep = eng_b
+            .tidy(None, &lock, TidyOrphanPolicy::PurgeFromOs, false)
+            .unwrap();
+        assert_eq!(rep.removed_from_repo, 1);
+        assert_eq!(
+            rep.removed_os_orphans,
+            vec![project_b.join("old/legacy.env")]
+        );
+
+        // `project_b/old` was pruned cleanly while `project_b` and `project_a` remain intact.
+        assert!(!project_b.join("old").exists());
+        assert!(project_b.join("nested/app.env").is_file());
+        assert!(project_a.join("old/legacy.env").is_file());
+        assert!(
+            state_db
+                .get_synced_file(&project_a.join("old/legacy.env").to_string_lossy())
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            state_db
+                .get_synced_file(&project_b.join("old/legacy.env").to_string_lossy())
+                .unwrap()
+                .is_none()
         );
     }
 }

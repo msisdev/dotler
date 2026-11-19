@@ -516,3 +516,176 @@ files = "dry.conf"
         .unwrap();
     assert!(record.is_none());
 }
+
+#[test]
+fn test_e2e_cli_in_project_cwd_encrypted_sync_and_storage_overlap_guard() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("home");
+    let project_dir = tmp.path().join("project");
+    std::fs::create_dir_all(home_dir.join(".ssh")).unwrap();
+    std::fs::create_dir_all(project_dir.join("private")).unwrap();
+    std::fs::write(home_dir.join(".ssh/id_rsa"), b"HOME_KEY\n").unwrap();
+
+    let (vcfg, vkey) = SyncTestSandbox::new().create_vault("cli-cwd-pass-123");
+    let toml = format!(
+        "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[secrets]\nos-nux = \".\"\nos-mac = \".\"\nos-win = \".\"\nos-bsd = \".\"\nfiles = \"\"\"\n.env enc\nprivate/* enc=full\n\"\"\"\n",
+        vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
+    );
+    std::fs::write(project_dir.join("dotler.toml"), &toml).unwrap();
+    std::fs::write(project_dir.join(".env"), b"API_SECRET=hello\n").unwrap();
+    std::fs::write(project_dir.join("private/token.txt"), b"TOKEN_ABC\n").unwrap();
+
+    let run_cli = |dir: &std::path::Path, args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_dotler"))
+            .env("HOME", &home_dir)
+            .env("DOTLER_MOCK_KEYRING", "1")
+            .env("DOTLER_PASSPHRASE", "cli-cwd-pass-123")
+            .current_dir(dir)
+            .stdin(std::process::Stdio::null())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // 1. `dotler check` succeeds on in-project `.` group.
+    let check_out = run_cli(&project_dir, &["check", "--json"]);
+    assert_eq!(
+        check_out.status.code(),
+        Some(0),
+        "stdout: {} stderr: {}",
+        String::from_utf8_lossy(&check_out.stdout),
+        String::from_utf8_lossy(&check_out.stderr)
+    );
+
+    // 2. `dotler import -y` encrypts `.env` and `private/token.txt` into `secrets/`.
+    let imp_out = run_cli(&project_dir, &["import", "-y", "--json"]);
+    assert_eq!(
+        imp_out.status.code(),
+        Some(0),
+        "stdout: {} stderr: {}",
+        String::from_utf8_lossy(&imp_out.stdout),
+        String::from_utf8_lossy(&imp_out.stderr)
+    );
+    assert!(project_dir.join("secrets/.env.dotler.enc").is_file());
+    let expected_fenc = project_dir
+        .join("secrets")
+        .join(vkey.derive_full_enc_filename("private/token.txt"));
+    assert!(expected_fenc.is_file());
+
+    // 3. Delete plaintext OS files and restore via `dotler export -y`.
+    std::fs::remove_file(project_dir.join(".env")).unwrap();
+    std::fs::remove_file(project_dir.join("private/token.txt")).unwrap();
+    std::fs::remove_dir(project_dir.join("private")).unwrap();
+
+    let exp_out = run_cli(&project_dir, &["export", "-y", "--json"]);
+    assert_eq!(
+        exp_out.status.code(),
+        Some(0),
+        "stdout: {} stderr: {}",
+        String::from_utf8_lossy(&exp_out.stdout),
+        String::from_utf8_lossy(&exp_out.stderr)
+    );
+    assert_eq!(
+        std::fs::read(project_dir.join(".env")).unwrap(),
+        b"API_SECRET=hello\n"
+    );
+    assert_eq!(
+        std::fs::read(project_dir.join("private/token.txt")).unwrap(),
+        b"TOKEN_ABC\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project_dir.join("dotler.toml")).unwrap(),
+        toml
+    );
+
+    // 4. Symlink inside project pointing outside `cwd` (even into `home_dir`) must exit 3.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(
+            home_dir.join(".ssh/id_rsa"),
+            project_dir.join("private/escape.key"),
+        )
+        .unwrap();
+        let esc_out = run_cli(&project_dir, &["status", "--json"]);
+        assert_eq!(esc_out.status.code(), Some(3));
+        std::fs::remove_file(project_dir.join("private/escape.key")).unwrap();
+    }
+
+    // 5. Overlapping group storage `[config]` (`os-nux = "./config"` or `files = "config/x"`) must exit 3.
+    std::fs::write(
+        project_dir.join("dotler.toml"),
+        "[config]\nos-nux = \"./config\"\nos-mac = \"./config\"\nos-win = \"./config\"\nos-bsd = \"./config\"\nfiles = \"app.env\"\n",
+    )
+    .unwrap();
+    let overlap_out = run_cli(&project_dir, &["check", "--json"]);
+    assert_eq!(overlap_out.status.code(), Some(3));
+}
+
+#[test]
+fn test_e2e_cli_cwd_multi_project_tidy_purge_isolation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("home");
+    let repo_dir = home_dir.join("shared-proj-repo");
+    let project_a = tmp.path().join("project_a");
+    let project_b = tmp.path().join("project_b");
+    std::fs::create_dir_all(home_dir.join(".config/dotler")).unwrap();
+    std::fs::create_dir_all(repo_dir.join("proj/keep")).unwrap();
+    std::fs::create_dir_all(repo_dir.join("proj/drop")).unwrap();
+    std::fs::create_dir_all(&project_a).unwrap();
+    std::fs::create_dir_all(&project_b).unwrap();
+
+    std::fs::write(
+        home_dir.join(".config/dotler/config.toml"),
+        "default_devices = []\ndefault_repo = \"shared\"\nuse_keyring = true\n\n[repos]\nshared = \"~/shared-proj-repo\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo_dir.join("dotler.toml"),
+        "[proj]\nos-nux = \".\"\nos-mac = \".\"\nos-win = \".\"\nos-bsd = \".\"\nfiles = \"\"\"\nkeep/a.env\ndrop/old.env\n\"\"\"\n",
+    )
+    .unwrap();
+    std::fs::write(repo_dir.join("proj/keep/a.env"), b"KEEP=1\n").unwrap();
+    std::fs::write(repo_dir.join("proj/drop/old.env"), b"OLD=1\n").unwrap();
+
+    let run_cli = |dir: &std::path::Path, args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_dotler"))
+            .env("HOME", &home_dir)
+            .env("DOTLER_MOCK_KEYRING", "1")
+            .current_dir(dir)
+            .stdin(std::process::Stdio::null())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    assert_eq!(
+        run_cli(&project_a, &["export", "-y"]).status.code(),
+        Some(0)
+    );
+    assert_eq!(
+        run_cli(&project_b, &["export", "-y"]).status.code(),
+        Some(0)
+    );
+    assert!(project_a.join("drop/old.env").is_file());
+    assert!(project_b.join("drop/old.env").is_file());
+
+    // Remove `drop/old.env` from manifest and run `tidy --purge -y` inside `project_b`.
+    std::fs::write(
+        repo_dir.join("dotler.toml"),
+        "[proj]\nos-nux = \".\"\nos-mac = \".\"\nos-win = \".\"\nos-bsd = \".\"\nfiles = \"keep/a.env\"\n",
+    )
+    .unwrap();
+    let tidy_out = run_cli(&project_b, &["tidy", "--purge", "-y", "--json"]);
+    assert_eq!(
+        tidy_out.status.code(),
+        Some(0),
+        "stdout: {} stderr: {}",
+        String::from_utf8_lossy(&tidy_out.stdout),
+        String::from_utf8_lossy(&tidy_out.stderr)
+    );
+
+    assert!(!project_b.join("drop").exists());
+    assert!(project_b.join("keep/a.env").is_file());
+    assert!(project_a.join("drop/old.env").is_file());
+    assert!(project_a.join("keep/a.env").is_file());
+}

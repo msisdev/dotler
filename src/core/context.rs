@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use crate::config::local::{
-    LOCAL_CONFIG_FILE, LocalConfig, expand_tilde, resolve_repo_path_with_cwd,
+    LOCAL_CONFIG_FILE, LocalConfig, expand_tilde, resolve_repo_path_from_dir,
 };
 use crate::config::repo::{OsInfo, RepoConfig};
 use crate::config::state::{DOTLER_LOCK_PATH, DotlerLockGuard, STATE_DB_PATH, StateDb};
@@ -18,6 +18,7 @@ pub struct CoreContext {
     pub state_db: Resource<StateDb, StateError>,
     pub repo_override: Option<String>,
     pub device_override: Option<String>,
+    pub cwd_override: Option<PathBuf>,
     pub is_interactive: bool,
 }
 
@@ -63,7 +64,23 @@ impl CoreContext {
             state_db: get_state_db(state_db_path),
             repo_override,
             device_override,
+            cwd_override: None,
             is_interactive,
+        }
+    }
+
+    /// Sets an explicit working directory override for resolving `.` / `./...` group paths
+    /// and ancestor `dotler.toml` discovery.
+    pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.cwd_override = Some(cwd.into());
+        self
+    }
+
+    /// Returns the effective working directory (`cwd_override` or `std::env::current_dir()`).
+    pub fn effective_cwd(&self) -> std::io::Result<PathBuf> {
+        match &self.cwd_override {
+            Some(cwd) => Ok(cwd.clone()),
+            None => std::env::current_dir(),
         }
     }
 
@@ -80,8 +97,11 @@ impl CoreContext {
     /// Resolves the target repository path and loads `<repo>/dotler.toml`.
     pub fn resolve_repo(&self) -> Result<ResolvedRepoContext, EngineError> {
         let local_cfg = self.local_config.get()?;
-        let (label, repo_path) =
-            resolve_repo_path_with_cwd(local_cfg, self.repo_override.as_deref())?;
+        let (label, repo_path) = resolve_repo_path_from_dir(
+            local_cfg,
+            self.repo_override.as_deref(),
+            self.cwd_override.as_deref(),
+        )?;
         let repo_cfg_res = get_repo_config(repo_path.join("dotler.toml"));
         let repo_config = repo_cfg_res.get()?.clone();
         let devices = self.effective_devices(local_cfg);

@@ -164,7 +164,19 @@ impl<'a> SyncEngine<'a> {
     pub fn import_files_with_observer(
         &self,
         plans: &[FileActionPlan],
+        lock: &DotlerLockGuard,
+        dry_run: bool,
+        observer: &mut dyn CommandObserver,
+    ) -> Result<SyncReport, EngineError> {
+        self.import_files_with_options(plans, lock, false, dry_run, observer)
+    }
+
+    /// Collects OS dotfiles into the repository with explicit `force` and [`CommandObserver`].
+    pub fn import_files_with_options(
+        &self,
+        plans: &[FileActionPlan],
         _lock: &DotlerLockGuard,
+        force: bool,
         dry_run: bool,
         observer: &mut dyn CommandObserver,
     ) -> Result<SyncReport, EngineError> {
@@ -240,13 +252,14 @@ impl<'a> SyncEngine<'a> {
                 os_bytes
             };
             let repo_payload_hash = blake3::hash(&repo_payload_bytes).to_hex().to_string();
-            let can_skip = can_skip_import(self, plan, &os_hash, &repo_payload_hash)?;
+            let can_skip = can_skip_import(self, plan, &os_hash, &repo_payload_hash, force)?;
+            let (plain_counterpart, enc_counterpart) = repo_paths_for_plan(plan);
 
             let repo_action = if can_skip {
                 PlanActionKind::Okay
             } else if plan.repo_file_path.is_file()
-                || plan.repo_file_path.with_extension("").is_file()
-                || PathBuf::from(format!("{}.enc", plan.repo_file_path.display())).is_file()
+                || plain_counterpart.is_file()
+                || enc_counterpart.is_file()
             {
                 PlanActionKind::Overwrite
             } else {
@@ -403,12 +416,13 @@ fn can_skip_import(
     plan: &FileActionPlan,
     os_hash: &str,
     repo_payload_hash: &str,
+    force: bool,
 ) -> Result<bool, EngineError> {
     if plan.is_encrypted {
         let vault_key = engine.vault_key.ok_or_else(|| EngineError::VaultLocked {
             reason: "encrypted files detected but no vault key was provided".into(),
         })?;
-        if !plan.repo_file_path.is_file() {
+        if force || !plan.repo_file_path.is_file() {
             return Ok(false);
         }
         if plan.db_hash.as_deref() == Some(os_hash) {
@@ -425,6 +439,9 @@ fn can_skip_import(
         return Ok(false);
     }
 
+    if force {
+        return Ok(false);
+    }
     if plan.repo_file_path.is_file()
         && let Ok(existing_bytes) = fs::read(&plan.repo_file_path)
     {
@@ -438,20 +455,19 @@ fn write_import_payload(
     plan: &FileActionPlan,
     repo_payload_bytes: &[u8],
 ) -> Result<(), EngineError> {
+    let (plain_counterpart, enc_counterpart) = repo_paths_for_plan(plan);
     if plan.is_encrypted {
         let vault_key = engine.vault_key.ok_or_else(|| EngineError::VaultLocked {
             reason: "encrypted files detected but no vault key was provided".into(),
         })?;
         let enc = vault_key.encrypt_file(repo_payload_bytes)?;
         write_file_safe(&plan.repo_file_path, &enc.to_bytes())?;
-        let plain_counterpart = plan.repo_file_path.with_extension("");
-        if plain_counterpart.is_file() {
+        if plain_counterpart != plan.repo_file_path && plain_counterpart.is_file() {
             let _ = fs::remove_file(plain_counterpart);
         }
     } else {
         write_file_safe(&plan.repo_file_path, repo_payload_bytes)?;
-        let enc_counterpart = PathBuf::from(format!("{}.enc", plan.repo_file_path.display()));
-        if enc_counterpart.is_file() {
+        if enc_counterpart != plan.repo_file_path && enc_counterpart.is_file() {
             let _ = fs::remove_file(enc_counterpart);
         }
     }
@@ -477,7 +493,7 @@ pub(crate) fn collect_group_plans(
 pub fn run_import(
     ctx: &CoreContext,
     groups: &[String],
-    _force: bool,
+    force: bool,
     dry_run: bool,
     lock: &DotlerLockGuard,
     observer: &mut dyn CommandObserver,
@@ -505,7 +521,7 @@ pub fn run_import(
     );
 
     let plans = collect_group_plans(&sync_engine, groups, lock)?;
-    sync_engine.import_files_with_observer(&plans, lock, dry_run, observer)
+    sync_engine.import_files_with_options(&plans, lock, force, dry_run, observer)
 }
 
 pub fn import_files(
@@ -696,5 +712,142 @@ mod tests {
         assert_eq!(exp_rep.processed, 1);
         assert!(notes_dir.join("remote.md").is_file());
         assert!(!notes_dir.join("sub/old.md").exists());
+    }
+
+    #[test]
+    fn import_force_and_corrupted_or_foreign_enc_reencrypt_even_when_db_hash_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let repo_dir = tmp.path().join("repo");
+        fs::create_dir_all(&home_dir).unwrap();
+        fs::create_dir_all(repo_dir.join("sec")).unwrap();
+
+        let pass_a = crate::crypto::SecretString::new("vault-a-pass-111".to_string());
+        let pass_b = crate::crypto::SecretString::new("vault-b-pass-222".to_string());
+        let (vcfg_a, vkey_a, _) = crate::crypto::vault::init_vault(&pass_a).unwrap();
+        let (_, vkey_b, _) = crate::crypto::vault::init_vault(&pass_b).unwrap();
+
+        let toml = format!(
+            "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[sec]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nos-bsd = \"~\"\nfiles = \"secret.env enc\"\n",
+            vcfg_a.vault_id, vcfg_a.password_slot, vcfg_a.recovery_slot
+        );
+        let repo_cfg = RepoConfig::parse(&toml).unwrap();
+        let state_db = StateDb::open(&tmp.path().join("state.db")).unwrap();
+        let lock = DotlerLock::new(tmp.path().join("dotler.lock"))
+            .acquire(Duration::from_millis(500), Duration::from_millis(10))
+            .unwrap();
+
+        let secret_bytes = b"TOKEN=super_secret\n";
+        fs::write(home_dir.join("secret.env"), secret_bytes).unwrap();
+
+        let engine = SyncEngine::new(
+            "main",
+            &repo_dir,
+            &repo_cfg,
+            &state_db,
+            vec![],
+            OsInfo::detect(),
+            Some(&vkey_a),
+        )
+        .with_home_dir(&home_dir);
+
+        // 1. Initial import succeeds and records db_hash
+        let plans1 = engine.plan(None, &lock).unwrap();
+        let rep1 = engine.import_files(&plans1, &lock, false).unwrap();
+        assert_eq!(rep1.processed, 1);
+
+        // 2. Normal import skips unchanged file
+        let plans2 = engine.plan(None, &lock).unwrap();
+        let rep2 = engine.import_files(&plans2, &lock, false).unwrap();
+        assert_eq!(rep2.skipped, 1);
+        assert_eq!(rep2.processed, 0);
+
+        // 3. `force = true` forces re-encryption even with identical db_hash
+        let before_bytes = fs::read(repo_dir.join("sec/secret.env.enc")).unwrap();
+        let mut obs = NoopObserver;
+        let rep_force = engine
+            .import_files_with_options(&plans2, &lock, true, false, &mut obs)
+            .unwrap();
+        assert_eq!(rep_force.processed, 1);
+        assert_eq!(rep_force.skipped, 0);
+        let after_force_bytes = fs::read(repo_dir.join("sec/secret.env.enc")).unwrap();
+        assert_ne!(before_bytes, after_force_bytes);
+
+        // 4. Replace repo .enc with foreign-vault ciphertext while db_hash still matches OS file:
+        //    normal import preserves O(1) db_hash bypass, while `--force` re-encrypts under vkey_a.
+        let foreign_enc = vkey_b.encrypt_file(secret_bytes).unwrap().to_bytes();
+        fs::write(repo_dir.join("sec/secret.env.enc"), &foreign_enc).unwrap();
+        let plans_foreign = engine.plan(None, &lock).unwrap();
+        let rep_foreign_normal = engine.import_files(&plans_foreign, &lock, false).unwrap();
+        assert_eq!(rep_foreign_normal.skipped, 1);
+        assert_eq!(rep_foreign_normal.processed, 0);
+        let rep_foreign_force = engine
+            .import_files_with_options(&plans_foreign, &lock, true, false, &mut obs)
+            .unwrap();
+        assert_eq!(rep_foreign_force.processed, 1);
+        let healed_foreign =
+            EncryptedFile::from_bytes(&fs::read(repo_dir.join("sec/secret.env.enc")).unwrap())
+                .unwrap();
+        assert_eq!(healed_foreign.vault_id, vkey_a.vault_id_bytes());
+
+        // 5. Corrupt repo .enc header while db_hash matches OS file:
+        //    `--force` restores a valid .enc archive decryptable under vkey_a.
+        fs::write(repo_dir.join("sec/secret.env.enc"), b"corrupt-data").unwrap();
+        let plans_corrupt = engine.plan(None, &lock).unwrap();
+        let rep_corrupt = engine
+            .import_files_with_options(&plans_corrupt, &lock, true, false, &mut obs)
+            .unwrap();
+        assert_eq!(rep_corrupt.processed, 1);
+        let healed_corrupt =
+            EncryptedFile::from_bytes(&fs::read(repo_dir.join("sec/secret.env.enc")).unwrap())
+                .unwrap();
+        assert_eq!(
+            vkey_a
+                .decrypt_file(&healed_corrupt)
+                .unwrap()
+                .expose_secret(),
+            secret_bytes
+        );
+    }
+
+    #[test]
+    fn import_preview_does_not_misclassify_multi_dot_filename_overwrite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let repo_dir = tmp.path().join("repo");
+        fs::create_dir_all(&home_dir).unwrap();
+        fs::create_dir_all(repo_dir.join("app")).unwrap();
+
+        // Unrelated file `config` exists in repo, while `config.toml` does not.
+        fs::write(repo_dir.join("app/config"), b"unrelated\n").unwrap();
+        fs::write(home_dir.join("config.toml"), b"key = 1\n").unwrap();
+
+        let toml = "[app]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nos-bsd = \"~\"\nfiles = \"config.toml\"\n";
+        let repo_cfg = RepoConfig::parse(toml).unwrap();
+        let state_db = StateDb::open(&tmp.path().join("state.db")).unwrap();
+        let lock = DotlerLock::new(tmp.path().join("dotler.lock"))
+            .acquire(Duration::from_millis(500), Duration::from_millis(10))
+            .unwrap();
+
+        let engine = SyncEngine::new(
+            "main",
+            &repo_dir,
+            &repo_cfg,
+            &state_db,
+            vec![],
+            OsInfo::detect(),
+            None,
+        )
+        .with_home_dir(&home_dir);
+
+        let plans = engine.plan(None, &lock).unwrap();
+        let mut cap_obs = CaptureApproveObserver {
+            entries: Vec::new(),
+        };
+        engine
+            .import_files_with_observer(&plans, &lock, false, &mut cap_obs)
+            .unwrap();
+        assert_eq!(cap_obs.entries.len(), 1);
+        assert_eq!(cap_obs.entries[0].repo_action, PlanActionKind::Create);
     }
 }

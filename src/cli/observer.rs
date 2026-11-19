@@ -5,10 +5,17 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::cli::args::{Cli, GitCommand};
 use crate::cli::output::{EXIT_SUCCESS, InlineRender, render_success_to};
+use crate::config::local::{LOCAL_CONFIG_FILE, expand_tilde};
+use crate::config::state::DotlerLockGuard;
+use crate::core::context::CoreContext;
 use crate::engine::EngineError;
 use crate::engine::observer::{
     CommandObserver, NoopObserver, PlanActionKind, PlanDirection, PlanPreviewEntry,
+};
+use crate::engine::remote::{
+    GroupSelector, run_git_clone, run_git_install, run_git_ls, run_git_uninstall,
 };
 use crate::tui::confirm::{ConfirmError, ConfirmPrompt, DEFAULT_CONFIRM_TITLE, confirm_proceed_to};
 use crate::tui::preview::{BadgeOp, PreviewArrow, PreviewItem, render_preview_to};
@@ -180,6 +187,104 @@ where
         render_success_to(stdout, command_name, &to_render(report), false);
     }
     Ok(EXIT_SUCCESS)
+}
+
+/// Dispatches `dotler git <ls|clone|install|uninstall>` subcommands with observer injection.
+pub(crate) fn handle_git<W: Write>(
+    cmd: &GitCommand,
+    cli: &Cli,
+    is_interactive: bool,
+    stdout: &mut W,
+    lock: &DotlerLockGuard,
+) -> Result<i32, EngineError> {
+    match cmd {
+        GitCommand::Ls(args) => {
+            let summary = run_git_ls(&args.url, args.branch.as_deref(), lock)?;
+            Ok(render_success_to(stdout, "git ls", &summary, cli.json))
+        }
+        GitCommand::Clone(args) => {
+            let ctx = CoreContext::new(cli.repo.clone(), cli.device.clone(), is_interactive);
+            let parsed_url = crate::engine::remote::parse_url(&args.url)?;
+            let selectors: Vec<GroupSelector> = args
+                .groups
+                .iter()
+                .map(|s| GroupSelector::parse(s))
+                .collect();
+            let repo_name = parsed_url
+                .clone_url
+                .trim_end_matches('/')
+                .trim_end_matches(".git")
+                .rsplit('/')
+                .next()
+                .unwrap_or("dotfiles");
+            let dest = std::env::current_dir()?.join(repo_name);
+            let cfg_path = expand_tilde(LOCAL_CONFIG_FILE);
+            let dry_run = cli.dry_run;
+            execute_with_observer(
+                stdout,
+                "git clone",
+                cli.json,
+                args.all,
+                args.yes,
+                is_interactive,
+                |obs| {
+                    run_git_clone(
+                        &ctx,
+                        &args.url,
+                        &selectors,
+                        args.branch.as_deref(),
+                        &dest,
+                        Some(&cfg_path),
+                        lock,
+                        dry_run,
+                        obs,
+                    )
+                },
+                |r| r,
+            )
+        }
+        GitCommand::Install(args) => {
+            let dev_override = args.device.clone().or_else(|| cli.device.clone());
+            let ctx = CoreContext::new(cli.repo.clone(), dev_override, is_interactive);
+            let override_path = args.path.first().map(Path::new);
+            let dry_run = cli.dry_run;
+            execute_with_observer(
+                stdout,
+                "git install",
+                cli.json,
+                args.all,
+                args.yes,
+                is_interactive,
+                |obs| {
+                    run_git_install(
+                        &ctx,
+                        &args.url,
+                        &args.groups,
+                        override_path,
+                        args.branch.as_deref(),
+                        lock,
+                        dry_run,
+                        obs,
+                    )
+                },
+                |r| r,
+            )
+        }
+        GitCommand::Uninstall(args) => {
+            let ctx = CoreContext::new(cli.repo.clone(), cli.device.clone(), is_interactive);
+            let dry_run = cli.dry_run;
+            execute_with_observer(
+                stdout,
+                "git uninstall",
+                cli.json,
+                args.all,
+                args.yes,
+                is_interactive,
+                |obs| run_git_uninstall(&ctx, &args.groups, lock, dry_run, obs),
+                |r| r,
+            )
+        }
+    }
 }
 
 #[cfg(test)]

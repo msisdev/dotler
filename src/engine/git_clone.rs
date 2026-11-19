@@ -6,9 +6,15 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::local::{LocalConfig, WalkDir};
-use crate::config::repo::{RepoConfig, validate_path_security};
+use crate::config::local::{
+    LocalConfig, WalkDir, format_home_repo_path, resolve_home_for_config_path,
+};
+use crate::config::repo::{
+    RepoConfig, VaultConfig, update_vault_manifest_section, validate_path_security,
+};
 use crate::config::state::{DotlerLockGuard, write_file_safe};
+use crate::core::context::CoreContext;
+use crate::core::vault_loader::unlock_vault_if_needed;
 use crate::crypto::ExposeSecret;
 use crate::crypto::vault::{EncryptedFile, VaultKey};
 use crate::engine::EngineError;
@@ -78,6 +84,13 @@ pub fn clone_repo(
     )
 }
 
+#[derive(Clone, Copy)]
+struct LocalVaultRekeyTarget<'a> {
+    config: &'a VaultConfig,
+    use_keyring: bool,
+    is_interactive: bool,
+}
+
 /// Clones a remote dotler repository via staging workspace, optional group selection, and re-keying.
 #[allow(clippy::too_many_arguments)]
 pub fn clone_repo_with_observer(
@@ -88,6 +101,35 @@ pub fn clone_repo_with_observer(
     local_config_path: Option<&Path>,
     remote_vault_key: Option<&VaultKey>,
     local_vault_key: Option<&VaultKey>,
+    lock: &DotlerLockGuard,
+    dry_run: bool,
+    observer: &mut dyn CommandObserver,
+) -> Result<CloneReport, EngineError> {
+    clone_repo_inner(
+        url,
+        selectors,
+        branch,
+        target_dir,
+        local_config_path,
+        remote_vault_key,
+        local_vault_key,
+        None,
+        lock,
+        dry_run,
+        observer,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn clone_repo_inner(
+    url: &RemoteRepoUrl,
+    selectors: &[GroupSelector],
+    branch: Option<&str>,
+    target_dir: &Path,
+    local_config_path: Option<&Path>,
+    remote_vault_key: Option<&VaultKey>,
+    local_vault_key: Option<&VaultKey>,
+    local_vault_target: Option<LocalVaultRekeyTarget<'_>>,
     _lock: &DotlerLockGuard,
     dry_run: bool,
     observer: &mut dyn CommandObserver,
@@ -101,6 +143,13 @@ pub fn clone_repo_with_observer(
             ),
         });
     }
+
+    let validated_repo_entry = if let Some(cfg_path) = local_config_path {
+        let home = resolve_home_for_config_path(cfg_path);
+        Some(format_home_repo_path(target_dir, &home)?)
+    } else {
+        None
+    };
 
     let parent = target_dir.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(parent)?;
@@ -166,6 +215,8 @@ pub fn clone_repo_with_observer(
         && r_key.vault_id() != l_key.vault_id()
     {
         rekey_cloned_vault_files(manifest_dir, r_key, l_key)?;
+    } else if let Some(local_target) = local_vault_target {
+        rekey_cloned_manifest_for_local_vault(manifest_dir, repo_config, local_target)?;
     }
 
     if manifest_dir == &staging_dir {
@@ -186,8 +237,8 @@ pub fn clone_repo_with_observer(
         observer.finish_progress();
     }
 
-    if let Some(cfg_path) = local_config_path {
-        register_cloned_repo(cfg_path, target_dir)?;
+    if let Some((cfg_path, repo_entry)) = local_config_path.zip(validated_repo_entry.as_deref()) {
+        register_cloned_repo(cfg_path, target_dir, repo_entry)?;
     }
 
     Ok(CloneReport {
@@ -361,7 +412,81 @@ fn rekey_cloned_vault_files(
     Ok(())
 }
 
-fn register_cloned_repo(cfg_path: &Path, target_dir: &Path) -> Result<(), EngineError> {
+fn has_any_enc_files(manifest_dir: &Path) -> bool {
+    WalkDir::new(manifest_dir)
+        .min_depth(1)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            e.file_type().is_file() && e.path().extension().and_then(|s| s.to_str()) == Some("enc")
+        })
+}
+
+fn rekey_cloned_manifest_for_local_vault(
+    manifest_dir: &Path,
+    remote_cfg: &RepoConfig,
+    local_target: LocalVaultRekeyTarget<'_>,
+) -> Result<(), EngineError> {
+    let remote_differs = remote_cfg
+        .vault
+        .as_ref()
+        .is_some_and(|rv| rv.vault_id != local_target.config.vault_id);
+    let has_enc = has_any_enc_files(manifest_dir);
+    if !has_enc && !remote_differs {
+        return Ok(());
+    }
+    if remote_cfg
+        .vault
+        .as_ref()
+        .is_some_and(|rv| rv.vault_id == local_target.config.vault_id)
+    {
+        return Ok(());
+    }
+
+    if has_enc {
+        let local_manifest_stub = RepoConfig {
+            vault: Some(local_target.config.clone()),
+            ..Default::default()
+        };
+        let local_key = unlock_vault_if_needed(
+            &local_manifest_stub,
+            local_target.use_keyring,
+            local_target.is_interactive,
+            true,
+        )?
+        .ok_or(EngineError::Config(
+            crate::config::ConfigError::MissingVaultConfig,
+        ))?;
+        let remote_key = unlock_vault_if_needed(
+            remote_cfg,
+            local_target.use_keyring,
+            local_target.is_interactive,
+            true,
+        )?
+        .ok_or(EngineError::Config(
+            crate::config::ConfigError::MissingVaultConfig,
+        ))?;
+        rekey_cloned_vault_files(manifest_dir, &remote_key, &local_key)?;
+    }
+
+    let manifest_path = manifest_dir.join("dotler.toml");
+    if let Some(ref old_v) = remote_cfg.vault {
+        let manifest_str = fs::read_to_string(&manifest_path)?;
+        let updated = update_vault_manifest_section(&manifest_str, old_v, local_target.config);
+        write_file_safe(&manifest_path, updated.as_bytes())?;
+    } else {
+        let mut updated_cfg = RepoConfig::load_without_vault_check(&manifest_path)?;
+        updated_cfg.vault = Some(local_target.config.clone());
+        updated_cfg.save_atomic(&manifest_path)?;
+    }
+    Ok(())
+}
+
+fn register_cloned_repo(
+    cfg_path: &Path,
+    target_dir: &Path,
+    repo_path_entry: &str,
+) -> Result<(), EngineError> {
     let mut local_config = if cfg_path.is_file() {
         LocalConfig::load(cfg_path)?
     } else {
@@ -372,29 +497,15 @@ fn register_cloned_repo(cfg_path: &Path, target_dir: &Path) -> Result<(), Engine
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("~"));
-    let repo_path_entry = if let Ok(rel) = target_dir.strip_prefix(&home) {
-        if rel.as_os_str().is_empty() {
-            "~".to_string()
-        } else {
-            format!("~/{}", rel.display())
-        }
-    } else {
-        format!(
-            "~/{}",
-            target_dir
-                .file_name()
-                .map(|f| f.to_string_lossy())
-                .unwrap_or_default()
-        )
-    };
     if local_config.default_repo.is_none() {
         local_config.default_repo = Some(label.clone());
     }
     if local_config.default_devices.is_empty() {
         local_config.default_devices.push("default".to_string());
     }
-    local_config.repos.insert(label, repo_path_entry);
+    local_config
+        .repos
+        .insert(label, repo_path_entry.to_string());
     local_config.save_atomic(cfg_path)?;
     Ok(())
 }
@@ -402,26 +513,41 @@ fn register_cloned_repo(cfg_path: &Path, target_dir: &Path) -> Result<(), Engine
 /// High-level entry point for `dotler git clone` shared by CLI and MCP.
 #[allow(clippy::too_many_arguments)]
 pub fn run_git_clone(
+    ctx: &CoreContext,
     url_raw: &str,
     selectors: &[GroupSelector],
     branch: Option<&str>,
     target_dir: &Path,
     local_config_path: Option<&Path>,
-    remote_vault_key: Option<&VaultKey>,
-    local_vault_key: Option<&VaultKey>,
     lock: &DotlerLockGuard,
     dry_run: bool,
     observer: &mut dyn CommandObserver,
 ) -> Result<CloneReport, EngineError> {
     let url = parse_url(url_raw)?;
-    clone_repo_with_observer(
+    let resolved_local = if ctx.repo_override.is_some() {
+        Some((ctx.resolve_repo()?, ctx.local_config.get()?.use_keyring))
+    } else {
+        None
+    };
+    let local_vault_target = resolved_local.as_ref().and_then(|(res, use_keyring)| {
+        res.repo_config
+            .vault
+            .as_ref()
+            .map(|vcfg| LocalVaultRekeyTarget {
+                config: vcfg,
+                use_keyring: *use_keyring,
+                is_interactive: ctx.is_interactive,
+            })
+    });
+    clone_repo_inner(
         &url,
         selectors,
         branch,
         target_dir,
         local_config_path,
-        remote_vault_key,
-        local_vault_key,
+        None,
+        None,
+        local_vault_target,
         lock,
         dry_run,
         observer,
@@ -431,6 +557,52 @@ pub fn run_git_clone(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::state::DotlerLock;
+    use crate::crypto::SecretString;
+    use crate::crypto::vault::init_vault;
+    use std::process::Command;
+    use std::time::Duration;
+
+    fn create_test_bare_repo(
+        dotler_toml: &str,
+        files: &[(&str, &[u8])],
+    ) -> (tempfile::TempDir, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join("wt");
+        let bare = tmp.path().join("bare.git");
+        fs::create_dir_all(&wt).unwrap();
+        let run = |args: &[&str], dir: &Path| {
+            let st = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {:?} failed", args);
+        };
+        run(&["init", "-b", "main"], &wt);
+        run(&["config", "user.name", "Tester"], &wt);
+        run(&["config", "user.email", "test@dotler.dev"], &wt);
+        fs::write(wt.join("dotler.toml"), dotler_toml).unwrap();
+        for (rel, body) in files {
+            let p = wt.join(rel);
+            if let Some(parent) = p.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(p, body).unwrap();
+        }
+        run(&["add", "."], &wt);
+        run(&["commit", "-m", "seed"], &wt);
+        run(
+            &[
+                "clone",
+                "--bare",
+                wt.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+            tmp.path(),
+        );
+        (tmp, format!("file://{}", bare.display()))
+    }
 
     #[test]
     fn group_selector_parse_handles_plain_and_aliased_inputs() {
@@ -447,6 +619,115 @@ mod tests {
                 remote_group: "nvim".to_string(),
                 local_alias: Some("my-nvim".to_string()),
             }
+        );
+    }
+
+    #[test]
+    fn clone_with_local_config_rejects_outside_home_before_network() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let dotler_dir = home.join(".config").join("dotler");
+        fs::create_dir_all(&dotler_dir).unwrap();
+        let cfg_path = dotler_dir.join("config.toml");
+        let outside_dest = tmp.path().join("outside").join("cloned");
+
+        let lock = DotlerLock::new(dotler_dir.join("dotler.lock"))
+            .acquire(Duration::from_millis(500), Duration::from_millis(10))
+            .unwrap();
+        let url = parse_url("file:///nonexistent/repo.git").unwrap();
+
+        let err = clone_repo(
+            &url,
+            &[],
+            None,
+            &outside_dest,
+            Some(&cfg_path),
+            None,
+            None,
+            &lock,
+        )
+        .unwrap_err();
+        assert_eq!(err.error_code(), "CONFIG_ERROR");
+        assert!(!outside_dest.exists());
+    }
+
+    #[test]
+    fn clone_repo_inner_with_local_vault_target_rekeys_enc_and_updates_manifest() {
+        let _mock = crate::crypto::keyring::MockKeyringGuard::new();
+        unsafe {
+            std::env::remove_var(crate::crypto::keyring::PASSPHRASE_ENV_VAR);
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let dotler_dir = home.join(".config").join("dotler");
+        let clone_dest = home.join("cloned-dots");
+        fs::create_dir_all(&dotler_dir).unwrap();
+
+        let pass_local = SecretString::new("local-clone-pass-111".to_string());
+        let pass_remote = SecretString::new("remote-clone-pass-222".to_string());
+        let (vcfg_local, vkey_local, _) = init_vault(&pass_local).unwrap();
+        let (vcfg_remote, vkey_remote, _) = init_vault(&pass_remote).unwrap();
+
+        let cfg_path = dotler_dir.join("config.toml");
+        crate::crypto::keyring::OsKeyring::set_for_vault(&vcfg_local.vault_id, &pass_local)
+            .unwrap();
+        crate::crypto::keyring::OsKeyring::set_for_vault(&vcfg_remote.vault_id, &pass_remote)
+            .unwrap();
+
+        let enc_payload = vkey_remote
+            .encrypt_file(b"TOKEN=from_remote\n")
+            .unwrap()
+            .to_bytes();
+        let remote_toml = format!(
+            "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[sec]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nos-bsd = \"~\"\nfiles = \".token enc\"\n",
+            vcfg_remote.vault_id, vcfg_remote.password_slot, vcfg_remote.recovery_slot
+        );
+        let (_git_tmp, bare_url) =
+            create_test_bare_repo(&remote_toml, &[("sec/.token.enc", &enc_payload)]);
+
+        let lock = DotlerLock::new(dotler_dir.join("dotler.lock"))
+            .acquire(Duration::from_millis(500), Duration::from_millis(10))
+            .unwrap();
+        let url = parse_url(&bare_url).unwrap();
+        let mut obs = NoopObserver;
+        let rep = clone_repo_inner(
+            &url,
+            &[],
+            None,
+            &clone_dest,
+            Some(&cfg_path),
+            None,
+            None,
+            Some(LocalVaultRekeyTarget {
+                config: &vcfg_local,
+                use_keyring: true,
+                is_interactive: false,
+            }),
+            &lock,
+            false,
+            &mut obs,
+        )
+        .unwrap();
+        assert_eq!(rep.destination, clone_dest);
+
+        let cloned_enc =
+            EncryptedFile::from_bytes(&fs::read(clone_dest.join("sec/.token.enc")).unwrap())
+                .unwrap();
+        assert_eq!(cloned_enc.vault_id, vkey_local.vault_id_bytes());
+        assert_eq!(
+            vkey_local
+                .decrypt_file(&cloned_enc)
+                .unwrap()
+                .expose_secret(),
+            b"TOKEN=from_remote\n"
+        );
+        let cloned_manifest = RepoConfig::load(&clone_dest.join("dotler.toml")).unwrap();
+        assert_eq!(cloned_manifest.vault.unwrap().vault_id, vcfg_local.vault_id);
+        let reloaded_cfg = LocalConfig::load(&cfg_path).unwrap();
+        assert_eq!(
+            reloaded_cfg.repos.get("cloned-dots").map(String::as_str),
+            Some("~/cloned-dots")
         );
     }
 }

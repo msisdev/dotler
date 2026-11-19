@@ -474,3 +474,73 @@ fn test_remote_git_multi_manifest_bfs_unicode_order_and_explicit_subpath() {
     assert_eq!(gh_sub.clone_url, "https://github.com/owner/repo.git");
     assert_eq!(gh_sub.subpath.as_deref(), Some("configs/linux"));
 }
+
+#[test]
+fn test_cli_git_clone_with_local_repo_override_rekeys_enc() {
+    use dotler::crypto::ExposeSecret;
+    use dotler::crypto::SecretString;
+    use dotler::crypto::vault::{EncryptedFile, init_vault};
+
+    let sb = common::CliTestSandbox::new();
+    let local_repo = sb.home_dir.join("local_vault");
+    fs::create_dir_all(&local_repo).unwrap();
+
+    let shared_pass = SecretString::new("shared-cli-clone-pass-999".to_string());
+    let (vcfg_local, vkey_local, _) = init_vault(&shared_pass).unwrap();
+    let (vcfg_remote, vkey_remote, _) = init_vault(&shared_pass).unwrap();
+    assert_ne!(vcfg_local.vault_id, vcfg_remote.vault_id);
+
+    fs::write(
+        local_repo.join("dotler.toml"),
+        format!(
+            "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[base]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nos-bsd = \"~\"\nfiles = \".bashrc\"\n",
+            vcfg_local.vault_id, vcfg_local.password_slot, vcfg_local.recovery_slot
+        ),
+    )
+    .unwrap();
+    fs::write(
+        sb.dotler_dir.join("config.toml"),
+        "default_devices = []\nuse_keyring = true\n\n[repos]\nlocal = \"~/local_vault\"\n",
+    )
+    .unwrap();
+
+    let remote_enc = vkey_remote
+        .encrypt_file(b"SECRET_KEY=remote_val\n")
+        .unwrap()
+        .to_bytes();
+    let remote_toml = format!(
+        "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[sec]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nos-bsd = \"~\"\nfiles = \".secret enc\"\n",
+        vcfg_remote.vault_id, vcfg_remote.password_slot, vcfg_remote.recovery_slot
+    );
+    let mock_remote = MockBareRepo::new(&remote_toml, &[("sec/.secret.enc", &remote_enc)]);
+
+    let out = sb
+        .bin_cmd_with_passphrase("shared-cli-clone-pass-999")
+        .current_dir(&sb.home_dir)
+        .args(["-r", "local", "git", "clone", &mock_remote.clone_url, "-y"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let cloned_dir = sb.home_dir.join("repo");
+    assert!(cloned_dir.join("dotler.toml").is_file());
+    let cloned_cfg =
+        dotler::config::repo::RepoConfig::load(&cloned_dir.join("dotler.toml")).unwrap();
+    assert_eq!(cloned_cfg.vault.unwrap().vault_id, vcfg_local.vault_id);
+
+    let cloned_enc =
+        EncryptedFile::from_bytes(&fs::read(cloned_dir.join("sec/.secret.enc")).unwrap()).unwrap();
+    assert_eq!(cloned_enc.vault_id, vkey_local.vault_id_bytes());
+    assert_eq!(
+        vkey_local
+            .decrypt_file(&cloned_enc)
+            .unwrap()
+            .expose_secret(),
+        b"SECRET_KEY=remote_val\n"
+    );
+}

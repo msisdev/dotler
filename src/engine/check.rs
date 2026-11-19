@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::briefing::{DEFAULT_DOTLER_TOML, INIT_AI_HINT};
-use crate::config::local::{WalkDir, expand_tilde};
+use crate::config::local::{
+    WalkDir, expand_tilde, format_home_repo_path, resolve_home_for_config_path,
+};
 use crate::config::repo::{
     SelectionMode, evaluate_selection, parse_selection_rules, render_home_template,
     resolve_group_target_path, validate_dir_no_symlinks, validate_os_dir_path,
@@ -53,6 +55,13 @@ pub fn run_init(
         None => std::env::current_dir()?,
     };
 
+    let home = ctx
+        .state_db
+        .get()
+        .map(|db| resolve_home_for_config_path(db.path()))
+        .unwrap_or_else(|_| expand_tilde("~"));
+    let repo_path_entry = format_home_repo_path(&repo_dir, &home)?;
+
     fs::create_dir_all(&repo_dir)?;
 
     let dotler_toml_path = repo_dir.join("dotler.toml");
@@ -76,23 +85,6 @@ pub fn run_init(
         .device
         .or_else(|| ctx.device_override.clone())
         .unwrap_or_else(|| "default".to_string());
-
-    let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("~"));
-    let repo_path_entry = if let Ok(rel) = repo_dir.strip_prefix(&home) {
-        if rel.as_os_str().is_empty() {
-            "~".to_string()
-        } else {
-            format!("~/{}", rel.display())
-        }
-    } else {
-        format!(
-            "~/{}",
-            repo_dir
-                .file_name()
-                .map(|f| f.to_string_lossy())
-                .unwrap_or_default()
-        )
-    };
 
     if local_cfg.default_repo.is_none() {
         local_cfg.default_repo = Some(label.clone());
@@ -216,9 +208,12 @@ pub fn run_check(
                     let expected_vid = repo_cfg
                         .vault
                         .as_ref()
-                        .map(|v| v.vault_id.as_str())
-                        .unwrap_or("");
-                    if !expected_vid.is_empty() && file_vid != expected_vid {
+                        .map(|v| v.vault_id.trim())
+                        .filter(|s| !s.is_empty())
+                        .ok_or(EngineError::Config(
+                            crate::config::ConfigError::MissingVaultConfig,
+                        ))?;
+                    if file_vid != expected_vid {
                         return Err(EngineError::EncryptionMismatch {
                             path: entry.path().to_path_buf(),
                             reason: format!(
@@ -326,5 +321,75 @@ files = ".bashrc"
         assert_eq!(err3.error_code(), "ENCRYPTION_MISMATCH");
         assert_eq!(err3.exit_code(), 1);
         assert!(err3.hint().contains("vault from file"));
+
+        // Empty vault_id in dotler.toml with enc rule must be rejected as MissingVaultConfig
+        fs::write(
+            repo_dir.join("dotler.toml"),
+            format!(
+                "vault_id = \"\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[g1]\nos-nux = \"~\"\nos-mac = \"~\"\nfiles = \".secret enc\"\n",
+                vcfg_a.password_slot, vcfg_a.recovery_slot
+            ),
+        )
+        .unwrap();
+        let err4 = run_check(&ctx, None, &lock).unwrap_err();
+        assert_eq!(err4.error_code(), "CONFIG_ERROR");
+    }
+
+    #[test]
+    fn run_init_rejects_outside_home_before_creating_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let dotler_dir = home_dir.join(".config").join("dotler");
+        let outside_repo = tmp.path().join("outside").join("dots");
+        fs::create_dir_all(&dotler_dir).unwrap();
+
+        let lock_path = dotler_dir.join("dotler.lock");
+        let lock = DotlerLock::new(lock_path.clone())
+            .acquire(Duration::from_millis(500), Duration::from_millis(10))
+            .unwrap();
+        let mut ctx = CoreContext::with_paths(
+            lock_path,
+            dotler_dir.join("config.toml"),
+            dotler_dir.join("state.db"),
+            None,
+            None,
+            false,
+        );
+
+        let err = run_init(
+            &mut ctx,
+            InitParams {
+                label: Some("outside".to_string()),
+                device: None,
+                repo_path: Some(outside_repo.clone()),
+            },
+            &lock,
+        )
+        .unwrap_err();
+        assert_eq!(err.error_code(), "CONFIG_ERROR");
+        assert!(!outside_repo.exists());
+
+        let inside_repo = home_dir.join("my-dots");
+        let report = run_init(
+            &mut ctx,
+            InitParams {
+                label: Some("main".to_string()),
+                device: Some("laptop".to_string()),
+                repo_path: Some(inside_repo.clone()),
+            },
+            &lock,
+        )
+        .unwrap();
+        assert_eq!(report.repo_path, inside_repo);
+        assert!(inside_repo.join("dotler.toml").is_file());
+        assert_eq!(
+            ctx.local_config
+                .get()
+                .unwrap()
+                .repos
+                .get("main")
+                .map(String::as_str),
+            Some("~/my-dots")
+        );
     }
 }

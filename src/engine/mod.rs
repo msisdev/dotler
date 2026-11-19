@@ -25,8 +25,8 @@ pub use remote::{
     BACKUPS_DIR_NAME, CloneReport, GroupSelector, InstallReport, PathOverride,
     REMOTE_TOML_FETCH_MAX_BYTES, RemoteGroupInfo, RemoteManifestSummary, RemoteRepoSummary,
     RemoteRepoUrl, STAGING_CLONE_PREFIX, UninstallReport, clone_repo, clone_repo_with_observer,
-    install_remote, install_remote_with_observer, list_remote, parse_url, run_git_clone,
-    run_git_install, run_git_ls, run_git_uninstall, uninstall_remote,
+    install_remote, install_remote_with_observer, install_remote_with_options, list_remote,
+    parse_url, run_git_clone, run_git_install, run_git_ls, run_git_uninstall, uninstall_remote,
     uninstall_remote_with_observer,
 };
 pub use sync::{

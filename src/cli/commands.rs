@@ -1,22 +1,21 @@
 //! Command-line dispatch routing parsed commands to domain workflows under lock protection.
 
 use std::io::Write;
-use std::path::Path;
 
 use crate::agent::briefing::render_briefing;
-use crate::cli::observer::execute_with_observer;
+use crate::cli::observer::{execute_with_observer, handle_git};
 use crate::cli::output::{EXIT_SUCCESS, ExportReport, render_success_to};
 use crate::cli::vault::{ensure_repo_vault_in_keyring, handle_vault};
-use crate::config::local::{LOCAL_CONFIG_FILE, LocalConfig, expand_tilde, get_local_config};
+use crate::config::local::{
+    LOCAL_CONFIG_FILE, LocalConfig, expand_tilde, format_home_repo_path, get_local_config,
+    resolve_home_for_config_path,
+};
 use crate::config::repo::{OsInfo, RepoConfig};
 use crate::config::state::{DOTLER_LOCK_PATH, DotlerLockGuard, get_lock};
 use crate::core::context::CoreContext;
 use crate::crypto::keyring::OsKeyring;
 use crate::engine::EngineError;
 use crate::engine::check::{CheckReport, run_check, run_init, run_status};
-use crate::engine::remote::{
-    GroupSelector, run_git_clone, run_git_install, run_git_ls, run_git_uninstall,
-};
 use crate::engine::sync::{run_export, run_import};
 use crate::engine::tidy::{TidyOrphanPolicy, run_tidy};
 
@@ -73,6 +72,8 @@ fn handle_init<W: Write>(
         Some(p) => p.clone(),
         None => std::env::current_dir()?,
     };
+    let home = resolve_home_for_config_path(&expand_tilde(LOCAL_CONFIG_FILE));
+    let _ = format_home_repo_path(&repo_dir, &home)?;
     let manifest_path = repo_dir.join("dotler.toml");
     if manifest_path.is_file() {
         let existing_cfg = RepoConfig::load_without_vault_check(&manifest_path)?;
@@ -100,103 +101,6 @@ fn handle_init<W: Write>(
         lock,
     )?;
     Ok(render_success_to(stdout, "init", &report, cli.json))
-}
-
-fn handle_git<W: Write>(
-    cmd: &GitCommand,
-    cli: &Cli,
-    is_interactive: bool,
-    stdout: &mut W,
-    lock: &DotlerLockGuard,
-) -> Result<i32, EngineError> {
-    match cmd {
-        GitCommand::Ls(args) => {
-            let summary = run_git_ls(&args.url, args.branch.as_deref(), lock)?;
-            Ok(render_success_to(stdout, "git ls", &summary, cli.json))
-        }
-        GitCommand::Clone(args) => {
-            let parsed_url = crate::engine::remote::parse_url(&args.url)?;
-            let selectors: Vec<GroupSelector> = args
-                .groups
-                .iter()
-                .map(|s| GroupSelector::parse(s))
-                .collect();
-            let repo_name = parsed_url
-                .clone_url
-                .trim_end_matches('/')
-                .trim_end_matches(".git")
-                .rsplit('/')
-                .next()
-                .unwrap_or("dotfiles");
-            let dest = std::env::current_dir()?.join(repo_name);
-            let cfg_path = expand_tilde(LOCAL_CONFIG_FILE);
-            let dry_run = cli.dry_run;
-            execute_with_observer(
-                stdout,
-                "git clone",
-                cli.json,
-                args.all,
-                args.yes,
-                is_interactive,
-                |obs| {
-                    run_git_clone(
-                        &args.url,
-                        &selectors,
-                        args.branch.as_deref(),
-                        &dest,
-                        Some(&cfg_path),
-                        None,
-                        None,
-                        lock,
-                        dry_run,
-                        obs,
-                    )
-                },
-                |r| r,
-            )
-        }
-        GitCommand::Install(args) => {
-            let dev_override = args.device.clone().or_else(|| cli.device.clone());
-            let ctx = CoreContext::new(cli.repo.clone(), dev_override, is_interactive);
-            let override_path = args.path.first().map(Path::new);
-            let dry_run = cli.dry_run;
-            execute_with_observer(
-                stdout,
-                "git install",
-                cli.json,
-                args.all,
-                args.yes,
-                is_interactive,
-                |obs| {
-                    run_git_install(
-                        &ctx,
-                        &args.url,
-                        &args.groups,
-                        override_path,
-                        args.branch.as_deref(),
-                        lock,
-                        dry_run,
-                        obs,
-                    )
-                },
-                |r| r,
-            )
-        }
-        GitCommand::Uninstall(args) => {
-            let ctx = CoreContext::new(cli.repo.clone(), cli.device.clone(), is_interactive);
-            let dry_run = cli.dry_run;
-            execute_with_observer(
-                stdout,
-                "git uninstall",
-                cli.json,
-                args.all,
-                args.yes,
-                is_interactive,
-                |obs| run_git_uninstall(&ctx, &args.groups, lock, dry_run, obs),
-                |r| r,
-            )
-        }
-    }
 }
 
 fn handle_check<W: Write>(

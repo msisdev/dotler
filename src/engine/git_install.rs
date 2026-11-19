@@ -5,16 +5,19 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::local::{WalkDir, expand_tilde};
+use crate::config::local::{WalkDir, expand_tilde, resolve_home_for_config_path};
 use crate::config::repo::{
     OsInfo, SelectionMode, evaluate_selection, is_symlink, parse_selection_rules,
-    render_home_template, resolve_group_target_path, validate_os_dir_path, validate_os_target_path,
-    validate_path_security,
+    prune_empty_parent_dirs, render_home_template, resolve_group_target_path, validate_os_dir_path,
+    validate_os_target_path, validate_path_security,
 };
 use crate::config::state::{
     BACKUPS_DIR_PATH, DotlerLockGuard, InstalledFileRecord, StateDb, write_file_safe,
 };
 use crate::core::context::CoreContext;
+use crate::core::vault_loader::unlock_vault_if_needed;
+use crate::crypto::ExposeSecret;
+use crate::crypto::vault::{EncryptedFile, VaultKey};
 use crate::engine::EngineError;
 use crate::engine::git_transport::{GitRunner, TempDirGuard};
 use crate::engine::observer::{
@@ -88,8 +91,40 @@ pub fn install_remote_with_observer(
     branch: Option<&str>,
     devices: &[String],
     state: &StateDb,
+    lock: &DotlerLockGuard,
+    dry_run: bool,
+    observer: &mut dyn CommandObserver,
+) -> Result<InstallReport, EngineError> {
+    install_remote_with_options(
+        url,
+        groups,
+        path_override,
+        branch,
+        devices,
+        state,
+        lock,
+        dry_run,
+        true,
+        false,
+        None,
+        observer,
+    )
+}
+
+/// Installs remote repository dotfiles with explicit keyring, interactivity, and vault key options.
+#[allow(clippy::too_many_arguments)]
+pub fn install_remote_with_options(
+    url: &RemoteRepoUrl,
+    groups: &[String],
+    path_override: Option<&Path>,
+    branch: Option<&str>,
+    devices: &[String],
+    state: &StateDb,
     _lock: &DotlerLockGuard,
     dry_run: bool,
+    use_keyring: bool,
+    is_interactive: bool,
+    vault_key_override: Option<&VaultKey>,
     observer: &mut dyn CommandObserver,
 ) -> Result<InstallReport, EngineError> {
     let temp_dir = TempDirGuard::new().map_err(EngineError::Io)?;
@@ -114,7 +149,8 @@ pub fn install_remote_with_observer(
     };
 
     let os_info = OsInfo::detect();
-    let home = resolve_home_for_state(state);
+    let home = resolve_home_for_config_path(state.path());
+    let mut unlocked_vault_key: Option<VaultKey> = None;
     let mut planned = Vec::new();
     let mut preview_entries = Vec::new();
 
@@ -165,16 +201,45 @@ pub fn install_remote_with_observer(
             if !rules.is_empty() && matches!(mode, None | Some(SelectionMode::Exclude)) {
                 continue;
             }
+            if let Some(m) = mode {
+                let enc_conflict = (m.is_encrypted() && !is_enc)
+                    || (m.is_included() && !m.is_encrypted() && is_enc);
+                if enc_conflict {
+                    return Err(EngineError::EncryptionMismatch {
+                        path: entry.path().to_path_buf(),
+                        reason: format!(
+                            "Remote repository file '{rel_path_str}' conflicts with encryption rule in dotler.toml."
+                        ),
+                    });
+                }
+            }
 
             let target_file_path = target_base.join(&clean_rel);
             validate_os_target_path(&target_file_path, &home)?;
 
             let raw_content = fs::read(entry.path())?;
-            let is_template = mode.is_some_and(|m| m.is_template());
-            let file_content = if is_template && !is_enc {
-                render_home_template(&raw_content, &home, &clean_rel)?
+            let plaintext_bytes = if is_enc {
+                let key = if let Some(override_key) = vault_key_override {
+                    override_key
+                } else {
+                    if unlocked_vault_key.is_none() {
+                        unlocked_vault_key =
+                            unlock_vault_if_needed(repo_config, use_keyring, is_interactive, true)?;
+                    }
+                    unlocked_vault_key.as_ref().ok_or(EngineError::Config(
+                        crate::config::ConfigError::MissingVaultConfig,
+                    ))?
+                };
+                let enc_file = EncryptedFile::from_bytes(&raw_content)?;
+                key.decrypt_file(&enc_file)?.expose_secret().clone()
             } else {
                 raw_content
+            };
+            let is_template = mode.is_some_and(|m| m.is_template());
+            let file_content = if is_template {
+                render_home_template(&plaintext_bytes, &home, &clean_rel)?
+            } else {
+                plaintext_bytes
             };
 
             let os_action = if target_file_path.is_file() {
@@ -290,7 +355,13 @@ fn execute_install_wal(
         let backup_path = if let Some(ref ext) = existing {
             ext.backup_path.clone()
         } else if item.target_file_path.is_file() {
-            let bp = create_backup_file(&item.target_file_path, &item.clean_rel, timestamp, state)?;
+            let bp = create_backup_file(
+                &item.target_file_path,
+                &item.group_name,
+                &item.clean_rel,
+                timestamp,
+                state,
+            )?;
             backed_up_files.push(PathBuf::from(&bp));
             Some(bp)
         } else {
@@ -403,10 +474,16 @@ pub fn uninstall_remote_with_observer(
     let mut removed_files = Vec::new();
     let mut restored_backups = Vec::new();
     let total = filtered_records.len();
+    let backups_root = if let Some(dotler_dir) = state.path().parent() {
+        dotler_dir.join(BACKUPS_DIR_NAME)
+    } else {
+        expand_tilde(BACKUPS_DIR_PATH)
+    };
+    let home = resolve_home_for_config_path(state.path());
 
     for record in filtered_records {
         let target = PathBuf::from(&record.target_path);
-        let group_base = target.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let group_base = resolve_installed_group_base(&target, &record.relative_path, &home);
         let bp = record.backup_path.as_deref().map(PathBuf::from);
         if let Some(ref backup_path) = bp
             && backup_path.is_file()
@@ -416,9 +493,7 @@ pub fn uninstall_remote_with_observer(
                 write_file_safe(&target, &backup_bytes)?;
                 state.remove_installed_file(&record.target_path)?;
                 let _ = fs::remove_file(backup_path);
-                if let Some(p) = backup_path.parent() {
-                    let _ = fs::remove_dir(p);
-                }
+                prune_empty_parent_dirs(backup_path, &backups_root);
             }
             restored_backups.push(target);
         } else {
@@ -426,6 +501,7 @@ pub fn uninstall_remote_with_observer(
                 if target.is_file() || is_symlink(&target) {
                     let _ = fs::remove_file(&target);
                 }
+                prune_empty_parent_dirs(&target, &group_base);
                 state.remove_installed_file(&record.target_path)?;
             }
             removed_files.push(target);
@@ -462,7 +538,7 @@ pub fn run_git_install(
     let local_cfg = ctx.local_config.get()?;
     let devices = ctx.effective_devices(local_cfg);
     let state = ctx.state_db.get()?;
-    install_remote_with_observer(
+    install_remote_with_options(
         &url,
         groups,
         path_override,
@@ -471,6 +547,9 @@ pub fn run_git_install(
         state,
         lock,
         dry_run,
+        local_cfg.use_keyring,
+        ctx.is_interactive,
+        None,
         observer,
     )
 }
@@ -489,6 +568,7 @@ pub fn run_git_uninstall(
 
 fn create_backup_file(
     source: &Path,
+    group_name: &str,
     rel: &str,
     timestamp: i64,
     state: &StateDb,
@@ -497,8 +577,11 @@ fn create_backup_file(
         dotler_dir
             .join(BACKUPS_DIR_NAME)
             .join(timestamp.to_string())
+            .join(group_name)
     } else {
-        expand_tilde(BACKUPS_DIR_PATH).join(timestamp.to_string())
+        expand_tilde(BACKUPS_DIR_PATH)
+            .join(timestamp.to_string())
+            .join(group_name)
     };
     let dest = backup_root.join(rel);
     let source_bytes = fs::read(source)?;
@@ -506,17 +589,216 @@ fn create_backup_file(
     Ok(dest.to_string_lossy().to_string())
 }
 
-fn resolve_home_for_state(state: &StateDb) -> PathBuf {
-    if let Some(home) = state
-        .path()
-        .parent()
-        .filter(|d| d.file_name().and_then(|s| s.to_str()) == Some("dotler"))
-        .and_then(|d| d.parent())
-        .filter(|c| c.file_name().and_then(|s| s.to_str()) == Some(".config"))
-        .and_then(|c| c.parent())
-    {
-        home.to_path_buf()
-    } else {
-        std::env::home_dir().unwrap_or_else(|| PathBuf::from("."))
+fn resolve_installed_group_base(target: &Path, relative_path: &str, home: &Path) -> PathBuf {
+    let rel_comps: Vec<_> = Path::new(relative_path)
+        .components()
+        .filter(|c| matches!(c, std::path::Component::Normal(_)))
+        .collect();
+    if !rel_comps.is_empty() {
+        let mut base = target.to_path_buf();
+        let mut matched = true;
+        for comp in rel_comps.into_iter().rev() {
+            if base.file_name() == Some(comp.as_os_str()) {
+                base.pop();
+            } else {
+                matched = false;
+                break;
+            }
+        }
+        if matched && !base.as_os_str().is_empty() && base.starts_with(home) {
+            return base;
+        }
+    }
+    home.to_path_buf()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::state::DotlerLock;
+    use crate::crypto::SecretString;
+    use crate::crypto::vault::init_vault;
+    use std::process::Command;
+    use std::time::Duration;
+
+    fn create_test_bare_repo(
+        dotler_toml: &str,
+        files: &[(&str, &[u8])],
+    ) -> (tempfile::TempDir, RemoteRepoUrl) {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join("wt");
+        let bare = tmp.path().join("bare.git");
+        fs::create_dir_all(&wt).unwrap();
+        let run = |args: &[&str], dir: &Path| {
+            let st = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {:?} failed", args);
+        };
+        run(&["init", "-b", "main"], &wt);
+        run(&["config", "user.name", "Tester"], &wt);
+        run(&["config", "user.email", "test@dotler.dev"], &wt);
+        fs::write(wt.join("dotler.toml"), dotler_toml).unwrap();
+        for (rel, body) in files {
+            let p = wt.join(rel);
+            if let Some(parent) = p.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(p, body).unwrap();
+        }
+        run(&["add", "."], &wt);
+        run(&["commit", "-m", "seed"], &wt);
+        run(
+            &[
+                "clone",
+                "--bare",
+                wt.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+            tmp.path(),
+        );
+        let url = parse_url(&format!("file://{}", bare.display())).unwrap();
+        (tmp, url)
+    }
+
+    #[test]
+    fn install_remote_decrypts_enc_and_enc_tmpl_and_rejects_locked_vault() {
+        let _mock = crate::crypto::keyring::MockKeyringGuard::new();
+        unsafe {
+            std::env::remove_var(crate::crypto::keyring::PASSPHRASE_ENV_VAR);
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let dotler_dir = home.join(".config").join("dotler");
+        fs::create_dir_all(&dotler_dir).unwrap();
+        let state = StateDb::open(&dotler_dir.join("state.db")).unwrap();
+        let lock = DotlerLock::new(dotler_dir.join("dotler.lock"))
+            .acquire(Duration::from_millis(500), Duration::from_millis(10))
+            .unwrap();
+
+        let pass = SecretString::new("remote-install-pass-123".to_string());
+        let (vcfg, vkey, _) = init_vault(&pass).unwrap();
+        let enc_plain = vkey.encrypt_file(b"API_KEY=xyz\n").unwrap().to_bytes();
+        let enc_tmpl = vkey
+            .encrypt_file(b"HOME_DIR={{ $HOME }}/bin\n")
+            .unwrap()
+            .to_bytes();
+
+        let remote_toml = format!(
+            "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[sec]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nos-bsd = \"~\"\nfiles = \"\"\"\n.env enc\n.path_env enc tmpl\n\"\"\"\n",
+            vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
+        );
+        let (_git_tmp, url) = create_test_bare_repo(
+            &remote_toml,
+            &[
+                ("sec/.env.enc", &enc_plain),
+                ("sec/.path_env.enc", &enc_tmpl),
+            ],
+        );
+
+        // Non-interactive without keyring or passphrase must fail with VaultLocked
+        let mut obs = NoopObserver;
+        let locked_err = install_remote_with_options(
+            &url,
+            &["sec".to_string()],
+            None,
+            None,
+            &[],
+            &state,
+            &lock,
+            false,
+            true,
+            false,
+            None,
+            &mut obs,
+        )
+        .unwrap_err();
+        assert_eq!(locked_err.exit_code(), 4);
+
+        // With vault key unlocked (e.g. keyring), both `.enc` and `enc tmpl` deploy as plaintext
+        crate::crypto::keyring::OsKeyring::set_for_vault(&vcfg.vault_id, &pass).unwrap();
+        let rep =
+            install_remote(&url, &["sec".to_string()], None, None, &[], &state, &lock).unwrap();
+        assert_eq!(rep.installed_files.len(), 2);
+        assert_eq!(fs::read(home.join(".env")).unwrap(), b"API_KEY=xyz\n");
+        assert_eq!(
+            fs::read_to_string(home.join(".path_env")).unwrap(),
+            format!("HOME_DIR={}/bin\n", home.display())
+        );
+    }
+
+    #[test]
+    fn install_isolates_same_second_cross_group_backups_and_uninstall_prunes_empty_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let dotler_dir = home.join(".config").join("dotler");
+        fs::create_dir_all(home.join(".config/app1")).unwrap();
+        fs::create_dir_all(home.join(".config/app2")).unwrap();
+        fs::create_dir_all(&dotler_dir).unwrap();
+        fs::write(home.join(".config/app1/config.toml"), b"app1-original\n").unwrap();
+        fs::write(home.join(".config/app2/config.toml"), b"app2-original\n").unwrap();
+
+        let state = StateDb::open(&dotler_dir.join("state.db")).unwrap();
+        let lock = DotlerLock::new(dotler_dir.join("dotler.lock"))
+            .acquire(Duration::from_millis(500), Duration::from_millis(10))
+            .unwrap();
+
+        let remote_toml = r#"
+[app1]
+os-nux = "~/.config/app1"
+os-mac = "~/.config/app1"
+os-win = "~/.config/app1"
+os-bsd = "~/.config/app1"
+files = "config.toml"
+
+[app2]
+os-nux = "~/.config/app2"
+os-mac = "~/.config/app2"
+os-win = "~/.config/app2"
+os-bsd = "~/.config/app2"
+files = "config.toml"
+
+[fresh]
+os-nux = "~/.config/fresh"
+os-mac = "~/.config/fresh"
+os-win = "~/.config/fresh"
+os-bsd = "~/.config/fresh"
+files = "nested/new.conf"
+"#;
+        let (_git_tmp, url) = create_test_bare_repo(
+            remote_toml,
+            &[
+                ("app1/config.toml", b"app1-remote\n"),
+                ("app2/config.toml", b"app2-remote\n"),
+                ("fresh/nested/new.conf", b"fresh-remote\n"),
+            ],
+        );
+
+        let rep = install_remote(&url, &[], None, None, &[], &state, &lock).unwrap();
+        assert_eq!(rep.installed_files.len(), 3);
+        assert_eq!(rep.backed_up_files.len(), 2);
+        assert_ne!(rep.backed_up_files[0], rep.backed_up_files[1]);
+
+        let uninst = uninstall_remote(&[], &state, &lock, false).unwrap();
+        assert_eq!(uninst.restored_backups.len(), 2);
+        assert_eq!(uninst.removed_files.len(), 1);
+        assert_eq!(
+            fs::read(home.join(".config/app1/config.toml")).unwrap(),
+            b"app1-original\n"
+        );
+        assert_eq!(
+            fs::read(home.join(".config/app2/config.toml")).unwrap(),
+            b"app2-original\n"
+        );
+        assert!(!home.join(".config/fresh/nested").exists());
+        assert_eq!(
+            fs::read_dir(dotler_dir.join(BACKUPS_DIR_NAME))
+                .unwrap()
+                .count(),
+            0
+        );
     }
 }

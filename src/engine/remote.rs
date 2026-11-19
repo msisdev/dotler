@@ -18,8 +18,8 @@ pub use crate::engine::git_clone::{
 };
 pub use crate::engine::git_install::{
     BACKUPS_DIR_NAME, InstallReport, PathOverride, UninstallReport, install_remote,
-    install_remote_with_observer, run_git_install, run_git_uninstall, uninstall_remote,
-    uninstall_remote_with_observer,
+    install_remote_with_observer, install_remote_with_options, run_git_install, run_git_uninstall,
+    uninstall_remote, uninstall_remote_with_observer,
 };
 pub use crate::engine::git_transport::{GitRunner, fetch_http_text};
 

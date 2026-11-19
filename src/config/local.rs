@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::config::lock::write_file_safe;
+use crate::config::path_security::{
+    normalize_lexical_path, resolve_with_existing_ancestors, validate_path_security,
+};
 use crate::config::{ConfigError, StateError};
 
 pub const LOCAL_CONFIG_DIR: &str = "~/.config/dotler";
@@ -24,6 +27,66 @@ pub fn expand_tilde(path: &str) -> PathBuf {
 }
 
 pub use crate::config::path_security::{WalkDir, WalkEntry};
+
+/// Infers the home directory root when `dotler_artifact_path` follows `<home>/.config/dotler/<file>`.
+pub fn resolve_home_for_config_path(dotler_artifact_path: &Path) -> PathBuf {
+    if let Some(home) = dotler_artifact_path
+        .parent()
+        .filter(|d| d.file_name().and_then(|s| s.to_str()) == Some("dotler"))
+        .and_then(|d| d.parent())
+        .filter(|c| c.file_name().and_then(|s| s.to_str()) == Some(".config"))
+        .and_then(|c| c.parent())
+    {
+        home.to_path_buf()
+    } else {
+        expand_tilde("~")
+    }
+}
+
+/// Normalizes `repo_dir` into `"~"` or `"~/..."` relative to `home_dir` and validates path security.
+pub fn format_home_repo_path(repo_dir: &Path, home_dir: &Path) -> Result<String, ConfigError> {
+    let abs_repo = if repo_dir.is_absolute() {
+        repo_dir.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(repo_dir)
+    };
+    let norm_repo = normalize_lexical_path(&abs_repo);
+    let abs_home = if home_dir.is_absolute() {
+        home_dir.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(home_dir)
+    };
+    let norm_home = normalize_lexical_path(&abs_home);
+
+    let resolved_repo = resolve_with_existing_ancestors(&norm_repo);
+    let canon_home = fs::canonicalize(&norm_home)
+        .unwrap_or_else(|_| resolve_with_existing_ancestors(&norm_home));
+
+    // Lexical match is accepted only when canonical resolution does not escape `canon_home`.
+    let rel = if let Ok(lexical_rel) = norm_repo.strip_prefix(&norm_home)
+        && (!norm_home.exists() || resolved_repo.starts_with(&canon_home))
+    {
+        lexical_rel.to_path_buf()
+    } else if let Ok(canon_rel) = resolved_repo.strip_prefix(&canon_home) {
+        canon_rel.to_path_buf()
+    } else {
+        return Err(ConfigError::InvalidHomePath {
+            path: repo_dir.display().to_string(),
+            reason: "repository path must reside inside the home directory ('~' or '~/')"
+                .to_string(),
+        });
+    };
+
+    let entry = if rel.as_os_str().is_empty() {
+        "~".to_string()
+    } else {
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        format!("~/{}", rel_str.trim_start_matches('/'))
+    };
+
+    validate_path_security(&entry)?;
+    Ok(entry)
+}
 
 /// Searches `start_dir` and its parent directories upward for a `dotler.toml` manifest.
 /// Returns the directory containing the nearest `dotler.toml`, if found.
@@ -254,6 +317,34 @@ impl LocalConfig {
             StateError::Io(io) => ConfigError::IoError(io),
             other => ConfigError::AtomicRenameFailed(other.to_string()),
         })
+    }
+
+    /// Collects configured `[repos]` entries plus the current working directory ancestor repository,
+    /// deduplicating equivalent paths via canonicalization.
+    pub fn candidate_repos_with_cwd(&self) -> Vec<(String, PathBuf)> {
+        let mut candidates: Vec<(String, PathBuf)> = self
+            .repos
+            .iter()
+            .map(|(label, raw)| (label.clone(), expand_tilde(raw)))
+            .collect();
+
+        if let Ok(cwd) = std::env::current_dir()
+            && let Some(repo_dir) = find_ancestor_repo_dir(&cwd)
+        {
+            let canon_cwd = fs::canonicalize(&repo_dir).unwrap_or_else(|_| repo_dir.clone());
+            let already_listed = candidates
+                .iter()
+                .any(|(_, p)| fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == canon_cwd);
+            if !already_listed {
+                let cwd_label = repo_dir
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "current".to_string());
+                candidates.push((cwd_label, repo_dir));
+            }
+        }
+
+        candidates
     }
 }
 
@@ -551,5 +642,61 @@ devices = ["laptop"]
         fs::write(repo_root.join("dotler.toml"), "[nvim]\nfiles = \"*\"\n").unwrap();
         assert_eq!(find_ancestor_repo_dir(&nested_sub), Some(repo_root.clone()));
         assert_eq!(find_ancestor_repo_dir(&repo_root), Some(repo_root));
+    }
+
+    #[test]
+    fn test_format_home_repo_path_normalizes_and_rejects_outside_home() {
+        let dir = tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        assert_eq!(format_home_repo_path(&home, &home).unwrap(), "~");
+        assert_eq!(
+            format_home_repo_path(&home.join("dots/personal"), &home).unwrap(),
+            "~/dots/personal"
+        );
+
+        let err = format_home_repo_path(&outside.join("dots"), &home).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidHomePath { .. }));
+
+        let err_dotler =
+            format_home_repo_path(&home.join(".config/dotler/repo"), &home).unwrap_err();
+        assert!(matches!(err_dotler, ConfigError::HardBlockedPath { .. }));
+
+        #[cfg(unix)]
+        {
+            let link_home = dir.path().join("home_link");
+            std::os::unix::fs::symlink(&home, &link_home).unwrap();
+            assert_eq!(
+                format_home_repo_path(&link_home.join("work/dots"), &home).unwrap(),
+                "~/work/dots"
+            );
+
+            let escape_link = home.join("escape");
+            std::os::unix::fs::symlink(&outside, &escape_link).unwrap();
+            let err_escape = format_home_repo_path(&escape_link, &home).unwrap_err();
+            assert!(matches!(err_escape, ConfigError::InvalidHomePath { .. }));
+        }
+    }
+
+    #[test]
+    fn test_resolve_home_for_config_path_and_candidate_repos() {
+        let dir = tempdir().expect("tempdir");
+        let home = dir.path().join("h");
+        let cfg_path = home.join(".config").join("dotler").join("config.toml");
+        assert_eq!(resolve_home_for_config_path(&cfg_path), home);
+
+        let repo_a = home.join("dots_a");
+        let mut cfg = LocalConfig::default();
+        cfg.repos
+            .insert("a".to_string(), repo_a.to_string_lossy().to_string());
+        let candidates = cfg.candidate_repos_with_cwd();
+        assert!(
+            candidates
+                .iter()
+                .any(|(label, path)| label == "a" && path == &repo_a)
+        );
     }
 }

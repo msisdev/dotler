@@ -246,7 +246,7 @@ pub fn validate_dir_no_symlinks(dir: &Path) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn normalize_lexical_path(path: &Path) -> PathBuf {
+pub(crate) fn normalize_lexical_path(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in path.components() {
         match comp {
@@ -260,7 +260,7 @@ fn normalize_lexical_path(path: &Path) -> PathBuf {
     out
 }
 
-fn resolve_with_existing_ancestors(path: &Path) -> PathBuf {
+pub(crate) fn resolve_with_existing_ancestors(path: &Path) -> PathBuf {
     let lexical = normalize_lexical_path(path);
     let mut current = lexical.as_path();
     while let Some(parent) = current.parent() {

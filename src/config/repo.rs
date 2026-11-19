@@ -261,7 +261,13 @@ impl RepoConfig {
             }
         }
 
-        if require_vault && has_encrypted_rules && self.vault.is_none() {
+        if require_vault
+            && has_encrypted_rules
+            && self
+                .vault
+                .as_ref()
+                .is_none_or(|v| v.vault_id.trim().is_empty())
+        {
             return Err(ConfigError::MissingVaultConfig);
         }
 

@@ -13,7 +13,7 @@ pub mod resource {
 
 pub use local::{
     LOCAL_CONFIG_DIR, LOCAL_CONFIG_FILE, LocalConfig, RESERVED_OS_PREFIX, find_ancestor_repo_dir,
-    get_local_config, resolve_repo_path_with_cwd,
+    get_local_config, resolve_repo_path_from_dir, resolve_repo_path_with_cwd,
 };
 pub use repo::{
     GroupConfig, OsInfo, RepoConfig, SelectionMode, SelectionRule, VaultConfig, get_repo_config,

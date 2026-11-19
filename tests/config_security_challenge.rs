@@ -1,6 +1,9 @@
 use dotler::config::ConfigError;
 use dotler::config::local::LocalConfig;
-use dotler::config::repo::{OsInfo, RepoConfig, parse_selection_rules, validate_path_security};
+use dotler::config::repo::{
+    OsInfo, RepoConfig, parse_selection_rules, validate_os_target_path_with_home,
+    validate_path_security,
+};
 
 // ---------------------------------------------------------------------------
 // Suite 1: Malformed Syntax, Unknown Attributes & Line-Numbered Error Reporting
@@ -348,4 +351,78 @@ os-nux = "~"
         collision_result.is_ok(),
         "distinct files under '~' must not collide: {collision_result:?}"
     );
+}
+
+#[test]
+fn test_cwd_path_security_blocks_escapes_and_allows_cwd_paths() {
+    for valid in [".", "./", "./config", "./.gitignore", "./.github"] {
+        assert!(
+            validate_path_security(valid).is_ok(),
+            "CWD path '{valid}' should be accepted"
+        );
+    }
+
+    for invalid in [
+        "./../secret",
+        "./$PWD/env",
+        "./%VAR%/env",
+        ".\\sub",
+        "./.config/dotler",
+        "./.config/dotler/state.db",
+        "./.git",
+        "./.git/hooks",
+        "./sub/.git",
+    ] {
+        let err = validate_path_security(invalid)
+            .expect_err(&format!("CWD path '{invalid}' must be blocked"));
+        assert!(matches!(err, ConfigError::HardBlockedPath { .. }));
+        assert_eq!(err.exit_code(), 3);
+    }
+
+    #[cfg(unix)]
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let cwd = tmp.path().join("project");
+        std::fs::create_dir_all(home_dir.join(".ssh")).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let ssh_key = home_dir.join(".ssh/id_rsa");
+        std::fs::write(&ssh_key, b"PRIVATE").unwrap();
+        let escape_link = cwd.join("escaped_key");
+        std::os::unix::fs::symlink(&ssh_key, &escape_link).unwrap();
+
+        let err = validate_os_target_path_with_home(&escape_link, &cwd, &home_dir)
+            .expect_err("symlink inside cwd pointing to home must be blocked");
+        assert!(matches!(err, ConfigError::HardBlockedPath { .. }));
+        assert_eq!(err.exit_code(), 3);
+    }
+}
+
+#[test]
+fn test_cwd_cross_group_collision_when_cwd_equals_home() {
+    let manifest = r#"
+[home_env]
+files = ".env"
+os-nux = "~"
+
+[proj_env]
+files = ".env"
+os-nux = "."
+"#;
+    let repo = RepoConfig::parse(manifest).expect("syntax valid");
+    let os_info = OsInfo::new("arch", "linux");
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("home");
+    let project_dir = tmp.path().join("project");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    assert!(
+        repo.detect_cross_group_collisions_with_roots(&[], &os_info, &home_dir, &project_dir)
+            .is_ok()
+    );
+    let err = repo
+        .detect_cross_group_collisions_with_roots(&[], &os_info, &home_dir, &home_dir)
+        .expect_err("cwd == home_dir collision on .env must be detected");
+    assert!(matches!(err, ConfigError::CrossGroupFileCollision { .. }));
 }

@@ -8,8 +8,10 @@ use crate::config::ConfigError;
 
 pub use crate::config::cascade::{OsInfo, RECOGNIZED_OS_KEYS, resolve_group_target_path};
 pub use crate::config::path_security::{
-    WalkDir, WalkEntry, is_symlink, prune_empty_parent_dirs, validate_dir_no_symlinks,
-    validate_os_dir_path, validate_os_target_path, validate_path_security, validate_rule_pattern,
+    WalkDir, WalkEntry, is_cwd_group_path, is_home_group_path, is_symlink, prune_empty_parent_dirs,
+    validate_dir_no_symlinks, validate_os_dir_path, validate_os_dir_path_with_home,
+    validate_os_target_path, validate_os_target_path_with_home, validate_path_security,
+    validate_repo_target_disjointness, validate_rule_pattern,
 };
 pub use crate::config::selection::{
     SelectionMode, SelectionRule, evaluate_selection, find_literal_full_enc_rules,

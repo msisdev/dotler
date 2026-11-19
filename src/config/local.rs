@@ -364,15 +364,18 @@ pub fn get_local_config(path: PathBuf) -> crate::config::Resource<LocalConfig, C
     )
 }
 
-/// Resolves the active `(repo_label, repo_dir)` by checking the current working directory's
-/// ancestor chain for `dotler.toml` first (when `requested_label` is `None`), falling back
-/// to `local_cfg.resolve_repo(requested_label)`.
-pub fn resolve_repo_path_with_cwd(
+/// Resolves the active `(repo_label, repo_dir)` by checking `cwd_override` (or the current
+/// working directory) and its ancestor chain for `dotler.toml` first (when `requested_label` is
+/// `None`), falling back to `local_cfg.resolve_repo(requested_label)`.
+pub fn resolve_repo_path_from_dir(
     local_cfg: &LocalConfig,
     requested_label: Option<&str>,
+    cwd_override: Option<&Path>,
 ) -> Result<(String, PathBuf), ConfigError> {
     if requested_label.is_none()
-        && let Ok(current_dir) = std::env::current_dir()
+        && let Some(current_dir) = cwd_override
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())
         && let Some(repo_dir) = find_ancestor_repo_dir(&current_dir)
     {
         let canon_repo = fs::canonicalize(&repo_dir).unwrap_or_else(|_| repo_dir.clone());
@@ -390,6 +393,16 @@ pub fn resolve_repo_path_with_cwd(
     }
 
     local_cfg.resolve_repo(requested_label)
+}
+
+/// Resolves the active `(repo_label, repo_dir)` by checking the current working directory's
+/// ancestor chain for `dotler.toml` first (when `requested_label` is `None`), falling back
+/// to `local_cfg.resolve_repo(requested_label)`.
+pub fn resolve_repo_path_with_cwd(
+    local_cfg: &LocalConfig,
+    requested_label: Option<&str>,
+) -> Result<(String, PathBuf), ConfigError> {
+    resolve_repo_path_from_dir(local_cfg, requested_label, None)
 }
 
 #[cfg(test)]

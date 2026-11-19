@@ -1,6 +1,8 @@
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use crate::config::ConfigError;
+use crate::config::path_security::{normalize_lexical_path, resolve_with_existing_ancestors};
 use crate::config::repo::{GroupConfig, RepoConfig};
 use crate::config::selection::{
     SelectionMode, SelectionRule, evaluate_selection, parse_selection_rules,
@@ -136,11 +138,69 @@ fn is_included(rules: &[SelectionRule], path: &str) -> bool {
     matches!(evaluate_selection(rules, path), Some(m) if m != SelectionMode::Exclude)
 }
 
+fn normalize_group_base(raw: &str) -> String {
+    let trimmed = raw.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed == "~" || trimmed.starts_with("~/") {
+        return trimmed.to_string();
+    }
+    if trimmed == "." {
+        return ".".to_string();
+    }
+    if let Some(mut rest) = trimmed.strip_prefix("./") {
+        while let Some(next) = rest.strip_prefix("./") {
+            rest = next;
+        }
+        let clean = rest.trim_start_matches('/');
+        if clean.is_empty() || clean == "." {
+            return ".".to_string();
+        }
+        return format!("./{clean}");
+    }
+    trimmed.to_string()
+}
+
+fn expand_normalized_root_base(raw: &str, home_root: &Path, cwd_root: &Path) -> String {
+    let norm = normalize_group_base(raw);
+    let expanded = if norm == "~" {
+        home_root.to_path_buf()
+    } else if let Some(rest) = norm.strip_prefix("~/") {
+        home_root.join(rest)
+    } else if norm == "." {
+        cwd_root.to_path_buf()
+    } else if let Some(rest) = norm.strip_prefix("./") {
+        cwd_root.join(rest)
+    } else {
+        PathBuf::from(&norm)
+    };
+    let normalized = normalize_lexical_path(&expanded);
+    let s = normalized.to_string_lossy().replace('\\', "/");
+    if s.len() > 1 {
+        s.trim_end_matches('/').to_string()
+    } else {
+        s
+    }
+}
+
+fn join_base_and_pattern(base: &str, rel: &str) -> String {
+    if base == "/" {
+        format!("/{rel}")
+    } else {
+        format!("{base}/{rel}")
+    }
+}
+
 fn rel_to_base(target_path: &str, base: &str) -> Option<String> {
     if target_path == base {
         Some(String::new())
     } else if base == "~" {
         target_path.strip_prefix("~/").map(str::to_string)
+    } else if base == "." {
+        target_path.strip_prefix("./").map(str::to_string)
+    } else if base == "/" {
+        target_path.strip_prefix('/').map(str::to_string)
     } else {
         target_path
             .strip_prefix(base)
@@ -164,7 +224,7 @@ fn check_no_rules_against(
         }
     }
     for w in &other.wildcard_rules {
-        let target = format!("{}/{}", other.base, clean_rule_pattern(w));
+        let target = join_base_and_pattern(&other.base, clean_rule_pattern(w));
         if rel_to_base(&target, &empty.base).is_some() {
             return Err(collision(target, g1, g2));
         }
@@ -197,7 +257,7 @@ fn check_wildcard_target_overlap(
 ) -> Result<(), ConfigError> {
     for w in &src.wildcard_rules {
         let p = clean_rule_pattern(w);
-        let target = format!("{}/{}", src.base, p);
+        let target = join_base_and_pattern(&src.base, p);
         if let Some(rel) = rel_to_base(&target, &dst.base)
             && !rel.is_empty()
             && is_included(&src.rules, p)
@@ -215,6 +275,31 @@ impl RepoConfig {
         devices: &[String],
         os_info: &OsInfo,
     ) -> Result<(), ConfigError> {
+        self.detect_cross_group_collisions_with_mapper(devices, os_info, normalize_group_base)
+    }
+
+    /// Detects cross-group target file collisions after expanding `~` against `home_dir`
+    /// and `.` against `cwd`.
+    pub fn detect_cross_group_collisions_with_roots(
+        &self,
+        devices: &[String],
+        os_info: &OsInfo,
+        home_dir: &Path,
+        cwd: &Path,
+    ) -> Result<(), ConfigError> {
+        let home_root = resolve_with_existing_ancestors(home_dir);
+        let cwd_root = resolve_with_existing_ancestors(cwd);
+        self.detect_cross_group_collisions_with_mapper(devices, os_info, |raw| {
+            expand_normalized_root_base(raw, &home_root, &cwd_root)
+        })
+    }
+
+    fn detect_cross_group_collisions_with_mapper(
+        &self,
+        devices: &[String],
+        os_info: &OsInfo,
+        mut map_base: impl FnMut(&str) -> String,
+    ) -> Result<(), ConfigError> {
         let mut active_groups = Vec::new();
 
         for (group_name, group) in &self.groups {
@@ -222,7 +307,7 @@ impl RepoConfig {
                 continue;
             };
             let rules = parse_selection_rules(&group.files)?;
-            let normalized_base = target_base.trim_end_matches('/').to_string();
+            let normalized_base = map_base(&target_base);
             let mut concrete_files = Vec::new();
             let mut wildcard_rules = Vec::new();
             let has_no_rules = rules.is_empty();
@@ -254,7 +339,7 @@ impl RepoConfig {
                             });
                         }
                     } else if is_included(&rules, clean_pattern) {
-                        let target_file = format!("{normalized_base}/{clean_pattern}");
+                        let target_file = join_base_and_pattern(&normalized_base, clean_pattern);
                         if !concrete_files.contains(&target_file) {
                             concrete_files.push(target_file);
                         }
@@ -293,9 +378,9 @@ impl RepoConfig {
                 check_wildcard_target_overlap(g2, g1, g1.name, g2.name)?;
 
                 for w1 in &g1.wildcard_rules {
-                    let target1 = format!("{}/{}", g1.base, clean_rule_pattern(w1));
+                    let target1 = join_base_and_pattern(&g1.base, clean_rule_pattern(w1));
                     for w2 in &g2.wildcard_rules {
-                        let target2 = format!("{}/{}", g2.base, clean_rule_pattern(w2));
+                        let target2 = join_base_and_pattern(&g2.base, clean_rule_pattern(w2));
                         if target1 == target2 {
                             return Err(collision(target1, g1.name, g2.name));
                         }
@@ -449,5 +534,51 @@ mod tests {
 
         let overridden = parse_selection_rules("secrets enc\n!secrets/*").unwrap();
         assert!(!rules_have_effective_encryption(&overridden));
+    }
+
+    #[test]
+    fn test_cross_group_collision_cwd_paths_and_roots() {
+        let os_info = OsInfo::new("arch", "nux");
+
+        // Same file under `.` and `./` collides statically.
+        let cwd_same = RepoConfig::parse(
+            "[g1]\nos-nux = \".\"\nfiles = \".env\"\n[g2]\nos-nux = \"./\"\nfiles = \".env\"\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            cwd_same.detect_cross_group_collisions(&[], &os_info),
+            Err(ConfigError::CrossGroupFileCollision { .. })
+        ));
+
+        // `.` + `config/app.toml` vs `./config` + `app.toml` collides statically.
+        let cwd_nested = RepoConfig::parse(
+            "[g1]\nos-nux = \".\"\nfiles = \"config/app.toml\"\n[g2]\nos-nux = \"./config\"\nfiles = \"app.toml\"\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            cwd_nested.detect_cross_group_collisions(&[], &os_info),
+            Err(ConfigError::CrossGroupFileCollision { .. })
+        ));
+
+        // `~` + `.env` vs `.` + `.env` only collides when `cwd == home_dir`.
+        let mixed = RepoConfig::parse(
+            "[home_grp]\nos-nux = \"~\"\nfiles = \".env\"\n[cwd_grp]\nos-nux = \".\"\nfiles = \".env\"\n",
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let project_dir = tmp.path().join("project");
+        fs::create_dir_all(&home_dir).unwrap();
+        fs::create_dir_all(&project_dir).unwrap();
+
+        assert!(
+            mixed
+                .detect_cross_group_collisions_with_roots(&[], &os_info, &home_dir, &project_dir)
+                .is_ok()
+        );
+        assert!(matches!(
+            mixed.detect_cross_group_collisions_with_roots(&[], &os_info, &home_dir, &home_dir),
+            Err(ConfigError::CrossGroupFileCollision { .. })
+        ));
     }
 }

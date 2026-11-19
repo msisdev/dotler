@@ -114,11 +114,21 @@ impl IntoIterator for WalkDir {
     }
 }
 
+/// Returns true if `path` is anchored at the user's home directory (`"~"` or `"~/..."`).
+pub fn is_home_group_path(path: &str) -> bool {
+    path == "~" || path.starts_with("~/")
+}
+
+/// Returns true if `path` is anchored at the current working directory (`"."` or `"./..."`).
+pub fn is_cwd_group_path(path: &str) -> bool {
+    path == "." || path.starts_with("./")
+}
+
 pub fn validate_path_security(path: &str) -> Result<(), ConfigError> {
-    if path != "~" && !path.starts_with("~/") {
+    if !is_home_group_path(path) && !is_cwd_group_path(path) {
         return Err(ConfigError::HardBlockedPath {
             path: path.to_string(),
-            reason: "path must start with '~' or '~/'".to_string(),
+            reason: "path must start with '~', '~/', '.', or './'".to_string(),
         });
     }
 
@@ -150,6 +160,22 @@ pub fn validate_path_security(path: &str) -> Result<(), ConfigError> {
             path: path.to_string(),
             reason: "path cannot point inside ~/.config/dotler".to_string(),
         });
+    }
+
+    if is_cwd_group_path(path) {
+        let mut rel = trimmed
+            .strip_prefix('.')
+            .unwrap_or(trimmed)
+            .trim_start_matches('/');
+        while let Some(rest) = rel.strip_prefix("./") {
+            rel = rest.trim_start_matches('/');
+        }
+        if rel == ".config/dotler" || rel.starts_with(".config/dotler/") {
+            return Err(ConfigError::HardBlockedPath {
+                path: path.to_string(),
+                reason: "path cannot point inside .config/dotler".to_string(),
+            });
+        }
     }
 
     if trimmed.split('/').any(|segment| segment == ".git") {
@@ -283,17 +309,18 @@ pub(crate) fn resolve_with_existing_ancestors(path: &Path) -> PathBuf {
     lexical
 }
 
-fn check_within_home_and_unprotected(
+fn check_within_boundary_and_unprotected(
     original_path: &Path,
     resolved_path: &Path,
-    canonical_home: &Path,
+    canonical_boundary: &Path,
     canonical_dotler_dir: &Path,
+    boundary_label: &str,
 ) -> Result<(), ConfigError> {
-    if !resolved_path.starts_with(canonical_home) {
+    if !resolved_path.starts_with(canonical_boundary) {
         return Err(ConfigError::HardBlockedPath {
             path: original_path.display().to_string(),
             reason: format!(
-                "symbolic link target '{}' escapes home directory ('~')",
+                "path target '{}' escapes {boundary_label}",
                 resolved_path.display()
             ),
         });
@@ -301,25 +328,74 @@ fn check_within_home_and_unprotected(
     if resolved_path == canonical_dotler_dir || resolved_path.starts_with(canonical_dotler_dir) {
         return Err(ConfigError::HardBlockedPath {
             path: original_path.display().to_string(),
-            reason: "symbolic link target cannot point inside ~/.config/dotler".to_string(),
+            reason: "path target cannot point inside ~/.config/dotler".to_string(),
         });
     }
-    if let Ok(rel) = resolved_path.strip_prefix(canonical_home)
+    if let Ok(rel) = resolved_path.strip_prefix(canonical_boundary)
         && rel.components().any(|c| c.as_os_str() == ".git")
     {
         return Err(ConfigError::HardBlockedPath {
             path: original_path.display().to_string(),
-            reason: "symbolic link target cannot point inside a .git directory".to_string(),
+            reason: "path target cannot point inside a .git directory".to_string(),
         });
     }
     Ok(())
 }
 
-/// Validates that an OS target directory (and its existing ancestors) stays within `home_dir`.
-pub fn validate_os_dir_path(target_dir: &Path, home_dir: &Path) -> Result<(), ConfigError> {
+fn resolve_boundary_and_dotler(
+    boundary_dir: &Path,
+    home_dir: &Path,
+) -> Result<(PathBuf, PathBuf, &'static str), ConfigError> {
+    let canonical_boundary = fs::canonicalize(boundary_dir)
+        .unwrap_or_else(|_| resolve_with_existing_ancestors(boundary_dir));
     let canonical_home =
-        fs::canonicalize(home_dir).unwrap_or_else(|_| normalize_lexical_path(home_dir));
+        fs::canonicalize(home_dir).unwrap_or_else(|_| resolve_with_existing_ancestors(home_dir));
     let canonical_dotler_dir = canonical_home.join(".config").join("dotler");
+
+    if canonical_boundary == canonical_dotler_dir
+        || canonical_boundary.starts_with(&canonical_dotler_dir)
+    {
+        return Err(ConfigError::HardBlockedPath {
+            path: boundary_dir.display().to_string(),
+            reason: "boundary directory cannot point inside ~/.config/dotler".to_string(),
+        });
+    }
+    if canonical_boundary
+        .components()
+        .any(|c| c.as_os_str() == ".git")
+    {
+        return Err(ConfigError::HardBlockedPath {
+            path: boundary_dir.display().to_string(),
+            reason: "boundary directory cannot point inside a .git directory".to_string(),
+        });
+    }
+
+    let label = if canonical_boundary == canonical_home {
+        "home directory ('~')"
+    } else {
+        "current directory ('.')"
+    };
+    Ok((canonical_boundary, canonical_dotler_dir, label))
+}
+
+/// Validates that an OS target directory (and its existing ancestors) stays within `boundary_dir`
+/// and outside protected directories (`~/.config/dotler`, `.git`).
+pub fn validate_os_dir_path_with_home(
+    target_dir: &Path,
+    boundary_dir: &Path,
+    home_dir: &Path,
+) -> Result<(), ConfigError> {
+    let (canonical_boundary, canonical_dotler_dir, boundary_label) =
+        resolve_boundary_and_dotler(boundary_dir, home_dir)?;
+
+    let resolved_target = resolve_with_existing_ancestors(target_dir);
+    check_within_boundary_and_unprotected(
+        target_dir,
+        &resolved_target,
+        &canonical_boundary,
+        &canonical_dotler_dir,
+        boundary_label,
+    )?;
 
     let mut curr_opt = Some(target_dir);
     while let Some(curr) = curr_opt {
@@ -334,11 +410,12 @@ pub fn validate_os_dir_path(target_dir: &Path, home_dir: &Path) -> Result<(), Co
         }
         if curr.exists() {
             let canonical_curr = fs::canonicalize(curr)?;
-            check_within_home_and_unprotected(
+            check_within_boundary_and_unprotected(
                 target_dir,
                 &canonical_curr,
-                &canonical_home,
+                &canonical_boundary,
                 &canonical_dotler_dir,
+                boundary_label,
             )?;
             if !canonical_curr.is_dir() {
                 return Err(ConfigError::HardBlockedPath {
@@ -356,25 +433,34 @@ pub fn validate_os_dir_path(target_dir: &Path, home_dir: &Path) -> Result<(), Co
     Ok(())
 }
 
-/// Validates that an OS target file path (and its ancestors) does not escape `home_dir`
-/// or enter protected directories via symbolic links.
-pub fn validate_os_target_path(target_os_path: &Path, home_dir: &Path) -> Result<(), ConfigError> {
-    let canonical_home =
-        fs::canonicalize(home_dir).unwrap_or_else(|_| normalize_lexical_path(home_dir));
-    let canonical_dotler_dir = canonical_home.join(".config").join("dotler");
+/// Validates that an OS target directory (and its existing ancestors) stays within `home_dir`.
+pub fn validate_os_dir_path(target_dir: &Path, home_dir: &Path) -> Result<(), ConfigError> {
+    validate_os_dir_path_with_home(target_dir, home_dir, home_dir)
+}
+
+/// Validates that an OS target file path (and its ancestors) does not escape `boundary_dir`
+/// or enter protected directories (`~/.config/dotler`, `.git`) via symbolic links.
+pub fn validate_os_target_path_with_home(
+    target_os_path: &Path,
+    boundary_dir: &Path,
+    home_dir: &Path,
+) -> Result<(), ConfigError> {
+    let (canonical_boundary, canonical_dotler_dir, boundary_label) =
+        resolve_boundary_and_dotler(boundary_dir, home_dir)?;
 
     if let Some(parent) = target_os_path.parent() {
-        validate_os_dir_path(parent, home_dir)?;
+        validate_os_dir_path_with_home(parent, boundary_dir, home_dir)?;
     }
 
     if is_symlink(target_os_path) {
         if target_os_path.exists() {
             let canonical_target = fs::canonicalize(target_os_path)?;
-            check_within_home_and_unprotected(
+            check_within_boundary_and_unprotected(
                 target_os_path,
                 &canonical_target,
-                &canonical_home,
+                &canonical_boundary,
                 &canonical_dotler_dir,
+                boundary_label,
             )?;
             if !canonical_target.is_file() {
                 return Err(ConfigError::HardBlockedPath {
@@ -385,21 +471,71 @@ pub fn validate_os_target_path(target_os_path: &Path, home_dir: &Path) -> Result
             }
         } else {
             let link_target = fs::read_link(target_os_path)?;
-            let parent = target_os_path.parent().unwrap_or(home_dir);
-            let canonical_parent =
-                fs::canonicalize(parent).unwrap_or_else(|_| normalize_lexical_path(parent));
+            let parent = target_os_path.parent().unwrap_or(boundary_dir);
+            let canonical_parent = fs::canonicalize(parent)
+                .unwrap_or_else(|_| resolve_with_existing_ancestors(parent));
             let joined = if link_target.is_absolute() {
                 link_target
             } else {
                 canonical_parent.join(link_target)
             };
             let resolved = resolve_with_existing_ancestors(&joined);
-            check_within_home_and_unprotected(
+            check_within_boundary_and_unprotected(
                 target_os_path,
                 &resolved,
-                &canonical_home,
+                &canonical_boundary,
                 &canonical_dotler_dir,
+                boundary_label,
             )?;
+        }
+    } else {
+        let resolved = resolve_with_existing_ancestors(target_os_path);
+        check_within_boundary_and_unprotected(
+            target_os_path,
+            &resolved,
+            &canonical_boundary,
+            &canonical_dotler_dir,
+            boundary_label,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Validates that an OS target file path (and its ancestors) does not escape `home_dir`
+/// or enter protected directories via symbolic links.
+pub fn validate_os_target_path(target_os_path: &Path, home_dir: &Path) -> Result<(), ConfigError> {
+    validate_os_target_path_with_home(target_os_path, home_dir, home_dir)
+}
+
+/// Rejects target paths that overwrite `dotler.toml` or overlap any repository group storage
+/// directory (`<repo>/<group>/`).
+pub fn validate_repo_target_disjointness<'a>(
+    repo_dir: &Path,
+    group_names: impl IntoIterator<Item = &'a str>,
+    target_path: &Path,
+) -> Result<(), ConfigError> {
+    let canon_repo =
+        fs::canonicalize(repo_dir).unwrap_or_else(|_| resolve_with_existing_ancestors(repo_dir));
+    let resolved_target = resolve_with_existing_ancestors(target_path);
+
+    let manifest_path = canon_repo.join("dotler.toml");
+    if resolved_target == manifest_path {
+        return Err(ConfigError::HardBlockedPath {
+            path: target_path.display().to_string(),
+            reason: "target path cannot overwrite repository manifest 'dotler.toml'".to_string(),
+        });
+    }
+
+    for group_name in group_names {
+        let group_storage = canon_repo.join(group_name);
+        if resolved_target == group_storage || resolved_target.starts_with(&group_storage) {
+            return Err(ConfigError::HardBlockedPath {
+                path: target_path.display().to_string(),
+                reason: format!(
+                    "target path overlaps repository group storage directory '{group_name}'; rename group '[{group_name}]' to avoid self-conflict"
+                ),
+            });
         }
     }
 
@@ -478,9 +614,17 @@ mod tests {
         assert!(validate_path_security("~/.config/app").is_ok());
         assert!(validate_path_security("~/").is_ok());
         assert!(validate_path_security("~").is_ok());
+        assert!(validate_path_security(".").is_ok());
+        assert!(validate_path_security("./").is_ok());
+        assert!(validate_path_security("./config").is_ok());
+        assert!(validate_path_security("././nested/app").is_ok());
 
         assert!(matches!(
             validate_path_security("/etc/app").unwrap_err(),
+            ConfigError::HardBlockedPath { .. }
+        ));
+        assert!(matches!(
+            validate_path_security("relative/without/dot").unwrap_err(),
             ConfigError::HardBlockedPath { .. }
         ));
         assert!(matches!(
@@ -488,7 +632,15 @@ mod tests {
             ConfigError::HardBlockedPath { .. }
         ));
         assert!(matches!(
+            validate_path_security("./../secret").unwrap_err(),
+            ConfigError::HardBlockedPath { .. }
+        ));
+        assert!(matches!(
             validate_path_security("~/app/$HOME").unwrap_err(),
+            ConfigError::HardBlockedPath { .. }
+        ));
+        assert!(matches!(
+            validate_path_security("./$PWD").unwrap_err(),
             ConfigError::HardBlockedPath { .. }
         ));
         assert!(matches!(
@@ -499,19 +651,114 @@ mod tests {
             validate_path_security("~\\app\\conf").unwrap_err(),
             ConfigError::HardBlockedPath { .. }
         ));
+        assert!(matches!(
+            validate_path_security(".\\app\\conf").unwrap_err(),
+            ConfigError::HardBlockedPath { .. }
+        ));
     }
 
     #[test]
     fn test_path_security_checks_protects_internal_paths() {
         assert!(validate_path_security("~/.config/dotler").is_err());
         assert!(validate_path_security("~/.config/dotler/state.db").is_err());
+        assert!(validate_path_security("./.config/dotler").is_err());
+        assert!(validate_path_security("./.config/dotler/state.db").is_err());
+        assert!(validate_path_security("././.config/dotler").is_err());
         assert!(validate_path_security("~/.git").is_err());
         assert!(validate_path_security("~/.git/hooks").is_err());
+        assert!(validate_path_security("./.git").is_err());
+        assert!(validate_path_security("./.git/hooks").is_err());
+        assert!(validate_path_security("./sub/.git").is_err());
 
         // Allowed dotfiles that contain git as substring
         assert!(validate_path_security("~/.gitconfig").is_ok());
         assert!(validate_path_security("~/.gitignore").is_ok());
         assert!(validate_path_security("~/.github").is_ok());
+        assert!(validate_path_security("./.gitconfig").is_ok());
+        assert!(validate_path_security("./.gitignore").is_ok());
+        assert!(validate_path_security("./.github").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_os_target_path_cwd_boundary_blocks_escape_to_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let cwd = tmp.path().join("project");
+        fs::create_dir_all(home_dir.join(".ssh")).unwrap();
+        fs::create_dir_all(home_dir.join(".config/dotler")).unwrap();
+        fs::create_dir_all(cwd.join("sub")).unwrap();
+
+        let home_secret = home_dir.join(".ssh/id_rsa");
+        fs::write(&home_secret, b"PRIVATE\n").unwrap();
+        let in_cwd_real = cwd.join("sub/real.env");
+        fs::write(&in_cwd_real, b"KEY=1\n").unwrap();
+
+        // Symlink inside cwd pointing to another file inside cwd is allowed.
+        let in_cwd_link = cwd.join("local_link.env");
+        std::os::unix::fs::symlink(&in_cwd_real, &in_cwd_link).unwrap();
+        assert!(validate_os_target_path_with_home(&in_cwd_link, &cwd, &home_dir).is_ok());
+
+        // Symlink inside cwd pointing inside `home_dir` escapes `cwd` -> HardBlockedPath.
+        let home_escape_link = cwd.join("home_escape.key");
+        std::os::unix::fs::symlink(&home_secret, &home_escape_link).unwrap();
+        assert!(matches!(
+            validate_os_target_path_with_home(&home_escape_link, &cwd, &home_dir),
+            Err(ConfigError::HardBlockedPath { .. })
+        ));
+
+        // Broken symlink inside cwd pointing outside cwd -> HardBlockedPath.
+        let broken_escape = cwd.join("broken_escape");
+        std::os::unix::fs::symlink("../outside.env", &broken_escape).unwrap();
+        assert!(matches!(
+            validate_os_target_path_with_home(&broken_escape, &cwd, &home_dir),
+            Err(ConfigError::HardBlockedPath { .. })
+        ));
+
+        // Target inside .git or ~/.config/dotler when cwd == home_dir -> HardBlockedPath.
+        assert!(matches!(
+            validate_os_target_path_with_home(&cwd.join(".git/config"), &cwd, &home_dir),
+            Err(ConfigError::HardBlockedPath { .. })
+        ));
+        assert!(matches!(
+            validate_os_target_path_with_home(
+                &home_dir.join(".config/dotler/state.db"),
+                &home_dir,
+                &home_dir
+            ),
+            Err(ConfigError::HardBlockedPath { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_repo_target_disjointness() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_dir = tmp.path().join("project");
+        fs::create_dir_all(&repo_dir).unwrap();
+        let groups = ["secrets", "app"];
+
+        // Root project directory itself (`.`) and non-group subdirs are allowed.
+        assert!(validate_repo_target_disjointness(&repo_dir, groups, &repo_dir).is_ok());
+        assert!(
+            validate_repo_target_disjointness(&repo_dir, groups, &repo_dir.join("config")).is_ok()
+        );
+        assert!(
+            validate_repo_target_disjointness(&repo_dir, groups, &repo_dir.join(".env")).is_ok()
+        );
+
+        // `dotler.toml` and `<repo>/<group>/...` overlaps are blocked.
+        assert!(matches!(
+            validate_repo_target_disjointness(&repo_dir, groups, &repo_dir.join("dotler.toml")),
+            Err(ConfigError::HardBlockedPath { .. })
+        ));
+        assert!(matches!(
+            validate_repo_target_disjointness(&repo_dir, groups, &repo_dir.join("secrets")),
+            Err(ConfigError::HardBlockedPath { .. })
+        ));
+        assert!(matches!(
+            validate_repo_target_disjointness(&repo_dir, groups, &repo_dir.join("secrets/api.key")),
+            Err(ConfigError::HardBlockedPath { .. })
+        ));
     }
 
     #[test]

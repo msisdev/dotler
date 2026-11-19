@@ -26,6 +26,18 @@ files = """
 """
 ```
 
+Group target paths can start with `~` / `~/...` (home directory) or `.` / `./...` (current working directory, useful for project-local `.env` or secret files kept inside a project repository without escaping the current directory):
+
+```toml
+[secrets]
+os-nux = "."
+os-mac = "."
+os-win = "."
+files = """
+.env enc
+"""
+```
+
 - `<pattern>`: Include matching file or directory as plaintext.
 - `<pattern> enc` (or `<pattern> enc=cont`): Include matching file or directory with content-only encryption (`<rel_path>.dotler.enc`).
 - `<pattern> enc=full`: Include matching file or directory with full path + content encryption (`<group>/<32-hex>.dotler.fenc`), hiding subdirectory and file names in the repository.

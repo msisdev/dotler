@@ -58,7 +58,7 @@ pub const INIT_AI_HINT: &str = "Run 'dotler ai' for AI context.";
 /// Shared static operational guide embedded in `dotler ai` (`render_briefing`).
 pub const SHARED_OPERATIONAL_GUIDE: &str = r#"## 2. Group Layout & Selection Rules (dotler.toml)
 - Official Documentation: https://msisdev.github.io/dotler/
-- Single Home Path Rule: All dotfile target paths MUST start with `~` or `~/` (e.g. `~`, `~/.config/nvim`). Directory traversal (`..`), backslashes, and shell variables (`$HOME`, `%VAR%`) are strictly prohibited.
+- Group Path Rule: All dotfile target paths MUST start with `~` / `~/` (home directory, e.g. `~`, `~/.config/nvim`) or `.` / `./` (current working directory, e.g. `.`, `./config`). Directory traversal (`..`), backslashes, and shell variables (`$HOME`, `%VAR%`) are strictly prohibited. When `dotler.toml` lives inside a project directory using `.`, do NOT set a target path inside `<repo>/<group>/` (rename the group if needed).
 - Selection Rules (Allowlist by Default, Last-Match-Wins):
   - Unmatched files are ignored by default. Do NOT prepend `!*` when picking specific files, and NEVER use `*` on `~`.
   - `<pattern>`: Include matching file or directory as plaintext.
@@ -90,6 +90,16 @@ files = """
 hosts.yml enc
 !*.log
 """
+
+# Pattern C: Encrypt project-local files in current working directory
+[secrets]
+os-nux = "."
+os-mac = "."
+os-win = "."
+files = """
+.env enc
+.env.* enc=full
+"""
 ```
 
 ## 3. Standard Operational Guidelines & Command Cheatsheet
@@ -117,8 +127,8 @@ MCP Equivalent Tools:
 - ZERO SECRET LEAKAGE: NEVER ask the user in chat for master passphrases or 12-word recovery mnemonics, and NEVER run commands that display or read 12-word recovery mnemonics (`dotler vault init`, `dotler vault recover`) or interactive passphrases (`dotler vault from`, `dotler vault rotate`) inside an agent shell where secrets could enter LLM context. Instruct the user to run those directly in their local terminal (passphrases and mnemonics are read via hidden TTY prompts, and recovery mnemonics are displayed only to the user).
 - Keyring & Multi-Vault Inspection: You CAN safely run `dotler vault ls --json` non-interactively without exposing secrets to inspect `vault_id`, `vault_hint`, `keyring_status` (`vault_slot`, `default_fallback`, `mismatch`, `locked`, `no_vault`, `disabled`, `missing_repo`), and `default_slot_set` across registered repositories. If `keyring_ready` is false (or `keyring_status` is `locked` / `mismatch`), instruct the user to run `dotler vault init` (or `dotler init`) once in their local terminal.
 - Vault Lifecycle Commands: Instruct the user to run `dotler vault init` to initialize a brand-new vault (or register an existing vault's passphrase in the OS keyring), `dotler vault from <file <repo|path> | git <url> | url <url>>` to share/import an existing vault across repositories or devices (automatically re-keying existing `.dotler.enc` / `.dotler.fenc` files in memory when aligning an already-encrypted repository), and `dotler vault rotate` to rotate the passphrase across all matching locally registered repositories and update the OS keyring in one shot.
-- Symbolic links are strictly prohibited inside the repository (exit code 3). On the OS side, symlinks pointing to regular files inside `~` are dereferenced on `import` and materialized into standalone regular files on `export`.
-- Directory traversal (`..`), symlinks escaping `~`, and environment variable expansions are blocked by path safety invariants (exit code 3).
+- Symbolic links are strictly prohibited inside the repository (exit code 3). On the OS side, symlinks pointing to regular files inside the group boundary (`~` or `.`) are dereferenced on `import` and materialized into standalone regular files on `export`.
+- Directory traversal (`..`), symlinks escaping the group boundary (`~` or `.`), overlapping `<repo>/<group>/` storage paths, and environment variable expansions are blocked by path safety invariants (exit code 3).
 - Never overwrite locally modified files without explicit `--force` user authorization.
 "#;
 

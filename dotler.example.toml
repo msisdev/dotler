@@ -6,6 +6,8 @@
 # ──────────────────────────────────────────────────────────────────
 
 # [bash]
+# # Group paths must start with "~" / "~/..." (home directory)
+# # or "." / "./..." (current working directory).
 # # Priority 1: Custom device names (configured in ~/.config/dotler/config.toml `default_devices`)
 # default = "~"
 #

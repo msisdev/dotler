@@ -92,6 +92,24 @@ config tmpl
 - `dotler import` & `dotler export`: Automatically encrypt and decrypt `.dotler.enc` and `.dotler.fenc` files (restoring original nested subdirectories on `export`).
 - `dotler tidy`: Converts existing repository files in place across plaintext, `.dotler.enc`, and `.dotler.fenc` whenever selection rules change (and automatically migrates legacy `.enc` / `.fenc` archives whose header matches `vault_id`), pruning empty subdirectories automatically.
 
+### Project-Local File Encryption (`.` / `./...`)
+
+You can also anchor a group path to the current working directory using `.` or `./...` (for example, to encrypt `.env` files inside a project repository while leaving the rest of the project untouched):
+
+```toml
+[secrets]
+os-nux = "."
+os-mac = "."
+os-win = "."
+files = """
+.env enc
+config/*.secret enc=full
+"""
+```
+
+- Paths and symlinks for `.` / `./...` groups are strictly confined within the current working directory (any escape outside `pwd`, into `.git`, or into `<repo>/<group>/` storage is blocked).
+- `dotler tidy` only evaluates orphan history within the current working directory so files synced in other projects remain untouched.
+
 ## 4. OS Keyring Integration
 
 Dotler automatically provisions your master passphrase in your operating system's native credential manager (macOS Keychain, Linux Secret Service / Keyutils, Windows Credential Manager) at vault and repository lifecycle boundaries (`dotler init`, `dotler vault init`, `dotler vault from`, `dotler vault rotate`, `dotler vault recover`) so `import`, `export`, and `tidy` run without prompting every time. Keys are isolated per `vault_id` (so multiple independent repositories with distinct passphrases coexist without conflict), with automatic fallback to the global `default` slot:

@@ -12,8 +12,8 @@ pub use crate::config::path_security::{
     validate_os_dir_path, validate_os_target_path, validate_path_security, validate_rule_pattern,
 };
 pub use crate::config::selection::{
-    SelectionMode, SelectionRule, evaluate_selection, parse_selection_rules,
-    rules_have_effective_encryption,
+    SelectionMode, SelectionRule, evaluate_selection, find_literal_full_enc_rules,
+    parse_selection_rules, rules_have_effective_encryption, rules_have_effective_full_encryption,
 };
 pub use crate::config::template::{render_home_template, unrender_home_template};
 

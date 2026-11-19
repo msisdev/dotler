@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::config::ConfigError;
 use crate::config::path_security::validate_rule_pattern;
 
@@ -5,8 +7,10 @@ use crate::config::path_security::validate_rule_pattern;
 pub enum SelectionMode {
     PlaintextInclude,
     EncryptedInclude,
+    FullEncryptedInclude,
     TemplateInclude,
     EncryptedTemplateInclude,
+    FullEncryptedTemplateInclude,
     Exclude,
 }
 
@@ -14,17 +18,45 @@ impl SelectionMode {
     pub fn is_encrypted(self) -> bool {
         matches!(
             self,
+            Self::EncryptedInclude
+                | Self::FullEncryptedInclude
+                | Self::EncryptedTemplateInclude
+                | Self::FullEncryptedTemplateInclude
+        )
+    }
+
+    pub fn is_full_encrypted(self) -> bool {
+        matches!(
+            self,
+            Self::FullEncryptedInclude | Self::FullEncryptedTemplateInclude
+        )
+    }
+
+    pub fn is_content_encrypted(self) -> bool {
+        matches!(
+            self,
             Self::EncryptedInclude | Self::EncryptedTemplateInclude
         )
     }
 
     pub fn is_template(self) -> bool {
-        matches!(self, Self::TemplateInclude | Self::EncryptedTemplateInclude)
+        matches!(
+            self,
+            Self::TemplateInclude
+                | Self::EncryptedTemplateInclude
+                | Self::FullEncryptedTemplateInclude
+        )
     }
 
     pub fn is_included(self) -> bool {
         !matches!(self, Self::Exclude)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParsedEncKind {
+    Content,
+    Full,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,12 +100,22 @@ pub fn parse_selection_rules(files_content: &str) -> Result<Vec<SelectionRule>, 
                     let trailing = tokens[1..].join(" ");
                     let hint = if matches!(
                         tokens[1],
-                        "enc" | "tmpl" | "encrypt" | "template" | "tmp" | "tpl"
-                    ) {
+                        "enc"
+                            | "enc=cont"
+                            | "enc=full"
+                            | "tmpl"
+                            | "encrypt"
+                            | "fenc"
+                            | "encn"
+                            | "template"
+                            | "tmp"
+                            | "tpl"
+                    ) || tokens[1].starts_with("enc=")
+                    {
                         "Exclusion prefix '!' already specifies selection mode; trailing attribute is redundant."
                             .to_string()
                     } else if tokens[1] == "encrpyt" || tokens[1].contains("encr") {
-                        "Supported selection attributes are 'enc' and 'tmpl'. Check for typos."
+                        "Supported selection attributes are 'enc' ('enc=cont'), 'enc=full', and 'tmpl'. Check for typos."
                             .to_string()
                     } else {
                         "Expected single pattern after prefix '!' with no trailing attributes."
@@ -101,20 +143,31 @@ pub fn parse_selection_rules(files_content: &str) -> Result<Vec<SelectionRule>, 
                 2 | 3 => {
                     let pattern = tokens[0].to_string();
                     validate_rule_pattern(&pattern)?;
-                    let mut has_enc = false;
+                    let mut enc_kind: Option<ParsedEncKind> = None;
                     let mut has_tmpl = false;
                     for &attr in &tokens[1..] {
                         match attr {
-                            "enc" => {
-                                if has_enc {
+                            "enc" | "enc=cont" => {
+                                if enc_kind.is_some() {
                                     return Err(ConfigError::InvalidSelectionAttribute {
                                         attribute: tokens[1..].join(" "),
                                         line_no,
-                                        hint: "Duplicate 'enc' attribute on the same rule."
+                                        hint: "Duplicate encryption attribute on the same rule. Use a single 'enc' ('enc=cont') or 'enc=full'."
                                             .to_string(),
                                     });
                                 }
-                                has_enc = true;
+                                enc_kind = Some(ParsedEncKind::Content);
+                            }
+                            "enc=full" => {
+                                if enc_kind.is_some() {
+                                    return Err(ConfigError::InvalidSelectionAttribute {
+                                        attribute: tokens[1..].join(" "),
+                                        line_no,
+                                        hint: "Duplicate encryption attribute on the same rule. Use a single 'enc' ('enc=cont') or 'enc=full'."
+                                            .to_string(),
+                                    });
+                                }
+                                enc_kind = Some(ParsedEncKind::Full);
                             }
                             "tmpl" => {
                                 if has_tmpl {
@@ -131,7 +184,24 @@ pub fn parse_selection_rules(files_content: &str) -> Result<Vec<SelectionRule>, 
                                 return Err(ConfigError::InvalidSelectionAttribute {
                                     attribute: attr.to_string(),
                                     line_no,
-                                    hint: "Use 'enc' instead of 'encrypt'. Supported selection attributes are 'enc' and 'tmpl'."
+                                    hint: "Use 'enc' ('enc=cont') or 'enc=full' instead of 'encrypt'. Supported selection attributes are 'enc', 'enc=cont', 'enc=full', and 'tmpl'."
+                                        .to_string(),
+                                });
+                            }
+                            "fenc" | "encn" | "encp" => {
+                                return Err(ConfigError::InvalidSelectionAttribute {
+                                    attribute: attr.to_string(),
+                                    line_no,
+                                    hint: format!(
+                                        "Use 'enc=full' instead of '{attr}' to encrypt both file path and content. Supported selection attributes are 'enc', 'enc=cont', 'enc=full', and 'tmpl'."
+                                    ),
+                                });
+                            }
+                            _ if attr.starts_with("enc=") => {
+                                return Err(ConfigError::InvalidSelectionAttribute {
+                                    attribute: attr.to_string(),
+                                    line_no,
+                                    hint: "Unsupported 'enc=' mode. Use 'enc' ('enc=cont') for content-only encryption or 'enc=full' to encrypt both file path and content, optionally combined with 'tmpl'."
                                         .to_string(),
                                 });
                             }
@@ -140,7 +210,7 @@ pub fn parse_selection_rules(files_content: &str) -> Result<Vec<SelectionRule>, 
                                     attribute: attr.to_string(),
                                     line_no,
                                     hint: format!(
-                                        "Use 'tmpl' instead of '{attr}'. Supported selection attributes are 'enc' and 'tmpl'."
+                                        "Use 'tmpl' instead of '{attr}'. Supported selection attributes are 'enc', 'enc=cont', 'enc=full', and 'tmpl'."
                                     ),
                                 });
                             }
@@ -148,17 +218,23 @@ pub fn parse_selection_rules(files_content: &str) -> Result<Vec<SelectionRule>, 
                                 return Err(ConfigError::InvalidSelectionAttribute {
                                     attribute: attr.to_string(),
                                     line_no,
-                                    hint: "Supported selection attributes are 'enc' and 'tmpl'. Check for typos."
+                                    hint: "Supported selection attributes are 'enc' ('enc=cont'), 'enc=full', and 'tmpl'. Check for typos."
                                         .to_string(),
                                 });
                             }
                         }
                     }
-                    let mode = match (has_enc, has_tmpl) {
-                        (true, false) => SelectionMode::EncryptedInclude,
-                        (false, true) => SelectionMode::TemplateInclude,
-                        (true, true) => SelectionMode::EncryptedTemplateInclude,
-                        (false, false) => SelectionMode::PlaintextInclude,
+                    let mode = match (enc_kind, has_tmpl) {
+                        (Some(ParsedEncKind::Content), false) => SelectionMode::EncryptedInclude,
+                        (Some(ParsedEncKind::Full), false) => SelectionMode::FullEncryptedInclude,
+                        (None, true) => SelectionMode::TemplateInclude,
+                        (Some(ParsedEncKind::Content), true) => {
+                            SelectionMode::EncryptedTemplateInclude
+                        }
+                        (Some(ParsedEncKind::Full), true) => {
+                            SelectionMode::FullEncryptedTemplateInclude
+                        }
+                        (None, false) => SelectionMode::PlaintextInclude,
                     };
                     rules.push(SelectionRule {
                         pattern,
@@ -170,7 +246,7 @@ pub fn parse_selection_rules(files_content: &str) -> Result<Vec<SelectionRule>, 
                     return Err(ConfigError::InvalidSelectionAttribute {
                         attribute: tokens[1..].join(" "),
                         line_no,
-                        hint: "Expected format: '<pattern>', '<pattern> enc', '<pattern> tmpl', '<pattern> enc tmpl', or '!<pattern>'."
+                        hint: "Expected format: '<pattern>', '<pattern> enc' ('enc=cont'), '<pattern> enc=full', '<pattern> tmpl', '<pattern> enc tmpl', '<pattern> enc=full tmpl', or '!<pattern>'."
                             .to_string(),
                     });
                 }
@@ -193,25 +269,75 @@ pub fn evaluate_selection(rules: &[SelectionRule], relative_path: &str) -> Optio
     last_mode
 }
 
+fn rule_probe_path(rules: &[SelectionRule], rule: &SelectionRule) -> String {
+    let trimmed = rule.pattern.trim_start_matches("./").trim_end_matches('/');
+    let dir_prefix = format!("{trimmed}/");
+    let is_dir_pattern = rule.pattern.ends_with('/')
+        || (!trimmed.is_empty()
+            && rules
+                .iter()
+                .any(|r| r.pattern.trim_start_matches("./").starts_with(&dir_prefix)));
+    if is_dir_pattern {
+        format!("{trimmed}/__probe__")
+    } else {
+        rule.pattern.clone()
+    }
+}
+
 pub fn rules_have_effective_encryption(rules: &[SelectionRule]) -> bool {
     rules.iter().any(|rule| {
         if !rule.mode.is_encrypted() {
             return false;
         }
-        let trimmed = rule.pattern.trim_start_matches("./").trim_end_matches('/');
-        let dir_prefix = format!("{trimmed}/");
-        let is_dir_pattern = rule.pattern.ends_with('/')
-            || (!trimmed.is_empty()
-                && rules
-                    .iter()
-                    .any(|r| r.pattern.trim_start_matches("./").starts_with(&dir_prefix)));
-        let probe = if is_dir_pattern {
-            format!("{trimmed}/__probe__")
-        } else {
-            rule.pattern.clone()
-        };
+        let probe = rule_probe_path(rules, rule);
         evaluate_selection(rules, &probe).is_some_and(|m| m.is_encrypted())
     })
+}
+
+pub fn rules_have_effective_full_encryption(rules: &[SelectionRule]) -> bool {
+    rules.iter().any(|rule| {
+        if !rule.mode.is_full_encrypted() {
+            return false;
+        }
+        let probe = rule_probe_path(rules, rule);
+        evaluate_selection(rules, &probe).is_some_and(|m| m.is_full_encrypted())
+    })
+}
+
+/// Returns `(line_no, normalized_pattern)` for non-wildcard literal single-file rules using `enc=full`
+/// whose filenames remain visible in `dotler.toml` itself.
+pub fn find_literal_full_enc_rules(
+    rules: &[SelectionRule],
+    target_base: Option<&Path>,
+    group_repo_dir: Option<&Path>,
+) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for rule in rules {
+        if !rule.mode.is_full_encrypted() || rule.pattern.ends_with('/') {
+            continue;
+        }
+        let trimmed = rule.pattern.trim_start_matches("./").trim_end_matches('/');
+        if trimmed.is_empty()
+            || trimmed.contains('*')
+            || trimmed.contains('?')
+            || trimmed.contains('[')
+        {
+            continue;
+        }
+        let dir_prefix = format!("{trimmed}/");
+        let is_dir = rules
+            .iter()
+            .any(|r| r.pattern.trim_start_matches("./").starts_with(&dir_prefix))
+            || target_base.is_some_and(|b| b.join(trimmed).is_dir())
+            || group_repo_dir.is_some_and(|d| d.join(trimmed).is_dir());
+        if is_dir {
+            continue;
+        }
+        if evaluate_selection(rules, trimmed).is_some_and(|m| m.is_full_encrypted()) {
+            out.push((rule.line_no, trimmed.to_string()));
+        }
+    }
+    out
 }
 
 fn matches_pattern(pattern: &str, path: &str) -> bool {
@@ -559,5 +685,53 @@ mod tests {
         assert!(GlobPattern::new("***").is_err());
         assert!(GlobPattern::new("a**b").is_err());
         assert!(GlobPattern::new("[unclosed").is_err());
+    }
+
+    #[test]
+    fn test_enc_cont_and_enc_full_combinations_and_literal_detection() {
+        let content = "\n* enc=full\nid_ed25519 enc=cont\nconfig enc=cont tmpl\n*.secret tmpl enc=full\ndir_rules/ enc=full\nliteral_secret.pem enc=full\noverridden.pem enc=full\noverridden.pem\n!known_hosts*\n";
+        let rules = parse_selection_rules(content).expect("enc=cont and enc=full should parse");
+
+        assert_eq!(
+            evaluate_selection(&rules, "clients/acme/key"),
+            Some(SelectionMode::FullEncryptedInclude)
+        );
+        assert_eq!(
+            evaluate_selection(&rules, "id_ed25519"),
+            Some(SelectionMode::EncryptedInclude)
+        );
+        assert_eq!(
+            evaluate_selection(&rules, "config"),
+            Some(SelectionMode::EncryptedTemplateInclude)
+        );
+        assert_eq!(
+            evaluate_selection(&rules, "app.secret"),
+            Some(SelectionMode::FullEncryptedTemplateInclude)
+        );
+        assert_eq!(
+            evaluate_selection(&rules, "overridden.pem"),
+            Some(SelectionMode::PlaintextInclude)
+        );
+        assert!(rules_have_effective_encryption(&rules));
+        assert!(rules_have_effective_full_encryption(&rules));
+
+        let literals = find_literal_full_enc_rules(&rules, None, None);
+        assert_eq!(literals, vec![(7, "literal_secret.pem".to_string())]);
+
+        for invalid in [
+            "a.txt enc enc=full",
+            "a.txt enc=cont enc=full",
+            "a.txt enc=name",
+            "a.txt fenc",
+            "!a.txt enc=full",
+        ] {
+            assert!(
+                matches!(
+                    parse_selection_rules(invalid),
+                    Err(ConfigError::InvalidSelectionAttribute { .. })
+                ),
+                "expected InvalidSelectionAttribute for '{invalid}'"
+            );
+        }
     }
 }

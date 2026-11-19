@@ -5,11 +5,15 @@ use sha2::Sha256;
 use crate::config::repo::VaultConfig;
 use crate::crypto::{ExposeSecret, Secret, SecretString, fill_random_bytes};
 
-pub use crate::crypto::cipher::{ENC_FILE_MIN_LEN, EncryptedFile, VAULT_SLOT_LEN, VaultSlot};
+pub use crate::crypto::cipher::{
+    ENC_FILE_MIN_LEN, EncryptedFile, FENC_FILE_MIN_LEN, FULL_ENC_AAD_DOMAIN,
+    FULL_ENC_TOKEN_HEX_LEN, FullEncryptedFile, VAULT_SLOT_LEN, VaultSlot, parse_fenc_filename_stem,
+};
 pub use crate::crypto::mnemonic::{BIP39_ENTROPY_BITS, RecoveryMnemonic};
 
 pub const VAULT_KEY_LEN: usize = 32;
 pub const VAULT_ID_INFO: &[u8] = b"dotler-vault-id-v1";
+pub const FULL_ENC_PATH_KEY_INFO: &[u8] = b"dotler-full-enc-path-id-v1";
 pub const ARGON2_M_COST_KIB: u32 = 65536;
 pub const ARGON2_T_COST: u32 = 3;
 pub const ARGON2_P_COST: u32 = 4;
@@ -143,6 +147,39 @@ impl VaultKey {
     pub fn vault_id(&self) -> String {
         bytes_to_hex(&self.vault_id_bytes())
     }
+
+    pub(crate) fn derive_path_id_key(&self) -> Secret<[u8; 32]> {
+        let hk = Hkdf::<Sha256>::new(None, self.0.expose_secret());
+        let mut okm = [0u8; 32];
+        hk.expand(FULL_ENC_PATH_KEY_INFO, &mut okm)
+            .expect("HKDF expand 32 bytes cannot fail with SHA-256");
+        Secret::new(okm)
+    }
+
+    pub fn derive_full_enc_token_bytes(&self, rel_path: &str) -> [u8; 16] {
+        let normalized = normalize_full_enc_rel_path(rel_path);
+        let subkey = self.derive_path_id_key();
+        let digest = blake3::keyed_hash(subkey.expose_secret(), normalized.as_bytes());
+        let mut out = [0u8; 16];
+        out.copy_from_slice(&digest.as_bytes()[0..16]);
+        out
+    }
+
+    pub fn derive_full_enc_token(&self, rel_path: &str) -> String {
+        bytes_to_hex(&self.derive_full_enc_token_bytes(rel_path))
+    }
+
+    pub fn derive_full_enc_filename(&self, rel_path: &str) -> String {
+        format!("{}.fenc", self.derive_full_enc_token(rel_path))
+    }
+}
+
+pub(crate) fn normalize_full_enc_rel_path(rel_path: &str) -> String {
+    rel_path
+        .replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_matches('/')
+        .to_string()
 }
 
 pub fn init_vault(

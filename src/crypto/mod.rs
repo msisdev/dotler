@@ -94,9 +94,11 @@ pub use keyring::{
 };
 pub use vault::{
     ARGON2_M_COST_KIB, ARGON2_P_COST, ARGON2_SALT_LEN, ARGON2_T_COST, BIP39_ENTROPY_BITS,
-    ENC_FILE_MIN_LEN, EncryptedFile, POLY1305_TAG_LEN, RecoveryMnemonic, VAULT_ID_INFO,
-    VAULT_KEY_LEN, VAULT_SLOT_LEN, VaultError, VaultKey, VaultSlot, XCHACHA_NONCE_LEN,
-    change_password, init_vault, recover_vault,
+    ENC_FILE_MIN_LEN, EncryptedFile, FENC_FILE_MIN_LEN, FULL_ENC_AAD_DOMAIN,
+    FULL_ENC_PATH_KEY_INFO, FULL_ENC_TOKEN_HEX_LEN, FullEncryptedFile, POLY1305_TAG_LEN,
+    RecoveryMnemonic, VAULT_ID_INFO, VAULT_KEY_LEN, VAULT_SLOT_LEN, VaultError, VaultKey,
+    VaultSlot, XCHACHA_NONCE_LEN, change_password, init_vault, parse_fenc_filename_stem,
+    recover_vault,
 };
 
 #[derive(Debug)]

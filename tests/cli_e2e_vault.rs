@@ -300,7 +300,7 @@ secret.txt enc
         sandbox
             .repo_dir
             .join("shell")
-            .join("secret.txt.enc")
+            .join("secret.txt.dotler.enc")
             .is_file()
     );
 }

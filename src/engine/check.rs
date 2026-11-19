@@ -18,7 +18,11 @@ use crate::config::state::{DotlerLockGuard, TMP_FILE_PREFIX, write_file_safe};
 use crate::core::context::CoreContext;
 use crate::core::vault_loader::unlock_vault_if_needed;
 use crate::crypto::ExposeSecret;
-use crate::crypto::vault::{EncryptedFile, FullEncryptedFile, parse_fenc_filename_stem};
+use crate::crypto::vault::{
+    EncryptedFile, FullEncryptedFile, LEGACY_CONTENT_ENC_SUFFIX, LEGACY_FULL_ENC_SUFFIX,
+    is_content_enc_name, is_full_enc_name, is_legacy_dotler_archive_bytes,
+    parse_fenc_filename_stem, strip_content_enc_suffix,
+};
 use crate::engine::EngineError;
 
 pub use crate::engine::status::{FileActionPlan, FileSyncStatus, plan, run_status};
@@ -147,7 +151,7 @@ pub fn run_check(
     // 3. Detect cross-group target file collisions
     repo_cfg.detect_cross_group_collisions(&resolved.devices, &resolved.os_info)?;
 
-    // 4. Reject symlinks in repository, collect literal enc=full warnings, and detect .enc/.fenc mismatches
+    // 4. Reject symlinks in repository, collect literal enc=full warnings, and detect .dotler.enc/.dotler.fenc mismatches
     let home_dir = expand_tilde("~");
     let use_keyring = ctx
         .local_config
@@ -162,6 +166,7 @@ pub fn run_check(
         None
     };
     let mut warnings = Vec::new();
+    let expected_vid_opt = repo_cfg.vault.as_ref().map(|v| v.vault_id.as_str());
 
     for (g_name, g_cfg) in &repo_cfg.groups {
         if let Some(filter) = group_filter
@@ -172,8 +177,15 @@ pub fn run_check(
         let group_repo_dir = repo_path.join(g_name);
         validate_dir_no_symlinks(&group_repo_dir)?;
         let target_base_opt =
-            resolve_group_target_path(g_cfg, &resolved.devices, &resolved.os_info)
-                .map(|s| expand_tilde(&s));
+            resolve_group_target_path(g_cfg, &resolved.devices, &resolved.os_info).map(|s| {
+                if s == "~" {
+                    home_dir.clone()
+                } else if let Some(stripped) = s.strip_prefix("~/") {
+                    home_dir.join(stripped)
+                } else {
+                    PathBuf::from(s)
+                }
+            });
         if let Some(ref target_base_path) = target_base_opt {
             validate_os_dir_path(target_base_path, &home_dir)?;
         }
@@ -209,12 +221,12 @@ pub fn run_check(
                 continue;
             }
 
-            if rel_str.ends_with(".fenc") {
+            if is_full_enc_name(&rel_str) {
                 if rel_str.contains('/') || parse_fenc_filename_stem(&file_name).is_none() {
                     return Err(EngineError::EncryptionMismatch {
                         path: entry.path().to_path_buf(),
                         reason: format!(
-                            "Repository file '{rel_str}' is not a valid flattened '<32-hex>.fenc' archive. Run 'dotler tidy' or 'dotler import --force'."
+                            "Repository file '{rel_str}' is not a valid flattened '<32-hex>.dotler.fenc' archive. Run 'dotler tidy' or 'dotler import --force'."
                         ),
                     });
                 }
@@ -222,7 +234,7 @@ pub fn run_check(
                     return Err(EngineError::EncryptionMismatch {
                         path: entry.path().to_path_buf(),
                         reason: format!(
-                            "Repository file '{rel_str}' uses full encryption (.fenc), but no active 'enc=full' rule exists in dotler.toml. Run 'dotler tidy' to reconcile format."
+                            "Repository file '{rel_str}' uses full encryption (.dotler.fenc), but no active 'enc=full' rule exists in dotler.toml. Run 'dotler tidy' to reconcile format."
                         ),
                     });
                 }
@@ -231,15 +243,13 @@ pub fn run_check(
                     EngineError::EncryptionMismatch {
                         path: entry.path().to_path_buf(),
                         reason: format!(
-                            "Repository file '{rel_str}' is not a valid .fenc archive. Run 'dotler import --force' to re-encrypt."
+                            "Repository file '{rel_str}' is not a valid .dotler.fenc archive. Run 'dotler import --force' to re-encrypt."
                         ),
                     }
                 })?;
                 let file_vid = crate::crypto::vault::bytes_to_hex(&fenc_file.vault_id);
-                let expected_vid = repo_cfg
-                    .vault
-                    .as_ref()
-                    .map(|v| v.vault_id.trim())
+                let expected_vid = expected_vid_opt
+                    .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .ok_or(EngineError::Config(
                         crate::config::ConfigError::MissingVaultConfig,
@@ -267,7 +277,7 @@ pub fn run_check(
                             return Err(EngineError::EncryptionMismatch {
                                 path: entry.path().to_path_buf(),
                                 reason: format!(
-                                    "Repository file '{dec_rel}' format (.fenc) conflicts with selection rule in dotler.toml. Run 'dotler tidy' to reconcile format."
+                                    "Repository file '{dec_rel}' format (.dotler.fenc) conflicts with selection rule in dotler.toml. Run 'dotler tidy' to reconcile format."
                                 ),
                             });
                         }
@@ -279,52 +289,72 @@ pub fn run_check(
                 continue;
             }
 
-            let (clean_rel, is_enc_file) = if let Some(stripped) = rel_str.strip_suffix(".enc") {
-                (stripped.to_string(), true)
-            } else {
-                (rel_str.to_string(), false)
-            };
-            if let Some(mode) = evaluate_selection(&rules, &clean_rel) {
-                let enc_conflict =
-                    (is_enc_file && mode.is_included() && !mode.is_content_encrypted())
-                        || (!is_enc_file && mode.is_encrypted());
-                if enc_conflict {
+            if let Some(clean_rel) = strip_content_enc_suffix(&rel_str) {
+                if let Some(mode) = evaluate_selection(&rules, clean_rel) {
+                    if mode.is_included() && !mode.is_content_encrypted() {
+                        return Err(EngineError::EncryptionMismatch {
+                            path: entry.path().to_path_buf(),
+                            reason: format!(
+                                "Repository file '{clean_rel}' format conflicts with encryption rule in dotler.toml. Run 'dotler tidy' to reconcile format."
+                            ),
+                        });
+                    } else if mode.is_content_encrypted() {
+                        let bytes = fs::read(entry.path())?;
+                        let enc_file = EncryptedFile::from_bytes(&bytes).map_err(|_| {
+                            EngineError::EncryptionMismatch {
+                                path: entry.path().to_path_buf(),
+                                reason: format!(
+                                    "Repository file '{rel_str}' is not a valid .dotler.enc archive. Run 'dotler import --force' to re-encrypt."
+                                ),
+                            }
+                        })?;
+                        let file_vid = crate::crypto::vault::bytes_to_hex(&enc_file.vault_id);
+                        let expected_vid = expected_vid_opt
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .ok_or(EngineError::Config(
+                                crate::config::ConfigError::MissingVaultConfig,
+                            ))?;
+                        if file_vid != expected_vid {
+                            return Err(EngineError::EncryptionMismatch {
+                                path: entry.path().to_path_buf(),
+                                reason: format!(
+                                    "Repository file '{rel_str}' is encrypted with vault '{file_vid}', which does not match dotler.toml vault '{expected_vid}'. Run 'dotler vault from file <repo>' to align vault keys or 'dotler import --force' to re-encrypt."
+                                ),
+                            });
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if !is_content_enc_name(&rel_str)
+                && (rel_str.ends_with(LEGACY_CONTENT_ENC_SUFFIX)
+                    || rel_str.ends_with(LEGACY_FULL_ENC_SUFFIX))
+            {
+                let bytes = fs::read(entry.path())?;
+                if is_legacy_dotler_archive_bytes(&bytes, expected_vid_opt) {
+                    return Err(EngineError::EncryptionMismatch {
+                        path: entry.path().to_path_buf(),
+                        reason: format!(
+                            "Repository file '{rel_str}' uses a legacy encrypted suffix (.enc/.fenc). Run 'dotler tidy' to migrate to .dotler.enc/.dotler.fenc."
+                        ),
+                    });
+                }
+            }
+
+            let clean_rel = rel_str.as_ref();
+            if let Some(mode) = evaluate_selection(&rules, clean_rel) {
+                if mode.is_encrypted() {
                     return Err(EngineError::EncryptionMismatch {
                         path: entry.path().to_path_buf(),
                         reason: format!(
                             "Repository file '{clean_rel}' format conflicts with encryption rule in dotler.toml. Run 'dotler tidy' to reconcile format."
                         ),
                     });
-                } else if mode.is_content_encrypted() && is_enc_file {
+                } else if mode == SelectionMode::TemplateInclude {
                     let bytes = fs::read(entry.path())?;
-                    let enc_file = EncryptedFile::from_bytes(&bytes).map_err(|_| {
-                        EngineError::EncryptionMismatch {
-                            path: entry.path().to_path_buf(),
-                            reason: format!(
-                                "Repository file '{rel_str}' is not a valid .enc archive. Run 'dotler import --force' to re-encrypt."
-                            ),
-                        }
-                    })?;
-                    let file_vid = crate::crypto::vault::bytes_to_hex(&enc_file.vault_id);
-                    let expected_vid = repo_cfg
-                        .vault
-                        .as_ref()
-                        .map(|v| v.vault_id.trim())
-                        .filter(|s| !s.is_empty())
-                        .ok_or(EngineError::Config(
-                            crate::config::ConfigError::MissingVaultConfig,
-                        ))?;
-                    if file_vid != expected_vid {
-                        return Err(EngineError::EncryptionMismatch {
-                            path: entry.path().to_path_buf(),
-                            reason: format!(
-                                "Repository file '{rel_str}' is encrypted with vault '{file_vid}', which does not match dotler.toml vault '{expected_vid}'. Run 'dotler vault from file <repo>' to align vault keys or 'dotler import --force' to re-encrypt."
-                            ),
-                        });
-                    }
-                } else if mode == SelectionMode::TemplateInclude && !is_enc_file {
-                    let bytes = fs::read(entry.path())?;
-                    render_home_template(&bytes, &home_dir, &clean_rel)?;
+                    render_home_template(&bytes, &home_dir, clean_rel)?;
                 }
             }
         }
@@ -392,13 +422,13 @@ files = ".bashrc"
 
         let mismatch_toml = "[g1]\nos-nux = \"~\"\nos-mac = \"~\"\nfiles = \".bashrc\"\n";
         fs::write(repo_dir.join("dotler.toml"), mismatch_toml).unwrap();
-        fs::write(repo_dir.join("g1/.bashrc.enc"), b"cipher").unwrap();
+        fs::write(repo_dir.join("g1/.bashrc.dotler.enc"), b"cipher").unwrap();
 
         let err2 = run_check(&ctx, None, &lock).unwrap_err();
         assert_eq!(err2.error_code(), "ENCRYPTION_MISMATCH");
         assert_eq!(err2.exit_code(), 1);
 
-        // Static .enc header vault_id mismatch check
+        // Static .dotler.enc header vault_id mismatch check
         let pass_a = crate::crypto::SecretString::new("vault-a-pass-123".to_string());
         let pass_b = crate::crypto::SecretString::new("vault-b-pass-456".to_string());
         let (vcfg_a, _, _) = crate::crypto::vault::init_vault(&pass_a).unwrap();
@@ -408,7 +438,7 @@ files = ".bashrc"
             .unwrap()
             .to_bytes();
 
-        let _ = fs::remove_file(repo_dir.join("g1/.bashrc.enc"));
+        let _ = fs::remove_file(repo_dir.join("g1/.bashrc.dotler.enc"));
         fs::write(
             repo_dir.join("dotler.toml"),
             format!(
@@ -417,7 +447,7 @@ files = ".bashrc"
             ),
         )
         .unwrap();
-        fs::write(repo_dir.join("g1/.secret.enc"), enc_b).unwrap();
+        fs::write(repo_dir.join("g1/.secret.dotler.enc"), enc_b).unwrap();
 
         let err3 = run_check(&ctx, None, &lock).unwrap_err();
         assert_eq!(err3.error_code(), "ENCRYPTION_MISMATCH");

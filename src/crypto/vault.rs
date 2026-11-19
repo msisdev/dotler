@@ -6,8 +6,11 @@ use crate::config::repo::VaultConfig;
 use crate::crypto::{ExposeSecret, Secret, SecretString, fill_random_bytes};
 
 pub use crate::crypto::cipher::{
-    ENC_FILE_MIN_LEN, EncryptedFile, FENC_FILE_MIN_LEN, FULL_ENC_AAD_DOMAIN,
-    FULL_ENC_TOKEN_HEX_LEN, FullEncryptedFile, VAULT_SLOT_LEN, VaultSlot, parse_fenc_filename_stem,
+    CONTENT_ENC_SUFFIX, ENC_FILE_MIN_LEN, EncryptedFile, FENC_FILE_MIN_LEN, FULL_ENC_AAD_DOMAIN,
+    FULL_ENC_SUFFIX, FULL_ENC_TOKEN_HEX_LEN, FullEncryptedFile, LEGACY_CONTENT_ENC_SUFFIX,
+    LEGACY_FULL_ENC_SUFFIX, VAULT_SLOT_LEN, VaultSlot, is_content_enc_name, is_full_enc_name,
+    is_legacy_dotler_archive_bytes, parse_fenc_filename_stem, parse_legacy_fenc_filename_stem,
+    strip_content_enc_suffix,
 };
 pub use crate::crypto::mnemonic::{BIP39_ENTROPY_BITS, RecoveryMnemonic};
 
@@ -170,7 +173,7 @@ impl VaultKey {
     }
 
     pub fn derive_full_enc_filename(&self, rel_path: &str) -> String {
-        format!("{}.fenc", self.derive_full_enc_token(rel_path))
+        format!("{}{FULL_ENC_SUFFIX}", self.derive_full_enc_token(rel_path))
     }
 }
 

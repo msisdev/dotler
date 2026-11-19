@@ -124,7 +124,7 @@ files = "credentials.env enc"
 
     let engine = sandbox.sync_engine(&config, Some(&vault_key));
 
-    // First import: encrypts file and writes credentials.env.enc
+    // First import: encrypts file and writes credentials.env.dotler.enc
     let plans = engine.plan(None, &lock).unwrap();
     assert_eq!(plans.len(), 1);
     assert_eq!(plans[0].status, FileSyncStatus::ModifiedLocally);
@@ -133,7 +133,7 @@ files = "credentials.env enc"
     assert_eq!(report1.processed, 1);
     assert_eq!(report1.skipped, 0);
 
-    let enc_path = sandbox.repo_dir.join("secrets/credentials.env.enc");
+    let enc_path = sandbox.repo_dir.join("secrets/credentials.env.dotler.enc");
     assert!(enc_path.is_file());
     let raw_enc_initial = fs::read(&enc_path).unwrap();
 
@@ -230,7 +230,8 @@ files = "token.txt enc"
         .unwrap();
 
     // Intentionally corrupt the repository file with invalid garbage
-    let enc_path = sandbox.write_repo_file("secrets/token.txt.enc", b"INVALID_GARBAGE_PAYLOAD");
+    let enc_path =
+        sandbox.write_repo_file("secrets/token.txt.dotler.enc", b"INVALID_GARBAGE_PAYLOAD");
 
     let engine = sandbox.sync_engine(&config, Some(&vault_key));
     let plans = engine.plan(None, &lock).unwrap();

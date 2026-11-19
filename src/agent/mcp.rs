@@ -140,7 +140,7 @@ pub fn list_tools() -> Vec<McpToolDefinition> {
         },
         McpToolDefinition {
             name: "dotler_tidy".to_string(),
-            description: "Reconcile in-repo file formats (plain vs .enc), prune repository copies of tracked files deleted locally, and clean up untracked orphans (safely keeps OS files by default).".to_string(),
+            description: "Reconcile in-repo file formats (plain vs .dotler.enc / .dotler.fenc), prune repository copies of tracked files deleted locally, and clean up untracked orphans (safely keeps OS files by default).".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

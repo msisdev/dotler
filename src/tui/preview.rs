@@ -327,7 +327,7 @@ mod tests {
                 group_name: "bash".to_string(),
                 os_path: PathBuf::from("~/.bashrc"),
                 os_op: BadgeOp::Okay,
-                repo_path: PathBuf::from("~/dotfiles/bash/.bashrc.enc"),
+                repo_path: PathBuf::from("~/dotfiles/bash/.bashrc.dotler.enc"),
                 repo_op: BadgeOp::Overwrite,
                 arrow: PreviewArrow::EncryptToRepo,
             },
@@ -335,7 +335,7 @@ mod tests {
                 group_name: "zsh".to_string(),
                 os_path: PathBuf::from("~/.zshrc"),
                 os_op: BadgeOp::Overwrite,
-                repo_path: PathBuf::from("~/dotfiles/zsh/.zshrc.enc"),
+                repo_path: PathBuf::from("~/dotfiles/zsh/.zshrc.dotler.enc"),
                 repo_op: BadgeOp::Okay,
                 arrow: PreviewArrow::DecryptToOs,
             },
@@ -349,8 +349,10 @@ mod tests {
             plain
                 .contains("[nvim]\n▐o▌ ~/.config/nvim/init.lua\n───▸ ▐w▌ ~/dotfiles/nvim/init.lua")
         );
-        assert!(plain.contains("[bash]\n▐o▌ ~/.bashrc\n──🔒 ▐w▌ ~/dotfiles/bash/.bashrc.enc"));
-        assert!(plain.contains("[zsh]\n▐w▌ ~/.zshrc\n🔑── ▐o▌ ~/dotfiles/zsh/.zshrc.enc"));
+        assert!(
+            plain.contains("[bash]\n▐o▌ ~/.bashrc\n──🔒 ▐w▌ ~/dotfiles/bash/.bashrc.dotler.enc")
+        );
+        assert!(plain.contains("[zsh]\n▐w▌ ~/.zshrc\n🔑── ▐o▌ ~/dotfiles/zsh/.zshrc.dotler.enc"));
     }
 
     #[test]

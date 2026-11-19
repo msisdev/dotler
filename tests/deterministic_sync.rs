@@ -476,7 +476,7 @@ files = "secret.txt enc"
 
     let plaintext = b"export-me-safely-123\n";
     let enc = vault_key.encrypt_file(plaintext).unwrap();
-    sandbox.write_repo_file("secret/secret.txt.enc", &enc.to_bytes());
+    sandbox.write_repo_file("secret/secret.txt.dotler.enc", &enc.to_bytes());
 
     let engine = sandbox.sync_engine(&config, Some(&vault_key));
     let plans = engine.plan(None, &lock).unwrap();

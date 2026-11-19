@@ -1,4 +1,4 @@
-//! CLI handlers for `vault from <file|git|url>` external vault import and `.enc` re-keying.
+//! CLI handlers for `vault from <file|git|url>` external vault import and `.dotler.enc` / `.dotler.fenc` re-keying.
 
 use std::io::Write;
 
@@ -11,7 +11,9 @@ use crate::config::repo::{
 use crate::config::state::write_file_safe;
 use crate::core::vault_loader::{read_new_passphrase, unlock_vault_if_needed};
 use crate::crypto::keyring::{OsKeyring, PASSPHRASE_ENV_VAR};
-use crate::crypto::vault::{EncryptedFile, FullEncryptedFile, VaultKey, VaultSlot};
+use crate::crypto::vault::{
+    EncryptedFile, FullEncryptedFile, VaultKey, VaultSlot, is_content_enc_name, is_full_enc_name,
+};
 use crate::crypto::{ExposeSecret, SecretString};
 use crate::engine::EngineError;
 use crate::engine::remote::{GitRunner, REMOTE_TOML_FETCH_MAX_BYTES, fetch_http_text, parse_url};
@@ -139,7 +141,7 @@ pub(crate) fn handle_vault_from<W: Write>(
         vault_hint: explicit_hint.or(ext_vault.vault_hint),
     };
 
-    // Scan existing .enc and .fenc files in group directories belonging to another vault.
+    // Scan existing .dotler.enc and .dotler.fenc files in group directories belonging to another vault.
     enum MismatchedArtifact {
         Content(std::path::PathBuf, EncryptedFile),
         Full(std::path::PathBuf, String, FullEncryptedFile),
@@ -154,30 +156,26 @@ pub(crate) fn handle_vault_from<W: Write>(
             if !entry.file_type().is_file() {
                 continue;
             }
-            match entry.path().extension().and_then(|s| s.to_str()) {
-                Some("enc") => {
-                    let bytes = std::fs::read(entry.path())?;
-                    let enc_file = EncryptedFile::from_bytes(&bytes)?;
-                    if enc_file.vault_id != new_vid_bytes {
-                        mismatched_files.push(MismatchedArtifact::Content(
-                            entry.path().to_path_buf(),
-                            enc_file,
-                        ));
-                    }
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if is_content_enc_name(&fname) {
+                let bytes = std::fs::read(entry.path())?;
+                let enc_file = EncryptedFile::from_bytes(&bytes)?;
+                if enc_file.vault_id != new_vid_bytes {
+                    mismatched_files.push(MismatchedArtifact::Content(
+                        entry.path().to_path_buf(),
+                        enc_file,
+                    ));
                 }
-                Some("fenc") => {
-                    let bytes = std::fs::read(entry.path())?;
-                    let fenc_file = FullEncryptedFile::from_bytes(&bytes)?;
-                    if fenc_file.vault_id != new_vid_bytes {
-                        let fname = entry.file_name().to_string_lossy().to_string();
-                        mismatched_files.push(MismatchedArtifact::Full(
-                            entry.path().to_path_buf(),
-                            fname,
-                            fenc_file,
-                        ));
-                    }
+            } else if is_full_enc_name(&fname) {
+                let bytes = std::fs::read(entry.path())?;
+                let fenc_file = FullEncryptedFile::from_bytes(&bytes)?;
+                if fenc_file.vault_id != new_vid_bytes {
+                    mismatched_files.push(MismatchedArtifact::Full(
+                        entry.path().to_path_buf(),
+                        fname,
+                        fenc_file,
+                    ));
                 }
-                _ => {}
             }
         }
     }
@@ -316,7 +314,7 @@ mod tests {
             .encrypt_file(b"API_KEY=hello_world")
             .unwrap()
             .to_bytes();
-        write_file_safe(&repo_dst.join("sec/secret.env.enc"), &orig_enc).unwrap();
+        write_file_safe(&repo_dst.join("sec/secret.env.dotler.enc"), &orig_enc).unwrap();
 
         let mut local_cfg = LocalConfig {
             default_repo: Some("dst".to_string()),
@@ -377,8 +375,8 @@ mod tests {
         assert_eq!(resp["data"]["vault_id"], vcfg_src.vault_id);
         assert_eq!(resp["data"]["rekeyed_files"], 1);
 
-        // Verify .enc file is now encrypted with vkey_src and decrypts back to original plaintext
-        let rekeyed_bytes = fs::read(repo_dst.join("sec/secret.env.enc")).unwrap();
+        // Verify .dotler.enc file is now encrypted with vkey_src and decrypts back to original plaintext
+        let rekeyed_bytes = fs::read(repo_dst.join("sec/secret.env.dotler.enc")).unwrap();
         let rekeyed_enc = EncryptedFile::from_bytes(&rekeyed_bytes).unwrap();
         assert_eq!(rekeyed_enc.vault_id, vkey_src.vault_id_bytes());
         let plain = vkey_src.decrypt_file(&rekeyed_enc).unwrap();

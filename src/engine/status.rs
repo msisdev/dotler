@@ -18,7 +18,11 @@ use crate::core::vault_loader::{
     has_encrypted_repo_files, has_encrypted_rules, unlock_vault_if_needed,
 };
 use crate::crypto::ExposeSecret;
-use crate::crypto::vault::{EncryptedFile, FullEncryptedFile};
+use crate::crypto::vault::{
+    CONTENT_ENC_SUFFIX, EncryptedFile, FULL_ENC_SUFFIX, FullEncryptedFile,
+    LEGACY_CONTENT_ENC_SUFFIX, is_full_enc_name, is_legacy_dotler_archive_bytes,
+    parse_legacy_fenc_filename_stem, strip_content_enc_suffix,
+};
 use crate::engine::EngineError;
 use crate::engine::sync::SyncEngine;
 
@@ -189,8 +193,8 @@ fn collect_repo_and_db_candidates(
             }
             if let Ok(rel) = entry.path().strip_prefix(group_repo_dir) {
                 let rel_str = rel.to_string_lossy().to_string();
-                if rel_str.ends_with(".fenc") {
-                    let fname = entry.file_name().to_string_lossy().to_string();
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if is_full_enc_name(&rel_str) {
                     if let Some(key) = engine.vault_key
                         && let Ok(bytes) = fs::read(entry.path())
                         && let Ok(fenc) = FullEncryptedFile::from_bytes(&bytes)
@@ -201,11 +205,36 @@ fn collect_repo_and_db_candidates(
                     }
                     continue;
                 }
-                let clean = rel_str
-                    .strip_suffix(".enc")
-                    .map(str::to_string)
-                    .unwrap_or(rel_str);
-                candidates.insert(clean);
+                if let Some(stripped) = strip_content_enc_suffix(&rel_str) {
+                    candidates.insert(stripped.to_string());
+                    continue;
+                }
+                let expected_vid = engine
+                    .repo_config
+                    .vault
+                    .as_ref()
+                    .map(|v| v.vault_id.as_str());
+                if parse_legacy_fenc_filename_stem(&fname).is_some()
+                    && let Ok(bytes) = fs::read(entry.path())
+                    && is_legacy_dotler_archive_bytes(&bytes, expected_vid)
+                {
+                    if let Some(key) = engine.vault_key
+                        && let Ok(fenc) = FullEncryptedFile::from_bytes(&bytes)
+                        && let Ok((dec_rel, _)) = key.decrypt_full_file(&fname, &fenc)
+                    {
+                        validate_rule_pattern(&dec_rel)?;
+                        candidates.insert(dec_rel);
+                    }
+                    continue;
+                }
+                if let Some(stripped) = rel_str.strip_suffix(LEGACY_CONTENT_ENC_SUFFIX)
+                    && let Ok(bytes) = fs::read(entry.path())
+                    && is_legacy_dotler_archive_bytes(&bytes, expected_vid)
+                {
+                    candidates.insert(stripped.to_string());
+                    continue;
+                }
+                candidates.insert(rel_str);
             }
         }
     }
@@ -349,10 +378,38 @@ fn build_file_plan(
     let is_full_encrypted = mode_val.is_full_encrypted();
     let is_template = mode_val.is_template();
     let plain_repo_path = group_repo_dir.join(&rel_path);
-    let enc_repo_path = group_repo_dir.join(format!("{rel_path}.enc"));
+    let enc_repo_path = group_repo_dir.join(format!("{rel_path}{CONTENT_ENC_SUFFIX}"));
     let full_enc_repo_path = engine
         .vault_key
         .map(|k| group_repo_dir.join(k.derive_full_enc_filename(&rel_path)));
+    let legacy_enc_exists = {
+        let p = group_repo_dir.join(format!("{rel_path}{LEGACY_CONTENT_ENC_SUFFIX}"));
+        let expected_vid = engine
+            .repo_config
+            .vault
+            .as_ref()
+            .map(|v| v.vault_id.as_str());
+        p.is_file()
+            && fs::read(&p)
+                .map(|b| is_legacy_dotler_archive_bytes(&b, expected_vid))
+                .unwrap_or(false)
+    };
+    let legacy_fenc_exists = engine.vault_key.is_some_and(|k| {
+        let p = group_repo_dir.join(format!(
+            "{}{}",
+            k.derive_full_enc_token(&rel_path),
+            crate::crypto::LEGACY_FULL_ENC_SUFFIX
+        ));
+        let expected_vid = engine
+            .repo_config
+            .vault
+            .as_ref()
+            .map(|v| v.vault_id.as_str());
+        p.is_file()
+            && fs::read(&p)
+                .map(|b| is_legacy_dotler_archive_bytes(&b, expected_vid))
+                .unwrap_or(false)
+    });
 
     let os_bytes = fs::read(&target_os_path).ok();
     if is_template && let Some(ref bytes) = os_bytes {
@@ -371,10 +428,12 @@ fn build_file_plan(
         &plain_repo_path,
         &enc_repo_path,
         full_enc_repo_path.as_deref(),
+        legacy_enc_exists || legacy_fenc_exists,
     )?;
 
     let chosen_repo_path = if is_full_encrypted {
-        full_enc_repo_path.unwrap_or_else(|| group_repo_dir.join("<locked>.fenc"))
+        full_enc_repo_path
+            .unwrap_or_else(|| group_repo_dir.join(format!("<locked>{FULL_ENC_SUFFIX}")))
     } else if is_encrypted {
         enc_repo_path
     } else {
@@ -408,8 +467,13 @@ fn compute_repo_hash_and_mismatch(
     plain_repo_path: &Path,
     enc_repo_path: &Path,
     full_enc_repo_path: Option<&Path>,
+    has_legacy_archive: bool,
 ) -> Result<(Option<String>, bool), EngineError> {
     let fenc_exists = full_enc_repo_path.is_some_and(Path::is_file);
+    if has_legacy_archive && !plain_repo_path.is_file() && !enc_repo_path.is_file() && !fenc_exists
+    {
+        return Ok((None, true));
+    }
 
     if mode.is_full_encrypted() {
         if (plain_repo_path.is_file() || enc_repo_path.is_file()) && !fenc_exists {

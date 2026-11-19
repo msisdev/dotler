@@ -16,7 +16,9 @@ use crate::config::state::{DotlerLockGuard, write_file_safe};
 use crate::core::context::CoreContext;
 use crate::core::vault_loader::{is_encrypted_repo_extension, unlock_vault_if_needed};
 use crate::crypto::ExposeSecret;
-use crate::crypto::vault::{EncryptedFile, FullEncryptedFile, VaultKey};
+use crate::crypto::vault::{
+    EncryptedFile, FullEncryptedFile, VaultKey, is_content_enc_name, is_full_enc_name,
+};
 use crate::engine::EngineError;
 use crate::engine::git_transport::GitRunner;
 use crate::engine::observer::{
@@ -407,27 +409,23 @@ fn rekey_cloned_vault_files(
 
     let mut pending_writes: Vec<(PathBuf, Vec<u8>, Option<PathBuf>)> = Vec::new();
     for path in entries {
-        match path.extension().and_then(|s| s.to_str()) {
-            Some("enc") => {
-                let enc_bytes = fs::read(&path)?;
-                let enc_file = EncryptedFile::from_bytes(&enc_bytes)?;
-                let decrypted = remote_key.decrypt_file(&enc_file)?;
-                let re_encrypted = local_key.encrypt_file(decrypted.expose_secret())?;
-                pending_writes.push((path, re_encrypted.to_bytes(), None));
-            }
-            Some("fenc") => {
-                let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                let fenc_bytes = fs::read(&path)?;
-                let fenc_file = FullEncryptedFile::from_bytes(&fenc_bytes)?;
-                let (rel_path, decrypted) = remote_key.decrypt_full_file(fname, &fenc_file)?;
-                let (new_fname, re_encrypted) =
-                    local_key.encrypt_full_file(&rel_path, decrypted.expose_secret())?;
-                let parent = path.parent().unwrap_or(manifest_dir);
-                let new_path = parent.join(new_fname);
-                let stale = (new_path != path).then_some(path);
-                pending_writes.push((new_path, re_encrypted.to_bytes(), stale));
-            }
-            _ => {}
+        let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if is_content_enc_name(fname) {
+            let enc_bytes = fs::read(&path)?;
+            let enc_file = EncryptedFile::from_bytes(&enc_bytes)?;
+            let decrypted = remote_key.decrypt_file(&enc_file)?;
+            let re_encrypted = local_key.encrypt_file(decrypted.expose_secret())?;
+            pending_writes.push((path, re_encrypted.to_bytes(), None));
+        } else if is_full_enc_name(fname) {
+            let fenc_bytes = fs::read(&path)?;
+            let fenc_file = FullEncryptedFile::from_bytes(&fenc_bytes)?;
+            let (rel_path, decrypted) = remote_key.decrypt_full_file(fname, &fenc_file)?;
+            let (new_fname, re_encrypted) =
+                local_key.encrypt_full_file(&rel_path, decrypted.expose_secret())?;
+            let parent = path.parent().unwrap_or(manifest_dir);
+            let new_path = parent.join(new_fname);
+            let stale = (new_path != path).then_some(path);
+            pending_writes.push((new_path, re_encrypted.to_bytes(), stale));
         }
     }
 
@@ -718,7 +716,7 @@ mod tests {
             vcfg_remote.vault_id, vcfg_remote.password_slot, vcfg_remote.recovery_slot
         );
         let (_git_tmp, bare_url) =
-            create_test_bare_repo(&remote_toml, &[("sec/.token.enc", &enc_payload)]);
+            create_test_bare_repo(&remote_toml, &[("sec/.token.dotler.enc", &enc_payload)]);
 
         let lock = DotlerLock::new(dotler_dir.join("dotler.lock"))
             .acquire(Duration::from_millis(500), Duration::from_millis(10))
@@ -746,7 +744,7 @@ mod tests {
         assert_eq!(rep.destination, clone_dest);
 
         let cloned_enc =
-            EncryptedFile::from_bytes(&fs::read(clone_dest.join("sec/.token.enc")).unwrap())
+            EncryptedFile::from_bytes(&fs::read(clone_dest.join("sec/.token.dotler.enc")).unwrap())
                 .unwrap();
         assert_eq!(cloned_enc.vault_id, vkey_local.vault_id_bytes());
         assert_eq!(

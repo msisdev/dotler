@@ -598,7 +598,7 @@ fn test_e2e_vault_init_import_from_git_url_and_local_sources() {
         Some(0)
     );
     let enc_before = EncryptedFile::from_bytes(
-        &fs::read(rekey_same_pw_repo.join("sec/secret.txt.enc")).unwrap(),
+        &fs::read(rekey_same_pw_repo.join("sec/secret.txt.dotler.enc")).unwrap(),
     )
     .unwrap();
     assert_ne!(
@@ -626,7 +626,7 @@ fn test_e2e_vault_init_import_from_git_url_and_local_sources() {
     assert_eq!(rekey_json["data"]["rekeyed_files"], 1);
 
     let enc_after = EncryptedFile::from_bytes(
-        &fs::read(rekey_same_pw_repo.join("sec/secret.txt.enc")).unwrap(),
+        &fs::read(rekey_same_pw_repo.join("sec/secret.txt.dotler.enc")).unwrap(),
     )
     .unwrap();
     assert_ne!(enc_before.vault_id, enc_after.vault_id);
@@ -927,7 +927,7 @@ fn test_full_encryption_enc_full_import_export_tidy_check_and_literal_warning() 
     );
 
     let ssh_repo = repo_dir.join("ssh");
-    assert!(ssh_repo.join("id_ed25519.enc").is_file());
+    assert!(ssh_repo.join("id_ed25519.dotler.enc").is_file());
     assert!(ssh_repo.join("id_ed25519.pub").is_file());
     assert!(
         !ssh_repo.join("clients").exists(),
@@ -937,7 +937,7 @@ fn test_full_encryption_enc_full_import_export_tidy_check_and_literal_warning() 
     let fenc_files: Vec<_> = fs::read_dir(&ssh_repo)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("fenc"))
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".dotler.fenc"))
         .collect();
     assert_eq!(fenc_files.len(), 2);
     for entry in &fenc_files {
@@ -948,7 +948,7 @@ fn test_full_encryption_enc_full_import_export_tidy_check_and_literal_warning() 
         assert!(!String::from_utf8_lossy(&raw).contains(&home_dir.to_string_lossy().to_string()));
     }
 
-    // Second import must skip unchanged .fenc files with zero byte churn
+    // Second import must skip unchanged .dotler.fenc files with zero byte churn
     let snap_before: Vec<(String, Vec<u8>)> = fenc_files
         .iter()
         .map(|e| {
@@ -964,7 +964,7 @@ fn test_full_encryption_enc_full_import_export_tidy_check_and_literal_warning() 
         assert_eq!(fs::read(ssh_repo.join(fname)).unwrap(), before_bytes);
     }
 
-    // Delete OS files and export back from .fenc archives
+    // Delete OS files and export back from .dotler.fenc archives
     fs::remove_dir_all(ssh_os.join("clients")).unwrap();
     let exp = run_cli(&["export", "-y", "--json"], None);
     assert_eq!(
@@ -1001,18 +1001,26 @@ fn test_full_encryption_enc_full_import_export_tidy_check_and_literal_warning() 
 
     let tidy_to_cont = run_cli(&["tidy", "-y", "--json"], None);
     assert_eq!(tidy_to_cont.status.code(), Some(0));
-    assert!(ssh_repo.join("clients/acme-corp/secret_key.enc").is_file());
-    assert!(ssh_repo.join("clients/acme-corp/client.conf.enc").is_file());
+    assert!(
+        ssh_repo
+            .join("clients/acme-corp/secret_key.dotler.enc")
+            .is_file()
+    );
+    assert!(
+        ssh_repo
+            .join("clients/acme-corp/client.conf.dotler.enc")
+            .is_file()
+    );
     assert_eq!(
         fs::read_dir(&ssh_repo)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("fenc"))
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".dotler.fenc"))
             .count(),
         0
     );
 
-    // Switch back to * enc=full: tidy converts .enc -> .fenc and prunes empty clients/acme-corp/ subdir
+    // Switch back to * enc=full: tidy converts .dotler.enc -> .dotler.fenc and prunes empty clients/acme-corp/ subdir
     fs::write(repo_dir.join("dotler.toml"), &manifest_full).unwrap();
     let tidy_to_full = run_cli(&["tidy", "-y", "--json"], None);
     assert_eq!(tidy_to_full.status.code(), Some(0));
@@ -1270,4 +1278,153 @@ fn test_full_encryption_rekeying_on_vault_from_and_remote_git_install() {
     let uninst_rep = uninstall_remote(&["app".to_string()], &state_db, &lock, false).unwrap();
     assert_eq!(uninst_rep.removed_files, vec![expected_installed.clone()]);
     assert!(!expected_installed.exists());
+}
+
+#[test]
+fn test_user_plain_enc_non_collision_and_legacy_archive_tidy_migration() {
+    use dotler::crypto::FULL_ENC_SUFFIX;
+    use std::fs;
+    use std::process::{Command, Stdio};
+
+    let temp = tempfile::tempdir().unwrap();
+    let home_dir = temp.path().join("home");
+    let repo_dir = home_dir.join("repo");
+    let certs_os = home_dir.join(".config/certs");
+    let sec_os = home_dir.join(".config/sec");
+    fs::create_dir_all(&certs_os).unwrap();
+    fs::create_dir_all(sec_os.join("nested")).unwrap();
+    fs::create_dir_all(&repo_dir).unwrap();
+
+    // User's own non-Dotler `.enc` file (> 48 bytes, OpenSSL-style header) tracked as plaintext `*`
+    let user_openssl_blob =
+        b"Salted__0123456789abcdef_non_dotler_external_openssl_encrypted_payload_bytes\n";
+    fs::write(certs_os.join("openssl_backup.enc"), user_openssl_blob).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_dotler");
+    let run_cli = |args: &[&str], stdin_str: Option<&str>| {
+        let mut cmd = Command::new(bin);
+        cmd.current_dir(&repo_dir)
+            .env("HOME", &home_dir)
+            .env("USERPROFILE", &home_dir)
+            .env("DOTLER_PASSPHRASE", "legacy-mig-pass-777")
+            .args(args);
+        if let Some(s) = stdin_str {
+            cmd.stdin(Stdio::piped());
+            let mut child = cmd.spawn().unwrap();
+            if let Some(mut pipe) = child.stdin.take() {
+                use std::io::Write;
+                let _ = pipe.write_all(s.as_bytes());
+            }
+            child.wait_with_output().unwrap()
+        } else {
+            cmd.stdin(Stdio::null());
+            cmd.output().unwrap()
+        }
+    };
+
+    assert_eq!(run_cli(&["init", "--json"], None).status.code(), Some(0));
+    assert_eq!(
+        run_cli(
+            &["vault", "init", "--password-stdin", "--json"],
+            Some("legacy-mig-pass-777\n")
+        )
+        .status
+        .code(),
+        Some(0)
+    );
+
+    let base_manifest = fs::read_to_string(repo_dir.join("dotler.toml")).unwrap();
+    let manifest = format!(
+        "{base_manifest}\n[certs]\nos-nux = \"~/.config/certs\"\nos-mac = \"~/.config/certs\"\nos-win = \"~/.config/certs\"\nos-bsd = \"~/.config/certs\"\nfiles = \"*\"\n\n[sec]\nos-nux = \"~/.config/sec\"\nos-mac = \"~/.config/sec\"\nos-win = \"~/.config/sec\"\nos-bsd = \"~/.config/sec\"\nfiles = \"\"\"\napi.key enc\nnested/* enc=full\n\"\"\"\n"
+    );
+    fs::write(repo_dir.join("dotler.toml"), &manifest).unwrap();
+
+    // 1. Import and check user `openssl_backup.enc` as plaintext with zero false-positive mismatch
+    let imp_certs = run_cli(&["import", "-y", "--json"], None);
+    assert_eq!(imp_certs.status.code(), Some(0));
+    assert_eq!(
+        fs::read(repo_dir.join("certs/openssl_backup.enc")).unwrap(),
+        user_openssl_blob
+    );
+    assert_eq!(run_cli(&["check", "--json"], None).status.code(), Some(0));
+    assert_eq!(
+        run_cli(&["tidy", "-y", "--json"], None).status.code(),
+        Some(0)
+    );
+    assert_eq!(
+        fs::read(repo_dir.join("certs/openssl_backup.enc")).unwrap(),
+        user_openssl_blob
+    );
+
+    fs::remove_file(certs_os.join("openssl_backup.enc")).unwrap();
+    assert_eq!(
+        run_cli(&["export", "-y", "--json"], None).status.code(),
+        Some(0)
+    );
+    assert_eq!(
+        fs::read(certs_os.join("openssl_backup.enc")).unwrap(),
+        user_openssl_blob
+    );
+
+    // 2. Seed legacy `.enc` and `.fenc` archives with matching `vault_id`:
+    //    `dotler check` flags them, and `dotler tidy` migrates them to `.dotler.enc` / `.dotler.fenc`.
+    let parsed_cfg = dotler::config::RepoConfig::load(&repo_dir.join("dotler.toml")).unwrap();
+    let vcfg = parsed_cfg.vault.as_ref().unwrap();
+    let slot = dotler::crypto::VaultSlot::from_base64(&vcfg.password_slot).unwrap();
+    let vkey = slot
+        .unwrap(
+            &SecretString::new("legacy-mig-pass-777".to_string()),
+            Some(&vcfg.vault_id),
+        )
+        .unwrap();
+
+    fs::create_dir_all(repo_dir.join("sec")).unwrap();
+    let legacy_enc_bytes = vkey
+        .encrypt_file(b"API_TOKEN=legacy_enc\n")
+        .unwrap()
+        .to_bytes();
+    fs::write(repo_dir.join("sec/api.key.enc"), &legacy_enc_bytes).unwrap();
+
+    let (modern_fenc_name, fenc_obj) = vkey
+        .encrypt_full_file("nested/secret.pem", b"PEM_PAYLOAD=legacy_fenc\n")
+        .unwrap();
+    let stem = modern_fenc_name.strip_suffix(FULL_ENC_SUFFIX).unwrap();
+    let legacy_fenc_path = repo_dir.join("sec").join(format!("{stem}.fenc"));
+    fs::write(&legacy_fenc_path, fenc_obj.to_bytes()).unwrap();
+
+    let chk_legacy = run_cli(&["check", "--json"], None);
+    assert_eq!(chk_legacy.status.code(), Some(1));
+    let chk_err: serde_json::Value = serde_json::from_slice(&chk_legacy.stdout).unwrap();
+    assert_eq!(chk_err["error_code"], "ENCRYPTION_MISMATCH");
+
+    let tidy_mig = run_cli(&["tidy", "-y", "--json"], None);
+    assert_eq!(
+        tidy_mig.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&tidy_mig.stderr)
+    );
+    assert!(!repo_dir.join("sec/api.key.enc").exists());
+    assert!(repo_dir.join("sec/api.key.dotler.enc").is_file());
+    assert!(!legacy_fenc_path.exists());
+    assert!(repo_dir.join("sec").join(&modern_fenc_name).is_file());
+    // User's plain `openssl_backup.enc` remains untouched
+    assert_eq!(
+        fs::read(repo_dir.join("certs/openssl_backup.enc")).unwrap(),
+        user_openssl_blob
+    );
+
+    assert_eq!(run_cli(&["check", "--json"], None).status.code(), Some(0));
+    assert_eq!(
+        run_cli(&["export", "-y", "--json"], None).status.code(),
+        Some(0)
+    );
+    assert_eq!(
+        fs::read(sec_os.join("api.key")).unwrap(),
+        b"API_TOKEN=legacy_enc\n"
+    );
+    assert_eq!(
+        fs::read(sec_os.join("nested/secret.pem")).unwrap(),
+        b"PEM_PAYLOAD=legacy_fenc\n"
+    );
 }

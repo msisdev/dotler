@@ -236,14 +236,14 @@ recovery_slot = "{}"
 
 [secure]
 os-nux = "~/.config/app"
-files = "@token.enc"
+files = "token enc"
 "#,
         remote_vault_cfg.vault_id, remote_vault_cfg.password_slot, remote_vault_cfg.recovery_slot,
     );
 
     let mock_repo = MockGitRepo::new(
         &remote_toml,
-        &[("secure/token.enc", &encrypted_remote.to_bytes())],
+        &[("secure/token.dotler.enc", &encrypted_remote.to_bytes())],
     );
     let url = parse_url(&mock_repo.clone_url).unwrap();
     let dest = sandbox.root.path().join("cloned_rekey");
@@ -261,7 +261,7 @@ files = "@token.enc"
     .expect("Clone with in-memory Re-Keying must succeed");
 
     assert_eq!(report.destination, dest);
-    let rekeyed_file_path = dest.join("secure/token.enc");
+    let rekeyed_file_path = dest.join("secure/token.dotler.enc");
     assert!(rekeyed_file_path.is_file());
 
     let rekeyed_bytes = fs::read(&rekeyed_file_path).unwrap();

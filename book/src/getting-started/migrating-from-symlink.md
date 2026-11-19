@@ -4,7 +4,7 @@
 
 - **Broken links on atomic save**: Many editors and tools save files by writing a temporary file and renaming it, replacing your symlink with a regular file.
 - **Unwanted runtime files in Git**: Symlinking an entire config directory exposes cache, lock, and log files directly inside your Git repository.
-- **No per-file encryption**: A symlink must point to a plaintext file on disk, so encrypted `.enc` files cannot be stored directly in the repository without a separate build step.
+- **No per-file encryption**: A symlink must point to a plaintext file on disk, so encrypted `.dotler.enc` / `.dotler.fenc` files cannot be stored directly in the repository without a separate build step.
 - **Windows permission issues**: Creating symlinks on Windows requires Administrator privileges or Developer Mode.
 
 ## How to Migrate

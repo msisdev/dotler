@@ -17,7 +17,10 @@ use crate::config::state::{
 use crate::core::context::CoreContext;
 use crate::core::vault_loader::unlock_vault_if_needed;
 use crate::crypto::ExposeSecret;
-use crate::crypto::vault::{EncryptedFile, FullEncryptedFile, VaultKey};
+use crate::crypto::vault::{
+    EncryptedFile, FullEncryptedFile, VaultKey, is_content_enc_name, is_full_enc_name,
+    strip_content_enc_suffix,
+};
 use crate::engine::EngineError;
 use crate::engine::git_transport::{GitRunner, TempDirGuard};
 use crate::engine::observer::{
@@ -191,8 +194,8 @@ pub fn install_remote_with_options(
                 .to_string_lossy()
                 .to_string();
             let raw_content = fs::read(entry.path())?;
-            let is_fenc = rel_path_str.ends_with(".fenc");
-            let is_enc = rel_path_str.ends_with(".enc");
+            let is_fenc = is_full_enc_name(&rel_path_str);
+            let is_enc = is_content_enc_name(&rel_path_str);
 
             let (clean_rel, mode, plaintext_bytes) = if is_fenc {
                 let key = if let Some(override_key) = vault_key_override {
@@ -220,14 +223,13 @@ pub fn install_remote_with_options(
                     return Err(EngineError::EncryptionMismatch {
                         path: entry.path().to_path_buf(),
                         reason: format!(
-                            "Remote repository file '{rel_path_str}' (.fenc) conflicts with selection rule in dotler.toml."
+                            "Remote repository file '{rel_path_str}' (.dotler.fenc) conflicts with selection rule in dotler.toml."
                         ),
                     });
                 }
                 (dec_rel, mode, plain_sec.expose_secret().clone())
             } else {
-                let clean_rel = rel_path_str
-                    .strip_suffix(".enc")
+                let clean_rel = strip_content_enc_suffix(&rel_path_str)
                     .map(str::to_string)
                     .unwrap_or_else(|| rel_path_str.clone());
                 let mode = evaluate_selection(&rules, &clean_rel)
@@ -733,8 +735,8 @@ mod tests {
         let (_git_tmp, url) = create_test_bare_repo(
             &remote_toml,
             &[
-                ("sec/.env.enc", &enc_plain),
-                ("sec/.path_env.enc", &enc_tmpl),
+                ("sec/.env.dotler.enc", &enc_plain),
+                ("sec/.path_env.dotler.enc", &enc_tmpl),
             ],
         );
 

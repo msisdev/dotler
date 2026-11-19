@@ -49,23 +49,35 @@ pub fn has_encrypted_rules(repo_cfg: &RepoConfig) -> bool {
     false
 }
 
-/// Returns `true` if `path` has a recognized encrypted dotfile extension (`.enc` or `.fenc`).
+/// Returns `true` if `path` has a recognized encrypted dotfile suffix (`.dotler.enc` or `.dotler.fenc`).
 pub fn is_encrypted_repo_extension(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|s| s.to_str()),
-        Some("enc" | "fenc")
-    )
+    path.file_name().and_then(|s| s.to_str()).is_some_and(|n| {
+        crate::crypto::is_content_enc_name(n) || crate::crypto::is_full_enc_name(n)
+    })
 }
 
-/// Returns `true` if any group directory in `repo_path` contains a `.enc` or `.fenc` file.
+/// Returns `true` if any group directory in `repo_path` contains a `.dotler.enc`, `.dotler.fenc`,
+/// or vault-matching legacy `.enc`/`.fenc` archive.
 pub fn has_encrypted_repo_files(repo_path: &Path, repo_cfg: &RepoConfig) -> bool {
+    let expected_vid = repo_cfg.vault.as_ref().map(|v| v.vault_id.as_str());
     for g_name in repo_cfg.groups.keys() {
         let group_dir = repo_path.join(g_name);
         if !group_dir.is_dir() {
             continue;
         }
         for entry in WalkDir::new(&group_dir).into_iter().filter_map(|e| e.ok()) {
-            if entry.file_type().is_file() && is_encrypted_repo_extension(entry.path()) {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            if is_encrypted_repo_extension(entry.path()) {
+                return true;
+            }
+            let fname = entry.file_name().to_string_lossy();
+            if (fname.ends_with(crate::crypto::LEGACY_CONTENT_ENC_SUFFIX)
+                || fname.ends_with(crate::crypto::LEGACY_FULL_ENC_SUFFIX))
+                && let Ok(bytes) = fs::read(entry.path())
+                && crate::crypto::is_legacy_dotler_archive_bytes(&bytes, expected_vid)
+            {
                 return true;
             }
         }
@@ -630,8 +642,8 @@ mod tests {
 
         let enc_a = vkey_a.encrypt_file(b"secret-a-payload").unwrap().to_bytes();
         let enc_b = vkey_b.encrypt_file(b"secret-b-payload").unwrap().to_bytes();
-        write_file_safe(&repo_a.join("shell/token.enc"), &enc_a).unwrap();
-        write_file_safe(&repo_b.join("shell/token.enc"), &enc_b).unwrap();
+        write_file_safe(&repo_a.join("shell/token.dotler.enc"), &enc_a).unwrap();
+        write_file_safe(&repo_b.join("shell/token.dotler.enc"), &enc_b).unwrap();
 
         let write_vault_manifest = |dir: &Path, vcfg: &VaultConfig| {
             let content = format!(
@@ -691,7 +703,7 @@ mod tests {
             (&repo_a, &enc_a, b"secret-a-payload".as_slice()),
             (&repo_b, &enc_b, b"secret-b-payload".as_slice()),
         ] {
-            let disk_enc = fs::read(repo_dir.join("shell/token.enc")).unwrap();
+            let disk_enc = fs::read(repo_dir.join("shell/token.dotler.enc")).unwrap();
             assert_eq!(&disk_enc, orig_enc);
             let vcfg = RepoConfig::load(&repo_dir.join("dotler.toml"))
                 .unwrap()

@@ -173,7 +173,7 @@ files = """
         "[core]\nexcludesfile = {{ $HOME }}/.gitignore_global\n"
     );
 
-    let repo_creds_enc = sb.read_repo_file("shell/.credentials.enc").unwrap();
+    let repo_creds_enc = sb.read_repo_file("shell/.credentials.dotler.enc").unwrap();
     let enc_file = EncryptedFile::from_bytes(&repo_creds_enc).unwrap();
     let dec_creds = vault_key.decrypt_file(&enc_file).unwrap();
     assert_eq!(
@@ -188,7 +188,7 @@ files = """
     assert_eq!(imp2.skipped, 2);
     assert_eq!(imp2.processed, 0);
     assert_eq!(
-        sb.read_repo_file("shell/.credentials.enc").unwrap(),
+        sb.read_repo_file("shell/.credentials.dotler.enc").unwrap(),
         repo_creds_enc
     );
 

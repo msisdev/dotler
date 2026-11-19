@@ -42,7 +42,7 @@ dotler git clone gh:user/dotfiles
 dotler git clone gh:user/dotfiles nvim zsh
 ```
 
-- **Cross-Vault Re-Keying**: If the remote repository contains encrypted `.enc` files encrypted under a different vault, `dotler git clone` decrypts them in memory using the source vault passphrase and re-encrypts them under your local repository's vault key without writing intermediate plaintext to disk.
+- **Cross-Vault Re-Keying**: If the remote repository contains encrypted `.dotler.enc` or `.dotler.fenc` files encrypted under a different vault, `dotler git clone` decrypts them in memory using the source vault passphrase and re-encrypts them under your local repository's vault key without writing intermediate plaintext to disk.
 
 ## 4. Install Directly to Your System (`git install` & `git uninstall`)
 

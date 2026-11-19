@@ -76,7 +76,9 @@ files = "secret.txt enc"
     let report1 = engine.import_files(&plans, &lock, false).unwrap();
     assert_eq!(report1.processed, 1);
 
-    let enc_bytes_1 = sandbox.read_repo_file("secret/secret.txt.enc").unwrap();
+    let enc_bytes_1 = sandbox
+        .read_repo_file("secret/secret.txt.dotler.enc")
+        .unwrap();
 
     // Re-plan and re-import identical content
     let plans2 = engine.plan(None, &lock).unwrap();
@@ -84,7 +86,9 @@ files = "secret.txt enc"
     assert_eq!(report2.skipped, 1);
     assert_eq!(report2.processed, 0);
 
-    let enc_bytes_2 = sandbox.read_repo_file("secret/secret.txt.enc").unwrap();
+    let enc_bytes_2 = sandbox
+        .read_repo_file("secret/secret.txt.dotler.enc")
+        .unwrap();
     assert_eq!(enc_bytes_1, enc_bytes_2);
 }
 
@@ -120,7 +124,9 @@ files = "secret.txt enc"
     let report2 = engine.import_files(&plans2, &lock, false).unwrap();
     assert_eq!(report2.processed, 1);
 
-    let enc_bytes = sandbox.read_repo_file("secret/secret.txt.enc").unwrap();
+    let enc_bytes = sandbox
+        .read_repo_file("secret/secret.txt.dotler.enc")
+        .unwrap();
     let enc_file = EncryptedFile::from_bytes(&enc_bytes).unwrap();
     let decrypted = vault_key.decrypt_file(&enc_file).unwrap();
     assert_eq!(decrypted.expose_secret(), b"v2\n");
@@ -197,7 +203,9 @@ files = "secret.txt enc"
     assert_eq!(report.encrypted_in_repo, 1);
 
     assert!(sandbox.read_repo_file("secret/secret.txt").is_none());
-    let enc_bytes = sandbox.read_repo_file("secret/secret.txt.enc").unwrap();
+    let enc_bytes = sandbox
+        .read_repo_file("secret/secret.txt.dotler.enc")
+        .unwrap();
     let enc_file = EncryptedFile::from_bytes(&enc_bytes).unwrap();
     let dec = vault_key.decrypt_file(&enc_file).unwrap();
     assert_eq!(dec.expose_secret(), b"secret-plain\n");
@@ -225,7 +233,7 @@ files = "secret.txt"
     let config = RepoConfig::parse(&toml).unwrap();
 
     let enc = vault_key.encrypt_file(b"secret-plain\n").unwrap();
-    sandbox.write_repo_file("secret/secret.txt.enc", &enc.to_bytes());
+    sandbox.write_repo_file("secret/secret.txt.dotler.enc", &enc.to_bytes());
 
     let engine = sandbox.sync_engine(&config, Some(&vault_key));
     let report = engine
@@ -233,7 +241,11 @@ files = "secret.txt"
         .unwrap();
     assert_eq!(report.decrypted_in_repo, 1);
 
-    assert!(sandbox.read_repo_file("secret/secret.txt.enc").is_none());
+    assert!(
+        sandbox
+            .read_repo_file("secret/secret.txt.dotler.enc")
+            .is_none()
+    );
     let plain = sandbox.read_repo_file("secret/secret.txt").unwrap();
     assert_eq!(plain, b"secret-plain\n");
 }
@@ -628,7 +640,12 @@ files = "* enc"
     assert_eq!(initial_imp.processed, 3);
     assert!(sandbox.repo_dir.join("notes/old.md").is_file());
     assert!(sandbox.repo_dir.join("notes/nested/moved.md").is_file());
-    assert!(sandbox.repo_dir.join("secrets/old.key.enc").is_file());
+    assert!(
+        sandbox
+            .repo_dir
+            .join("secrets/old.key.dotler.enc")
+            .is_file()
+    );
 
     // Delete old.md and old.key, rename nested/moved.md -> renamed.md, and add un-exported remote file.
     fs::remove_file(sandbox.home_dir.join(".config/notes/old.md")).unwrap();
@@ -644,7 +661,7 @@ files = "* enc"
     assert!(!sandbox.repo_dir.join("notes/old.md").exists());
     assert!(!sandbox.repo_dir.join("notes/nested/moved.md").exists());
     assert!(!sandbox.repo_dir.join("notes/nested").exists());
-    assert!(!sandbox.repo_dir.join("secrets/old.key.enc").exists());
+    assert!(!sandbox.repo_dir.join("secrets/old.key.dotler.enc").exists());
     assert!(sandbox.repo_dir.join("notes/renamed.md").is_file());
     assert!(
         sandbox
@@ -755,7 +772,12 @@ files = "* enc"
 
     assert!(!sandbox.repo_dir.join("notes/deep/deleted.md").exists());
     assert!(!sandbox.repo_dir.join("notes/deep").exists());
-    assert!(!sandbox.repo_dir.join("secrets/gone.key.enc").exists());
+    assert!(
+        !sandbox
+            .repo_dir
+            .join("secrets/gone.key.dotler.enc")
+            .exists()
+    );
     assert!(sandbox.repo_dir.join("notes/keep.md").is_file());
     assert!(sandbox.repo_dir.join("notes/remote_new.md").is_file());
 

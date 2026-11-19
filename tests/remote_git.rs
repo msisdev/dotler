@@ -512,7 +512,7 @@ fn test_cli_git_clone_with_local_repo_override_rekeys_enc() {
         "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[sec]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nos-bsd = \"~\"\nfiles = \".secret enc\"\n",
         vcfg_remote.vault_id, vcfg_remote.password_slot, vcfg_remote.recovery_slot
     );
-    let mock_remote = MockBareRepo::new(&remote_toml, &[("sec/.secret.enc", &remote_enc)]);
+    let mock_remote = MockBareRepo::new(&remote_toml, &[("sec/.secret.dotler.enc", &remote_enc)]);
 
     let out = sb
         .bin_cmd_with_passphrase("shared-cli-clone-pass-999")
@@ -534,7 +534,8 @@ fn test_cli_git_clone_with_local_repo_override_rekeys_enc() {
     assert_eq!(cloned_cfg.vault.unwrap().vault_id, vcfg_local.vault_id);
 
     let cloned_enc =
-        EncryptedFile::from_bytes(&fs::read(cloned_dir.join("sec/.secret.enc")).unwrap()).unwrap();
+        EncryptedFile::from_bytes(&fs::read(cloned_dir.join("sec/.secret.dotler.enc")).unwrap())
+            .unwrap();
     assert_eq!(cloned_enc.vault_id, vkey_local.vault_id_bytes());
     assert_eq!(
         vkey_local

@@ -16,7 +16,10 @@ use crate::config::state::{DotlerLockGuard, StateDb, SyncedFileRecord};
 use crate::core::context::CoreContext;
 use crate::core::vault_loader::{has_encrypted_rules, unlock_vault_if_needed};
 use crate::crypto::ExposeSecret;
-use crate::crypto::vault::{EncryptedFile, FullEncryptedFile, VaultKey};
+use crate::crypto::vault::{
+    CONTENT_ENC_SUFFIX, EncryptedFile, FULL_ENC_SUFFIX, FullEncryptedFile,
+    LEGACY_CONTENT_ENC_SUFFIX, LEGACY_FULL_ENC_SUFFIX, VaultKey, is_legacy_dotler_archive_bytes,
+};
 use crate::engine::EngineError;
 pub use crate::engine::check::{FileActionPlan, FileSyncStatus, plan};
 pub use crate::engine::export::{export_files, run_export};
@@ -399,10 +402,36 @@ fn all_repo_paths_for_plan(engine: &SyncEngine, plan: &FileActionPlan) -> Vec<Pa
     let group_repo_dir = engine.repo_dir.join(&plan.group_name);
     let mut paths = vec![
         group_repo_dir.join(&plan.relative_path),
-        group_repo_dir.join(format!("{}.enc", plan.relative_path)),
+        group_repo_dir.join(format!("{}{CONTENT_ENC_SUFFIX}", plan.relative_path)),
     ];
+    let expected_vid = engine
+        .repo_config
+        .vault
+        .as_ref()
+        .map(|v| v.vault_id.as_str());
+    let legacy_enc =
+        group_repo_dir.join(format!("{}{LEGACY_CONTENT_ENC_SUFFIX}", plan.relative_path));
+    if legacy_enc != plan.repo_file_path
+        && legacy_enc.is_file()
+        && fs::read(&legacy_enc)
+            .map(|b| is_legacy_dotler_archive_bytes(&b, expected_vid))
+            .unwrap_or(false)
+    {
+        paths.push(legacy_enc);
+    }
     if let Some(key) = engine.vault_key {
-        paths.push(group_repo_dir.join(key.derive_full_enc_filename(&plan.relative_path)));
+        let fenc_name = key.derive_full_enc_filename(&plan.relative_path);
+        paths.push(group_repo_dir.join(&fenc_name));
+        if let Some(stem) = fenc_name.strip_suffix(FULL_ENC_SUFFIX) {
+            let legacy_fenc = group_repo_dir.join(format!("{stem}{LEGACY_FULL_ENC_SUFFIX}"));
+            if legacy_fenc.is_file()
+                && fs::read(&legacy_fenc)
+                    .map(|b| is_legacy_dotler_archive_bytes(&b, expected_vid))
+                    .unwrap_or(false)
+            {
+                paths.push(legacy_fenc);
+            }
+        }
     }
     paths
 }
@@ -779,20 +808,20 @@ mod tests {
         assert_eq!(rep2.processed, 0);
 
         // 3. `force = true` forces re-encryption even with identical db_hash
-        let before_bytes = fs::read(repo_dir.join("sec/secret.env.enc")).unwrap();
+        let before_bytes = fs::read(repo_dir.join("sec/secret.env.dotler.enc")).unwrap();
         let mut obs = NoopObserver;
         let rep_force = engine
             .import_files_with_options(&plans2, &lock, true, false, &mut obs)
             .unwrap();
         assert_eq!(rep_force.processed, 1);
         assert_eq!(rep_force.skipped, 0);
-        let after_force_bytes = fs::read(repo_dir.join("sec/secret.env.enc")).unwrap();
+        let after_force_bytes = fs::read(repo_dir.join("sec/secret.env.dotler.enc")).unwrap();
         assert_ne!(before_bytes, after_force_bytes);
 
-        // 4. Replace repo .enc with foreign-vault ciphertext while db_hash still matches OS file:
+        // 4. Replace repo .dotler.enc with foreign-vault ciphertext while db_hash still matches OS file:
         //    normal import preserves O(1) db_hash bypass, while `--force` re-encrypts under vkey_a.
         let foreign_enc = vkey_b.encrypt_file(secret_bytes).unwrap().to_bytes();
-        fs::write(repo_dir.join("sec/secret.env.enc"), &foreign_enc).unwrap();
+        fs::write(repo_dir.join("sec/secret.env.dotler.enc"), &foreign_enc).unwrap();
         let plans_foreign = engine.plan(None, &lock).unwrap();
         let rep_foreign_normal = engine.import_files(&plans_foreign, &lock, false).unwrap();
         assert_eq!(rep_foreign_normal.skipped, 1);
@@ -801,22 +830,24 @@ mod tests {
             .import_files_with_options(&plans_foreign, &lock, true, false, &mut obs)
             .unwrap();
         assert_eq!(rep_foreign_force.processed, 1);
-        let healed_foreign =
-            EncryptedFile::from_bytes(&fs::read(repo_dir.join("sec/secret.env.enc")).unwrap())
-                .unwrap();
+        let healed_foreign = EncryptedFile::from_bytes(
+            &fs::read(repo_dir.join("sec/secret.env.dotler.enc")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(healed_foreign.vault_id, vkey_a.vault_id_bytes());
 
-        // 5. Corrupt repo .enc header while db_hash matches OS file:
-        //    `--force` restores a valid .enc archive decryptable under vkey_a.
-        fs::write(repo_dir.join("sec/secret.env.enc"), b"corrupt-data").unwrap();
+        // 5. Corrupt repo .dotler.enc header while db_hash matches OS file:
+        //    `--force` restores a valid .dotler.enc archive decryptable under vkey_a.
+        fs::write(repo_dir.join("sec/secret.env.dotler.enc"), b"corrupt-data").unwrap();
         let plans_corrupt = engine.plan(None, &lock).unwrap();
         let rep_corrupt = engine
             .import_files_with_options(&plans_corrupt, &lock, true, false, &mut obs)
             .unwrap();
         assert_eq!(rep_corrupt.processed, 1);
-        let healed_corrupt =
-            EncryptedFile::from_bytes(&fs::read(repo_dir.join("sec/secret.env.enc")).unwrap())
-                .unwrap();
+        let healed_corrupt = EncryptedFile::from_bytes(
+            &fs::read(repo_dir.join("sec/secret.env.dotler.enc")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             vkey_a
                 .decrypt_file(&healed_corrupt)

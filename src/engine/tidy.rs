@@ -1,4 +1,4 @@
-//! Repository in-place format reconciliation (`foo` <-> `foo.enc`) and orphan cleanup (`tidy`).
+//! Repository in-place format reconciliation (`foo` <-> `foo.dotler.enc` / `<token>.dotler.fenc`) and orphan cleanup (`tidy`).
 
 use std::collections::HashSet;
 use std::fs;
@@ -17,7 +17,11 @@ use crate::core::vault_loader::{
     has_encrypted_repo_files, has_encrypted_rules, unlock_vault_if_needed,
 };
 use crate::crypto::ExposeSecret;
-use crate::crypto::vault::{EncryptedFile, FullEncryptedFile};
+use crate::crypto::vault::{
+    CONTENT_ENC_SUFFIX, EncryptedFile, FullEncryptedFile, LEGACY_CONTENT_ENC_SUFFIX,
+    is_full_enc_name, is_legacy_dotler_archive_bytes, parse_legacy_fenc_filename_stem,
+    strip_content_enc_suffix,
+};
 use crate::engine::EngineError;
 use crate::engine::check::{FileSyncStatus, plan};
 use crate::engine::observer::{
@@ -178,6 +182,11 @@ pub fn tidy_groups_with_observer(
             .unwrap_or_else(|| engine.effective_home_dir());
 
         let rules = parse_selection_rules(&group_cfg.files)?;
+        let expected_vid = engine
+            .repo_config
+            .vault
+            .as_ref()
+            .map(|v| v.vault_id.as_str());
 
         for entry in WalkDir::new(&group_repo_dir)
             .into_iter()
@@ -197,15 +206,35 @@ pub fn tidy_groups_with_observer(
                 Err(_) => continue,
             };
             let rel_str = rel.to_string_lossy().to_string();
-            let (src_kind, clean_rel_owned) = if rel_str.ends_with(".fenc") {
+            let (src_kind, clean_rel_owned) = if is_full_enc_name(&rel_str) {
                 let vault_key = require_vault(engine, "decryption")?;
                 let raw_bytes = fs::read(path)?;
                 let fenc = FullEncryptedFile::from_bytes(&raw_bytes)?;
                 let (dec_rel, _) = vault_key.decrypt_full_file(&file_name, &fenc)?;
                 validate_rule_pattern(&dec_rel)?;
                 (RepoArtifactKind::FullEnc, dec_rel)
-            } else if let Some(stripped) = rel_str.strip_suffix(".enc") {
+            } else if let Some(stripped) = strip_content_enc_suffix(&rel_str) {
                 (RepoArtifactKind::ContentEnc, stripped.to_string())
+            } else if !rel_str.contains('/')
+                && parse_legacy_fenc_filename_stem(&file_name).is_some()
+            {
+                let raw_bytes = fs::read(path)?;
+                if is_legacy_dotler_archive_bytes(&raw_bytes, expected_vid) {
+                    let vault_key = require_vault(engine, "decryption")?;
+                    let fenc = FullEncryptedFile::from_bytes(&raw_bytes)?;
+                    let (dec_rel, _) = vault_key.decrypt_full_file(&file_name, &fenc)?;
+                    validate_rule_pattern(&dec_rel)?;
+                    (RepoArtifactKind::FullEnc, dec_rel)
+                } else {
+                    (RepoArtifactKind::Plain, rel_str.clone())
+                }
+            } else if let Some(stripped) = rel_str.strip_suffix(LEGACY_CONTENT_ENC_SUFFIX) {
+                let raw_bytes = fs::read(path)?;
+                if is_legacy_dotler_archive_bytes(&raw_bytes, expected_vid) {
+                    (RepoArtifactKind::ContentEnc, stripped.to_string())
+                } else {
+                    (RepoArtifactKind::Plain, rel_str.clone())
+                }
             } else {
                 (RepoArtifactKind::Plain, rel_str.clone())
             };
@@ -284,7 +313,8 @@ pub fn tidy_groups_with_observer(
                     }
                 }
                 Some(m) if m.is_content_encrypted() => {
-                    if src_kind == RepoArtifactKind::ContentEnc {
+                    let enc_path = group_repo_dir.join(format!("{clean_rel}{CONTENT_ENC_SUFFIX}"));
+                    if src_kind == RepoArtifactKind::ContentEnc && path == enc_path {
                         push_repo_preview(
                             &mut preview_entries,
                             group_name,
@@ -295,7 +325,6 @@ pub fn tidy_groups_with_observer(
                         );
                     } else {
                         require_vault(engine, "encryption")?;
-                        let enc_path = group_repo_dir.join(format!("{clean_rel}.enc"));
                         push_repo_preview(
                             &mut preview_entries,
                             group_name,
@@ -773,7 +802,7 @@ mod tests {
         let rep = env.run(&toml, Some(&vkey), TidyOrphanPolicy::KeepOnOs);
         assert_eq!(rep.encrypted_in_repo, 1);
         assert!(!env.repo_dir.join("sec/secret.txt").exists());
-        assert!(env.repo_dir.join("sec/secret.txt.enc").is_file());
+        assert!(env.repo_dir.join("sec/secret.txt.dotler.enc").is_file());
     }
 
     #[test]
@@ -878,7 +907,7 @@ mod tests {
         let (vcfg, vkey, _) = init_vault(&pass).unwrap();
         let sec_os = env.home_dir.join(".config/sec");
         fs::create_dir_all(&sec_os).unwrap();
-        let enc_repo = env.repo_dir.join("sec/old.key.enc");
+        let enc_repo = env.repo_dir.join("sec/old.key.dotler.enc");
         fs::create_dir_all(enc_repo.parent().unwrap()).unwrap();
         let enc_bytes = vkey.encrypt_file(b"secret").unwrap().to_bytes();
         fs::write(&enc_repo, &enc_bytes).unwrap();

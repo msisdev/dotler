@@ -78,7 +78,7 @@ pub enum Command {
     /// Export files from dotfile repository to OS
     Export(ExportArgs),
 
-    /// Format conversion (foo <-> foo.enc) and orphan cleanup
+    /// Format conversion (foo <-> foo.dotler.enc / <token>.dotler.fenc) and orphan cleanup
     Tidy(TidyArgs),
 
     /// Manage repository encryption vault slots and OS keyring readiness

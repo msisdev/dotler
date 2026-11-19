@@ -10,6 +10,10 @@ use crate::crypto::vault::{
 };
 use crate::crypto::{ExposeSecret, Secret, SecretString, fill_random_bytes};
 
+pub const CONTENT_ENC_SUFFIX: &str = ".dotler.enc";
+pub const FULL_ENC_SUFFIX: &str = ".dotler.fenc";
+pub const LEGACY_CONTENT_ENC_SUFFIX: &str = ".enc";
+pub const LEGACY_FULL_ENC_SUFFIX: &str = ".fenc";
 pub const VAULT_SLOT_LEN: usize = 88;
 pub const ENC_FILE_MIN_LEN: usize = 48;
 pub const FENC_FILE_MIN_LEN: usize = 53;
@@ -17,14 +21,51 @@ pub const FULL_ENC_TOKEN_HEX_LEN: usize = 32;
 pub const FULL_ENC_AAD_DOMAIN: &[u8] = b"dotler-fenc-v1";
 pub const FULL_ENC_MAX_PATH_BYTES: usize = 4096;
 
+pub fn is_content_enc_name(name: &str) -> bool {
+    name.ends_with(CONTENT_ENC_SUFFIX)
+}
+
+pub fn is_full_enc_name(name: &str) -> bool {
+    name.ends_with(FULL_ENC_SUFFIX)
+}
+
+pub fn strip_content_enc_suffix(name: &str) -> Option<&str> {
+    name.strip_suffix(CONTENT_ENC_SUFFIX)
+}
+
 pub fn parse_fenc_filename_stem(name_or_stem: &str) -> Option<&str> {
-    let stem = name_or_stem.strip_suffix(".fenc")?;
+    let stem = name_or_stem.strip_suffix(FULL_ENC_SUFFIX)?;
     if stem.len() == FULL_ENC_TOKEN_HEX_LEN
         && stem.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
     {
         Some(stem)
     } else {
         None
+    }
+}
+
+pub fn parse_legacy_fenc_filename_stem(name_or_stem: &str) -> Option<&str> {
+    if name_or_stem.ends_with(FULL_ENC_SUFFIX) {
+        return None;
+    }
+    let stem = name_or_stem.strip_suffix(LEGACY_FULL_ENC_SUFFIX)?;
+    if stem.len() == FULL_ENC_TOKEN_HEX_LEN
+        && stem.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        Some(stem)
+    } else {
+        None
+    }
+}
+
+pub fn is_legacy_dotler_archive_bytes(bytes: &[u8], expected_vid_hex: Option<&str>) -> bool {
+    if bytes.len() < ENC_FILE_MIN_LEN {
+        return false;
+    }
+    if let Some(expected) = expected_vid_hex.map(str::trim).filter(|s| !s.is_empty()) {
+        bytes_to_hex(&bytes[0..8]) == expected
+    } else {
+        false
     }
 }
 
@@ -127,7 +168,7 @@ impl VaultKey {
 
         let vault_id = self.vault_id_bytes();
         let token_bytes = self.derive_full_enc_token_bytes(&norm_rel);
-        let filename = format!("{}.fenc", bytes_to_hex(&token_bytes));
+        let filename = format!("{}{FULL_ENC_SUFFIX}", bytes_to_hex(&token_bytes));
         let aad = build_full_enc_aad(&vault_id, &token_bytes);
 
         let mut envelope = Zeroizing::new(Vec::with_capacity(4 + norm_rel.len() + plaintext.len()));
@@ -175,7 +216,8 @@ impl VaultKey {
         }
 
         let stem = file_name_or_stem
-            .strip_suffix(".fenc")
+            .strip_suffix(FULL_ENC_SUFFIX)
+            .or_else(|| file_name_or_stem.strip_suffix(LEGACY_FULL_ENC_SUFFIX))
             .unwrap_or(file_name_or_stem);
         let token_bytes = decode_hex_16(stem)?;
         let aad = build_full_enc_aad(&fenc.vault_id, &token_bytes);
@@ -698,7 +740,11 @@ mod tests {
             .encrypt_full_file("./clients/acme-prod/api.key", b"updated")
             .unwrap();
         assert_eq!(fname_a, fname_a2, "path token must be deterministic");
-        assert_eq!(fname_a.len(), FULL_ENC_TOKEN_HEX_LEN + 5);
+        assert_eq!(
+            fname_a.len(),
+            FULL_ENC_TOKEN_HEX_LEN + FULL_ENC_SUFFIX.len()
+        );
+        assert!(fname_a.ends_with(FULL_ENC_SUFFIX));
         assert!(parse_fenc_filename_stem(&fname_a).is_some());
         assert!(!fname_a.contains("acme"));
 

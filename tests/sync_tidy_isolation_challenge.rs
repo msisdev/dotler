@@ -361,7 +361,7 @@ empty_enc.sec enc
     assert!(
         sandbox
             .repo_dir
-            .join("empty_group/empty_enc.sec.enc")
+            .join("empty_group/empty_enc.sec.dotler.enc")
             .is_file()
     );
 

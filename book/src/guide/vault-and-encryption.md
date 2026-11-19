@@ -68,7 +68,7 @@ dotler vault from file ~/other-dotfiles
 dotler vault from file ./vault.json
 ```
 
-In all three subcommands (`file`, `git`, `url`), any `[<group>]` sections in the source file are ignored. If the imported `vault_id` is already registered in your OS keyring, `dotler vault from` unlocks `password_slot` without prompting; otherwise it prompts for the passphrase, verifies `password_slot`, and stores the `vault_id` entry in your OS keyring before writing the vault configuration to the target `dotler.toml`. If the target repository already has `.enc` files encrypted under a different vault, `dotler vault from` automatically decrypts them with the previous vault key and re-encrypts them in memory under the newly imported vault before atomically updating `dotler.toml`.
+In all three subcommands (`file`, `git`, `url`), any `[<group>]` sections in the source file are ignored. If the imported `vault_id` is already registered in your OS keyring, `dotler vault from` unlocks `password_slot` without prompting; otherwise it prompts for the passphrase, verifies `password_slot`, and stores the `vault_id` entry in your OS keyring before writing the vault configuration to the target `dotler.toml`. If the target repository already has `.dotler.enc` or `.dotler.fenc` files encrypted under a different vault, `dotler vault from` automatically decrypts them with the previous vault key and re-encrypts them in memory under the newly imported vault before atomically updating `dotler.toml`.
 
 ## 3. Encrypting & Decrypting Files (`enc` / `enc=cont` & `enc=full`)
 
@@ -87,10 +87,10 @@ config tmpl
 """
 ```
 
-- `enc` / `enc=cont` (Content Encryption): Stores `<group>/<rel_path>.enc` in the repository while keeping relative paths readable.
-- `enc=full` (Full Path + Content Encryption): Stores `<group>/<32-hex>.fenc` flattened at the group root with the original relative path encrypted inside the archive (use wildcard or directory rules such as `* enc=full` or `*.pem enc=full` so literal filenames do not appear in `dotler.toml`; `dotler check` emits a hint if a literal filename is written directly with `enc=full`).
-- `dotler import` & `dotler export`: Automatically encrypt and decrypt `.enc` and `.fenc` files (restoring original nested subdirectories on `export`).
-- `dotler tidy`: Converts existing repository files in place across plaintext, `.enc`, and `.fenc` whenever selection rules change, pruning empty subdirectories automatically.
+- `enc` / `enc=cont` (Content Encryption): Stores `<group>/<rel_path>.dotler.enc` in the repository while keeping relative paths readable.
+- `enc=full` (Full Path + Content Encryption): Stores `<group>/<32-hex>.dotler.fenc` flattened at the group root with the original relative path encrypted inside the archive (use wildcard or directory rules such as `* enc=full` or `*.pem enc=full` so literal filenames do not appear in `dotler.toml`; `dotler check` emits a hint if a literal filename is written directly with `enc=full`).
+- `dotler import` & `dotler export`: Automatically encrypt and decrypt `.dotler.enc` and `.dotler.fenc` files (restoring original nested subdirectories on `export`).
+- `dotler tidy`: Converts existing repository files in place across plaintext, `.dotler.enc`, and `.dotler.fenc` whenever selection rules change (and automatically migrates legacy `.enc` / `.fenc` archives whose header matches `vault_id`), pruning empty subdirectories automatically.
 
 ## 4. OS Keyring Integration
 
@@ -108,7 +108,7 @@ dotler vault init
 
 ### Rotate Passphrase (`vault rotate`)
 
-Re-wraps `password_slot` using your new passphrase without re-encrypting any `.enc` files in the repository. By default, `dotler vault rotate` updates all locally registered repositories that share the current passphrase and updates the OS keyring in one step:
+Re-wraps `password_slot` using your new passphrase without re-encrypting any `.dotler.enc` / `.dotler.fenc` files in the repository. By default, `dotler vault rotate` updates all locally registered repositories that share the current passphrase and updates the OS keyring in one step:
 
 ```sh
 dotler vault rotate

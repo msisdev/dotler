@@ -27,10 +27,10 @@ files = """
 ```
 
 - `<pattern>`: Include matching file or directory as plaintext.
-- `<pattern> enc` (or `<pattern> enc=cont`): Include matching file or directory with content-only encryption (`<rel_path>.enc`).
-- `<pattern> enc=full`: Include matching file or directory with full path + content encryption (`<group>/<32-hex>.fenc`), hiding subdirectory and file names in the repository.
+- `<pattern> enc` (or `<pattern> enc=cont`): Include matching file or directory with content-only encryption (`<rel_path>.dotler.enc`).
+- `<pattern> enc=full`: Include matching file or directory with full path + content encryption (`<group>/<32-hex>.dotler.fenc`), hiding subdirectory and file names in the repository.
 - `<pattern> tmpl`: Include matching UTF-8 text file or directory with reversible `{{ $HOME }}` <-> OS home directory substitution (`import` replaces your home path with `{{ $HOME }}`; `export` and `git install` render `{{ $HOME }}` to the target machine's home path).
-- `<pattern> enc tmpl` / `<pattern> enc=full tmpl`: Combine `.enc` or `.fenc` encryption with `{{ $HOME }}` template substitution.
+- `<pattern> enc tmpl` / `<pattern> enc=full tmpl`: Combine `.dotler.enc` or `.dotler.fenc` encryption with `{{ $HOME }}` template substitution.
 - `!<pattern>`: Exclude matching file or directory.
 
 ## 3. Import from Your System

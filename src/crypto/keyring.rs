@@ -226,7 +226,9 @@ impl OsKeyring {
 }
 
 mod platform {
-    use super::{KEYRING_DEFAULT_USER, KEYRING_SERVICE_NAME, KeyringError};
+    use super::KeyringError;
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    use super::{KEYRING_DEFAULT_USER, KEYRING_SERVICE_NAME};
 
     #[cfg(target_os = "macos")]
     pub fn get_password(account: &str) -> Result<Option<String>, KeyringError> {
@@ -312,107 +314,22 @@ mod platform {
 
     #[cfg(all(unix, not(target_os = "macos")))]
     pub fn get_password(account: &str) -> Result<Option<String>, KeyringError> {
-        if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
-            return Ok(None);
-        }
-        let Ok(out) = std::process::Command::new("secret-tool")
-            .args([
-                "lookup",
-                "service",
-                KEYRING_SERVICE_NAME,
-                "username",
-                account,
-            ])
-            .output()
-        else {
-            return Ok(None);
-        };
-        if !out.status.success() {
-            return Ok(None);
-        }
-        let pass = String::from_utf8_lossy(&out.stdout)
-            .trim_end_matches(['\r', '\n'])
-            .to_string();
-        Ok(if pass.is_empty() { None } else { Some(pass) })
+        crate::crypto::secret_service::get_password(account)
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
     pub fn set_password(account: &str, secret: &str) -> Result<(), KeyringError> {
-        use std::io::Write;
-        use std::process::Stdio;
-        if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
-            return Err(KeyringError::BackendError(
-                "DBUS_SESSION_BUS_ADDRESS is not set".to_string(),
-            ));
-        }
-        let label = if account == KEYRING_DEFAULT_USER {
-            "--label=dotler".to_string()
-        } else {
-            format!("--label=dotler:{account}")
-        };
-        let mut child = std::process::Command::new("secret-tool")
-            .args([
-                "store",
-                &label,
-                "service",
-                KEYRING_SERVICE_NAME,
-                "username",
-                account,
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| KeyringError::BackendError(format!("secret-tool unavailable: {e}")))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(secret.as_bytes());
-        }
-        let out = child
-            .wait_with_output()
-            .map_err(|e| KeyringError::BackendError(e.to_string()))?;
-        if out.status.success() {
-            Ok(())
-        } else {
-            Err(KeyringError::BackendError(
-                String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            ))
-        }
+        crate::crypto::secret_service::set_password(account, secret)
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
     pub fn delete_password(account: &str) -> Result<(), KeyringError> {
-        if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
-            return Err(KeyringError::BackendError(
-                "DBUS_SESSION_BUS_ADDRESS is not set".to_string(),
-            ));
-        }
-        let _ = std::process::Command::new("secret-tool")
-            .args([
-                "clear",
-                "service",
-                KEYRING_SERVICE_NAME,
-                "username",
-                account,
-            ])
-            .output()
-            .map_err(|e| KeyringError::BackendError(format!("secret-tool unavailable: {e}")))?;
-        Ok(())
+        crate::crypto::secret_service::delete_password(account)
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
     pub fn delete_all_passwords(vault_ids: &[String]) -> Result<(), KeyringError> {
-        delete_password(KEYRING_DEFAULT_USER)?;
-        for vid in vault_ids {
-            let trimmed = vid.trim();
-            if !trimmed.is_empty() && trimmed != KEYRING_DEFAULT_USER {
-                delete_password(trimmed)?;
-            }
-        }
-        let _ = std::process::Command::new("secret-tool")
-            .args(["clear", "service", KEYRING_SERVICE_NAME])
-            .output()
-            .map_err(|e| KeyringError::BackendError(format!("secret-tool unavailable: {e}")))?;
-        Ok(())
+        crate::crypto::secret_service::delete_all_passwords(vault_ids)
     }
 
     #[cfg(target_os = "windows")]

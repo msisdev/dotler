@@ -2,6 +2,8 @@ pub mod cipher;
 pub mod keyring;
 pub mod mnemonic;
 pub mod passphrase;
+#[cfg(all(unix, not(target_os = "macos")))]
+pub mod secret_service;
 pub mod vault;
 #[allow(unused_imports)]
 pub(crate) use mnemonic as bip39_words;

@@ -8,6 +8,7 @@ pub mod output;
 pub mod render;
 pub mod update;
 pub mod vault;
+pub mod vault_from;
 
 use clap::Parser;
 use std::io::{IsTerminal, Write};

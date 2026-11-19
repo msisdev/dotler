@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::local::{LocalConfig, WalkDir, expand_tilde, find_ancestor_repo_dir};
+use crate::config::local::{LocalConfig, WalkDir};
 use crate::config::repo::{
     RepoConfig, VaultConfig, parse_selection_rules, rules_have_effective_encryption,
     update_vault_manifest_section,
@@ -158,36 +158,16 @@ pub fn rotate_vault_passphrases(
     new_hint: Option<&str>,
     is_interactive: bool,
 ) -> Result<VaultRotateReport, EngineError> {
-    let mut candidates: Vec<(String, PathBuf)> = Vec::new();
-    let explicit_repo = requested_label.is_some();
-
-    if let Some(label) = requested_label {
+    let candidates: Vec<(String, PathBuf)> = if let Some(label) = requested_label {
         let (resolved_label, path) = local_cfg
             .resolve_repo(Some(label))
             .map_err(EngineError::Config)?;
-        candidates.push((resolved_label, path));
+        vec![(resolved_label, path)]
     } else {
-        for (label, raw_path) in &local_cfg.repos {
-            candidates.push((label.clone(), expand_tilde(raw_path)));
-        }
+        local_cfg.candidate_repos_with_cwd()
+    };
 
-        if let Ok(current_dir) = std::env::current_dir()
-            && let Some(repo_dir) = find_ancestor_repo_dir(&current_dir)
-        {
-            let canon_cwd = fs::canonicalize(&repo_dir).unwrap_or_else(|_| repo_dir.clone());
-            let already_listed = candidates
-                .iter()
-                .any(|(_, p)| fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == canon_cwd);
-            if !already_listed {
-                let cwd_label = repo_dir
-                    .file_name()
-                    .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "current".to_string());
-                candidates.push((cwd_label, repo_dir));
-            }
-        }
-    }
-
+    let explicit_repo = requested_label.is_some();
     if candidates.is_empty() {
         return Err(EngineError::Config(
             crate::config::ConfigError::NoReposConfigured,
@@ -563,5 +543,263 @@ mod tests {
 
         OsKeyring::clear_mock();
         OsKeyring::disable_mock();
+    }
+
+    #[test]
+    fn test_interactive_prompt_unlocks_vault_and_autosaves_to_keyring() {
+        let _guard = crate::crypto::keyring::MockKeyringGuard::new();
+        unsafe {
+            std::env::remove_var(PASSPHRASE_ENV_VAR);
+        }
+        let pass = SecretString::new("interactive-day0-secret".to_string());
+        let (vault_cfg, expected_key, _mnemonic) = init_vault(&pass).unwrap();
+        let repo_cfg = RepoConfig {
+            vault: Some(vault_cfg.clone()),
+            ..Default::default()
+        };
+
+        assert!(OsKeyring::get().unwrap().is_none());
+        OsKeyring::push_mock_prompt_reply("interactive-day0-secret");
+
+        let unlocked = unlock_vault_if_needed(&repo_cfg, true, true, true)
+            .expect("interactive unlock must succeed")
+            .expect("vault key must be returned");
+        assert_eq!(unlocked.vault_id(), expected_key.vault_id());
+        assert_eq!(
+            crate::crypto::ExposeSecret::expose_secret(&OsKeyring::get().unwrap().unwrap()),
+            "interactive-day0-secret"
+        );
+
+        OsKeyring::push_mock_prompt_reply("rotated-new-secret-999");
+        let targets = vec![(
+            "primary".to_string(),
+            PathBuf::from("/tmp/dummy"),
+            vault_cfg.clone(),
+        )];
+        let resolved_old = resolve_old_passphrase_for_vaults(&targets, true, true).unwrap();
+        assert_eq!(
+            crate::crypto::ExposeSecret::expose_secret(&resolved_old),
+            "interactive-day0-secret"
+        );
+
+        let resolved_new =
+            read_new_passphrase(false, false, true, "Enter new vault passphrase: ").unwrap();
+        assert_eq!(
+            crate::crypto::ExposeSecret::expose_secret(&resolved_new),
+            "rotated-new-secret-999"
+        );
+
+        let rotated_cfg = change_password(&vault_cfg, &resolved_old, &resolved_new).unwrap();
+        let rotated_slot = VaultSlot::from_base64(&rotated_cfg.password_slot).unwrap();
+        assert!(
+            rotated_slot
+                .unwrap(&resolved_new, Some(&rotated_cfg.vault_id))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_rotate_vault_passphrases_updates_all_matching_repos_and_keyring() {
+        let _guard = crate::crypto::keyring::MockKeyringGuard::new();
+        unsafe {
+            std::env::remove_var(PASSPHRASE_ENV_VAR);
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo_a, repo_b, repo_other, repo_plain, repo_missing) = (
+            tmp.path().join("repo_a"),
+            tmp.path().join("repo_b"),
+            tmp.path().join("repo_other"),
+            tmp.path().join("repo_plain"),
+            tmp.path().join("repo_missing"),
+        );
+        for dir in [&repo_a, &repo_b, &repo_other, &repo_plain] {
+            fs::create_dir_all(dir.join("shell")).unwrap();
+        }
+
+        let old_pass = SecretString::new("shared-old-pass-111".to_string());
+        let other_pass = SecretString::new("third-party-pass-222".to_string());
+        let (vcfg_a, vkey_a, _) = init_vault(&old_pass).unwrap();
+        let (vcfg_b, vkey_b, _) = init_vault(&old_pass).unwrap();
+        let (vcfg_other, _, _) = init_vault(&other_pass).unwrap();
+
+        let enc_a = vkey_a.encrypt_file(b"secret-a-payload").unwrap().to_bytes();
+        let enc_b = vkey_b.encrypt_file(b"secret-b-payload").unwrap().to_bytes();
+        write_file_safe(&repo_a.join("shell/token.enc"), &enc_a).unwrap();
+        write_file_safe(&repo_b.join("shell/token.enc"), &enc_b).unwrap();
+
+        let write_vault_manifest = |dir: &Path, vcfg: &VaultConfig| {
+            let content = format!(
+                "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[shell]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nfiles = \"* enc\"\n",
+                vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
+            );
+            write_file_safe(&dir.join("dotler.toml"), content.as_bytes()).unwrap();
+        };
+        write_vault_manifest(&repo_a, &vcfg_a);
+        write_vault_manifest(&repo_b, &vcfg_b);
+        write_vault_manifest(&repo_other, &vcfg_other);
+        write_file_safe(
+            &repo_plain.join("dotler.toml"),
+            b"[shell]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nfiles = \"*\"\n",
+        )
+        .unwrap();
+
+        let mut local_cfg = LocalConfig::default();
+        for (name, dir) in [
+            ("repo_a", &repo_a),
+            ("repo_b", &repo_b),
+            ("repo_other", &repo_other),
+            ("repo_plain", &repo_plain),
+            ("repo_missing", &repo_missing),
+        ] {
+            local_cfg
+                .repos
+                .insert(name.to_string(), dir.to_string_lossy().to_string());
+        }
+
+        OsKeyring::push_mock_prompt_reply("wrong-old-pass-000");
+        OsKeyring::push_mock_prompt_reply("shared-new-pass-999");
+        assert!(rotate_vault_passphrases(&local_cfg, None, false, None, true).is_err());
+        assert!(OsKeyring::get().unwrap().is_none());
+
+        OsKeyring::set(&old_pass).unwrap();
+        OsKeyring::push_mock_prompt_reply("shared-new-pass-999");
+        let report =
+            rotate_vault_passphrases(&local_cfg, None, false, Some("updated-hint"), true).unwrap();
+        assert_eq!(report.status, "password_rotated");
+        assert_eq!(
+            report.rotated_repos,
+            vec!["repo_a".to_string(), "repo_b".to_string()]
+        );
+        assert_eq!(
+            report.skipped_repos,
+            vec!["repo_missing", "repo_other", "repo_plain"]
+        );
+        assert!(report.keyring_updated);
+
+        let keyring_secret = OsKeyring::get().unwrap().unwrap();
+        assert_eq!(
+            crate::crypto::ExposeSecret::expose_secret(&keyring_secret),
+            "shared-new-pass-999"
+        );
+        for (repo_dir, orig_enc, expected) in [
+            (&repo_a, &enc_a, b"secret-a-payload".as_slice()),
+            (&repo_b, &enc_b, b"secret-b-payload".as_slice()),
+        ] {
+            let disk_enc = fs::read(repo_dir.join("shell/token.enc")).unwrap();
+            assert_eq!(&disk_enc, orig_enc);
+            let vcfg = RepoConfig::load(&repo_dir.join("dotler.toml"))
+                .unwrap()
+                .vault
+                .unwrap();
+            assert_eq!(vcfg.vault_hint.as_deref(), Some("updated-hint"));
+            let slot = VaultSlot::from_base64(&vcfg.password_slot).unwrap();
+            assert!(slot.unwrap(&old_pass, Some(&vcfg.vault_id)).is_err());
+            let unlocked = slot.unwrap(&keyring_secret, Some(&vcfg.vault_id)).unwrap();
+            let dec = unlocked
+                .decrypt_file(&crate::crypto::vault::EncryptedFile::from_bytes(&disk_enc).unwrap())
+                .unwrap();
+            assert_eq!(
+                crate::crypto::ExposeSecret::expose_secret(&dec).as_slice(),
+                expected
+            );
+        }
+        assert_eq!(
+            RepoConfig::load(&repo_other.join("dotler.toml"))
+                .unwrap()
+                .vault
+                .unwrap()
+                .password_slot,
+            vcfg_other.password_slot
+        );
+    }
+
+    #[test]
+    fn test_unlock_vault_if_needed_respects_use_keyring_false() {
+        let _guard = crate::crypto::keyring::MockKeyringGuard::new();
+        unsafe {
+            std::env::remove_var(PASSPHRASE_ENV_VAR);
+        }
+        let pass = SecretString::new("keyring-disabled-secret-123".to_string());
+        let (mut vault_cfg, expected_key, _) = init_vault(&pass).unwrap();
+        vault_cfg.vault_hint = Some("my hint".to_string());
+        let repo_cfg = RepoConfig {
+            vault: Some(vault_cfg),
+            ..Default::default()
+        };
+
+        OsKeyring::set(&pass).unwrap();
+        assert!(unlock_vault_if_needed(&repo_cfg, false, false, true).is_err());
+
+        OsKeyring::clear_mock();
+        OsKeyring::push_mock_prompt_reply("keyring-disabled-secret-123");
+        let unlocked = unlock_vault_if_needed(&repo_cfg, false, true, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unlocked.vault_id(), expected_key.vault_id());
+        assert!(OsKeyring::get().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_rotate_vault_passphrases_preserves_other_vault_slots_and_nonmatching_default() {
+        let _guard = crate::crypto::keyring::MockKeyringGuard::new();
+        unsafe {
+            std::env::remove_var(PASSPHRASE_ENV_VAR);
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_a = tmp.path().join("repo_a");
+        let repo_b = tmp.path().join("repo_b");
+        fs::create_dir_all(&repo_a).unwrap();
+        fs::create_dir_all(&repo_b).unwrap();
+
+        let pass_a = SecretString::new("vault-a-old-pass".to_string());
+        let pass_b = SecretString::new("vault-b-stay-pass".to_string());
+        let (vcfg_a, _, _) = init_vault(&pass_a).unwrap();
+        let (vcfg_b, _, _) = init_vault(&pass_b).unwrap();
+
+        let write_manifest = |dir: &Path, vcfg: &VaultConfig| {
+            let content = format!(
+                "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n",
+                vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
+            );
+            write_file_safe(&dir.join("dotler.toml"), content.as_bytes()).unwrap();
+        };
+        write_manifest(&repo_a, &vcfg_a);
+        write_manifest(&repo_b, &vcfg_b);
+
+        let mut local_cfg = LocalConfig::default();
+        local_cfg
+            .repos
+            .insert("a".to_string(), repo_a.to_string_lossy().to_string());
+        local_cfg
+            .repos
+            .insert("b".to_string(), repo_b.to_string_lossy().to_string());
+
+        // Set default slot to vault_b's passphrase, while vault_a has its own <vid_a> slot
+        OsKeyring::set(&pass_b).unwrap();
+        OsKeyring::set_for_vault(&vcfg_a.vault_id, &pass_a).unwrap();
+        OsKeyring::set_for_vault(&vcfg_b.vault_id, &pass_b).unwrap();
+
+        OsKeyring::push_mock_prompt_reply("vault-a-rotated-new");
+        let report = rotate_vault_passphrases(&local_cfg, Some("a"), false, None, true).unwrap();
+        assert_eq!(report.rotated_repos, vec!["a".to_string()]);
+        assert!(report.keyring_updated);
+
+        // <vid_a> updated to new pass, <vid_b> and non-matching default preserved
+        assert_eq!(
+            crate::crypto::ExposeSecret::expose_secret(
+                &OsKeyring::get_for_vault(&vcfg_a.vault_id).unwrap().unwrap()
+            ),
+            "vault-a-rotated-new"
+        );
+        assert_eq!(
+            crate::crypto::ExposeSecret::expose_secret(
+                &OsKeyring::get_for_vault(&vcfg_b.vault_id).unwrap().unwrap()
+            ),
+            "vault-b-stay-pass"
+        );
+        assert_eq!(
+            crate::crypto::ExposeSecret::expose_secret(&OsKeyring::get().unwrap().unwrap()),
+            "vault-b-stay-pass"
+        );
     }
 }

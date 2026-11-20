@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 use crate::config::local::{WalkDir, expand_tilde};
 use crate::config::path_security::resolve_with_existing_ancestors;
 use crate::config::repo::{
-    GroupConfig, SelectionMode, SelectionRule, evaluate_selection, is_cwd_group_path,
-    parse_selection_rules, render_home_template, resolve_group_target_path, unrender_home_template,
+    GroupConfig, SelectionMode, SelectionRule, evaluate_selection, group_matches_filter,
+    group_repo_dir, is_cwd_group_path, is_delegated_to_subgroup, parse_selection_rules,
+    render_home_template, split_group_root_and_subpath, unrender_home_template,
     validate_dir_no_symlinks, validate_os_dir_path_with_home, validate_os_target_path_with_home,
     validate_repo_target_disjointness, validate_rule_pattern,
 };
@@ -102,7 +103,11 @@ pub fn plan(
     _lock: &DotlerLockGuard,
 ) -> Result<Vec<FileActionPlan>, EngineError> {
     if let Some(filter) = group_filter
-        && !engine.repo_config.groups.contains_key(filter)
+        && !engine
+            .repo_config
+            .groups
+            .keys()
+            .any(|g| group_matches_filter(g, filter))
     {
         return Err(EngineError::GroupNotFound {
             group: filter.to_string(),
@@ -110,16 +115,24 @@ pub fn plan(
         });
     }
 
+    let misplaced_targets = collect_misplaced_ancestor_targets(engine)?;
     let mut plans = Vec::new();
     let home_dir = engine.effective_home_dir();
 
     for (group_name, group_cfg) in &engine.repo_config.groups {
         if let Some(filter) = group_filter
-            && filter != group_name
+            && !group_matches_filter(group_name, filter)
         {
             continue;
         }
-        plan_group(engine, group_name, group_cfg, &home_dir, &mut plans)?;
+        plan_group(
+            engine,
+            group_name,
+            group_cfg,
+            &home_dir,
+            &misplaced_targets,
+            &mut plans,
+        )?;
     }
 
     let mut seen_targets: BTreeMap<PathBuf, &str> = BTreeMap::new();
@@ -142,15 +155,86 @@ pub fn plan(
     Ok(plans)
 }
 
+fn collect_misplaced_ancestor_targets(
+    engine: &SyncEngine,
+) -> Result<BTreeSet<PathBuf>, EngineError> {
+    let mut misplaced = BTreeSet::new();
+    let Some(key) = engine.vault_key else {
+        return Ok(misplaced);
+    };
+    let expected_vid = engine
+        .repo_config
+        .vault
+        .as_ref()
+        .map(|v| v.vault_id.as_str());
+
+    for group_name in engine.repo_config.groups.keys() {
+        let delegated_subpaths = engine.repo_config.descendant_subpaths(group_name);
+        if delegated_subpaths.is_empty() {
+            continue;
+        }
+        let Some(base_str) =
+            engine
+                .repo_config
+                .resolve_target_path(group_name, &engine.devices, &engine.os_info)
+        else {
+            continue;
+        };
+        let (target_base_path, _) = engine.expand_target_base_checked(&base_str)?;
+        let g_repo_dir = group_repo_dir(&engine.repo_dir, group_name);
+        if !g_repo_dir.is_dir() {
+            continue;
+        }
+        for entry in WalkDir::new(&g_repo_dir)
+            .filter_entry(|e| {
+                if e.depth() == 0 {
+                    return true;
+                }
+                !e.path().strip_prefix(&g_repo_dir).is_ok_and(|rel| {
+                    is_delegated_to_subgroup(&rel.to_string_lossy(), &delegated_subpaths)
+                })
+            })
+            .filter_map(|e| e.ok())
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let fname = entry.file_name().to_string_lossy().to_string();
+            let is_fenc = is_full_enc_name(&fname)
+                || (parse_legacy_fenc_filename_stem(&fname).is_some()
+                    && fs::read(entry.path())
+                        .map(|b| is_legacy_dotler_archive_bytes(&b, expected_vid))
+                        .unwrap_or(false));
+            if !is_fenc {
+                continue;
+            }
+            if let Ok(bytes) = fs::read(entry.path())
+                && let Ok(fenc) = FullEncryptedFile::from_bytes(&bytes)
+                && let Ok((dec_rel, _)) = key.decrypt_full_file(&fname, &fenc)
+            {
+                validate_rule_pattern(&dec_rel)?;
+                if is_delegated_to_subgroup(&dec_rel, &delegated_subpaths) {
+                    misplaced.insert(target_base_path.join(dec_rel));
+                }
+            }
+        }
+    }
+    Ok(misplaced)
+}
+
 fn plan_group(
     engine: &SyncEngine,
     group_name: &str,
     group_cfg: &GroupConfig,
     home_dir: &Path,
+    misplaced_ancestor_targets: &BTreeSet<PathBuf>,
     plans: &mut Vec<FileActionPlan>,
 ) -> Result<(), EngineError> {
     let target_base_str =
-        match resolve_group_target_path(group_cfg, &engine.devices, &engine.os_info) {
+        match engine
+            .repo_config
+            .resolve_target_path(group_name, &engine.devices, &engine.os_info)
+        {
             Some(base) => base,
             None => return Ok(()),
         };
@@ -165,9 +249,11 @@ fn plan_group(
     let canon_target_base = resolve_with_existing_ancestors(&target_base_path);
     let in_project_repo = canon_target_base.starts_with(&canon_repo);
     let rules = parse_selection_rules(&group_cfg.files)?;
+    let delegated_subpaths = engine.repo_config.descendant_subpaths(group_name);
 
-    let group_repo_dir = engine.repo_dir.join(group_name);
+    let group_repo_dir = group_repo_dir(&engine.repo_dir, group_name);
     let mut candidates = BTreeSet::new();
+    let mut misplaced_rels = BTreeSet::new();
     let cwd_scope = if is_cwd_group {
         Some((target_base_path.as_path(), canon_target_base.as_path()))
     } else {
@@ -177,27 +263,42 @@ fn plan_group(
         engine,
         group_name,
         &group_repo_dir,
+        &delegated_subpaths,
         cwd_scope,
         &mut candidates,
+        &mut misplaced_rels,
     )?;
+    for misplaced_target in misplaced_ancestor_targets {
+        if let Ok(rel) = misplaced_target.strip_prefix(&target_base_path) {
+            let rel_str = rel.to_string_lossy().to_string();
+            if !rel_str.is_empty() && !is_delegated_to_subgroup(&rel_str, &delegated_subpaths) {
+                candidates.insert(rel_str.clone());
+                misplaced_rels.insert(rel_str);
+            }
+        }
+    }
     collect_os_candidates(
         engine,
         &target_base_path,
         &boundary_dir,
         home_dir,
         in_project_repo,
+        &delegated_subpaths,
         &rules,
         &mut candidates,
     )?;
     collect_single_file_rule_candidates(
         &target_base_path,
         &group_repo_dir,
+        &delegated_subpaths,
         &rules,
         &mut candidates,
     );
 
     for rel_path in candidates {
-        if is_reserved_dotler_or_git(&rel_path) {
+        if is_reserved_dotler_or_git(&rel_path)
+            || is_delegated_to_subgroup(&rel_path, &delegated_subpaths)
+        {
             continue;
         }
         let target_os_path = target_base_path.join(&rel_path);
@@ -210,6 +311,7 @@ fn plan_group(
         } else if target_os_path.starts_with(&engine.repo_dir) {
             continue;
         }
+        let has_misplaced = misplaced_rels.contains(&rel_path);
         if let Some(entry) = build_file_plan(
             engine,
             group_name,
@@ -219,6 +321,7 @@ fn plan_group(
             &rules,
             rel_path,
             target_os_path,
+            has_misplaced,
         )? {
             plans.push(entry);
         }
@@ -227,17 +330,36 @@ fn plan_group(
     Ok(())
 }
 
+fn combine_nested_fenc_rel(repo_rel: &Path, dec_rel: String) -> (String, bool) {
+    match repo_rel.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            let parent_str = parent.to_string_lossy();
+            (format!("{parent_str}/{dec_rel}"), true)
+        }
+        _ => (dec_rel, false),
+    }
+}
+
 fn collect_repo_and_db_candidates(
     engine: &SyncEngine,
     group_name: &str,
     group_repo_dir: &Path,
+    delegated_subpaths: &[String],
     cwd_scope: Option<(&Path, &Path)>,
     candidates: &mut BTreeSet<String>,
+    misplaced_rels: &mut BTreeSet<String>,
 ) -> Result<(), EngineError> {
     validate_dir_no_symlinks(group_repo_dir)?;
     if group_repo_dir.is_dir() {
         for entry in WalkDir::new(group_repo_dir)
-            .into_iter()
+            .filter_entry(|e| {
+                if e.depth() == 0 {
+                    return true;
+                }
+                !e.path().strip_prefix(group_repo_dir).is_ok_and(|rel| {
+                    is_delegated_to_subgroup(&rel.to_string_lossy(), delegated_subpaths)
+                })
+            })
             .filter_map(|e| e.ok())
         {
             if !entry.file_type().is_file()
@@ -258,12 +380,20 @@ fn collect_repo_and_db_candidates(
                         && let Ok((dec_rel, _)) = key.decrypt_full_file(&fname, &fenc)
                     {
                         validate_rule_pattern(&dec_rel)?;
-                        candidates.insert(dec_rel);
+                        let (eff_rel, is_nested_fenc) = combine_nested_fenc_rel(rel, dec_rel);
+                        if !is_delegated_to_subgroup(&eff_rel, delegated_subpaths) {
+                            if is_nested_fenc {
+                                misplaced_rels.insert(eff_rel.clone());
+                            }
+                            candidates.insert(eff_rel);
+                        }
                     }
                     continue;
                 }
                 if let Some(stripped) = strip_content_enc_suffix(&rel_str) {
-                    candidates.insert(stripped.to_string());
+                    if !is_delegated_to_subgroup(stripped, delegated_subpaths) {
+                        candidates.insert(stripped.to_string());
+                    }
                     continue;
                 }
                 let expected_vid = engine
@@ -280,7 +410,13 @@ fn collect_repo_and_db_candidates(
                         && let Ok((dec_rel, _)) = key.decrypt_full_file(&fname, &fenc)
                     {
                         validate_rule_pattern(&dec_rel)?;
-                        candidates.insert(dec_rel);
+                        let (eff_rel, is_nested_fenc) = combine_nested_fenc_rel(rel, dec_rel);
+                        if !is_delegated_to_subgroup(&eff_rel, delegated_subpaths) {
+                            if is_nested_fenc {
+                                misplaced_rels.insert(eff_rel.clone());
+                            }
+                            candidates.insert(eff_rel);
+                        }
                     }
                     continue;
                 }
@@ -288,16 +424,20 @@ fn collect_repo_and_db_candidates(
                     && let Ok(bytes) = fs::read(entry.path())
                     && is_legacy_dotler_archive_bytes(&bytes, expected_vid)
                 {
-                    candidates.insert(stripped.to_string());
+                    if !is_delegated_to_subgroup(stripped, delegated_subpaths) {
+                        candidates.insert(stripped.to_string());
+                    }
                     continue;
                 }
-                candidates.insert(rel_str);
+                if !is_delegated_to_subgroup(&rel_str, delegated_subpaths) {
+                    candidates.insert(rel_str);
+                }
             }
         }
     }
 
     if let Ok(records) = engine.state_db.list_synced_files(Some(&engine.repo_label)) {
-        for r in records.into_iter().filter(|r| r.group_name == group_name) {
+        for r in records {
             if let Some((base_lex, base_canon)) = cwd_scope {
                 let rec_path = Path::new(&r.target_path);
                 if !rec_path.starts_with(base_lex)
@@ -306,19 +446,41 @@ fn collect_repo_and_db_candidates(
                     continue;
                 }
             }
-            candidates.insert(r.relative_path);
+            let (mapped_group, mapped_rel) =
+                if engine.repo_config.groups.contains_key(&r.group_name) {
+                    engine
+                        .repo_config
+                        .resolve_owning_group(&r.group_name, &r.relative_path)
+                } else {
+                    let (rec_root, rec_sub_opt) = split_group_root_and_subpath(&r.group_name);
+                    if let Some(rec_sub) = rec_sub_opt
+                        && engine.repo_config.groups.contains_key(rec_root)
+                    {
+                        let combined = format!("{rec_sub}/{}", r.relative_path);
+                        engine.repo_config.resolve_owning_group(rec_root, &combined)
+                    } else {
+                        continue;
+                    }
+                };
+            if mapped_group == group_name
+                && !is_delegated_to_subgroup(&mapped_rel, delegated_subpaths)
+            {
+                candidates.insert(mapped_rel);
+            }
         }
     }
 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_os_candidates(
     engine: &SyncEngine,
     target_base_path: &Path,
     boundary_dir: &Path,
     home_dir: &Path,
     in_project_repo: bool,
+    delegated_subpaths: &[String],
     rules: &[SelectionRule],
     candidates: &mut BTreeSet<String>,
 ) -> Result<(), EngineError> {
@@ -340,7 +502,7 @@ fn collect_os_candidates(
             .groups
             .keys()
             .map(|g| {
-                let p = engine.repo_dir.join(g);
+                let p = group_repo_dir(&engine.repo_dir, g);
                 let c = resolve_with_existing_ancestors(&p);
                 (p, c)
             })
@@ -375,8 +537,11 @@ fn collect_os_candidates(
             {
                 return false;
             }
-            !p.strip_prefix(target_base_path)
-                .is_ok_and(|rel| is_reserved_dotler_or_git(&rel.to_string_lossy()))
+            !p.strip_prefix(target_base_path).is_ok_and(|rel| {
+                let rel_s = rel.to_string_lossy();
+                is_reserved_dotler_or_git(&rel_s)
+                    || is_delegated_to_subgroup(&rel_s, delegated_subpaths)
+            })
         })
         .filter_map(|e| e.ok())
     {
@@ -392,6 +557,7 @@ fn collect_os_candidates(
         if let Ok(rel) = entry.path().strip_prefix(target_base_path) {
             let rel_str = rel.to_string_lossy().to_string();
             if !is_reserved_dotler_or_git(&rel_str)
+                && !is_delegated_to_subgroup(&rel_str, delegated_subpaths)
                 && !is_repo_internal(entry.path())
                 && evaluate_selection(rules, &rel_str).is_some()
             {
@@ -406,6 +572,7 @@ fn collect_os_candidates(
 fn collect_single_file_rule_candidates(
     target_base_path: &Path,
     group_repo_dir: &Path,
+    delegated_subpaths: &[String],
     rules: &[SelectionRule],
     candidates: &mut BTreeSet<String>,
 ) {
@@ -418,6 +585,7 @@ fn collect_single_file_rule_candidates(
             || trimmed.contains('*')
             || trimmed.contains('?')
             || trimmed.contains('[')
+            || is_delegated_to_subgroup(trimmed, delegated_subpaths)
         {
             continue;
         }
@@ -445,6 +613,7 @@ fn build_file_plan(
     rules: &[SelectionRule],
     rel_path: String,
     target_os_path: PathBuf,
+    has_misplaced_archive: bool,
 ) -> Result<Option<FileActionPlan>, EngineError> {
     let mode = evaluate_selection(rules, &rel_path);
     let db_record = engine
@@ -525,7 +694,7 @@ fn build_file_plan(
         &plain_repo_path,
         &enc_repo_path,
         full_enc_repo_path.as_deref(),
-        legacy_enc_exists || legacy_fenc_exists,
+        legacy_enc_exists || legacy_fenc_exists || has_misplaced_archive,
     )?;
 
     let chosen_repo_path = if is_full_encrypted {

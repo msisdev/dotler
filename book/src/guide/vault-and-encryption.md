@@ -110,6 +110,28 @@ config/*.secret enc=full
 - Paths and symlinks for `.` / `./...` groups are strictly confined within the current working directory (any escape outside `pwd`, into `.git`, or into `<repo>/<group>/` storage is blocked).
 - `dotler tidy` only evaluates orphan history within the current working directory so files synced in other projects remain untouched.
 
+### Organizing Encrypted Subfolders (`[vault.<domain>]`)
+
+When tracking a large workspace with `enc=full`, you can split specific domains into dedicated encrypted subdirectories (`vault/problems/`, `vault/sleep/`) using dotted sub-group headers while keeping a top-level `[vault]` fallback for everything else:
+
+```toml
+[vault]
+os-nux = "./notes"
+os-mac = "./notes"
+os-win = "./notes"
+files = "* enc=full"
+
+[vault.problems]
+files = "* enc=full"
+
+[vault.sleep]
+files = "* enc=full"
+```
+
+- **Root-only paths**: Define `os-*` and device paths **only** on the top-level `[vault]` group. Each `[vault.<sub...>]` sub-group automatically targets `<root_path>/<sub...>` and stores its archives under `<repo>/vault/<sub...>/` (omit `files` on `[vault]` if you only want declared sub-groups synced).
+- **Most-specific sub-group wins**: Files under `./notes/sleep` are delegated to `[vault.sleep]` (`vault/sleep/<32-hex>.dotler.fenc`), while root files and unlisted folders fall back to `[vault]` (`vault/<32-hex>.dotler.fenc`).
+- **Subtree commands & in-place relocation**: Running `dotler import vault` or `dotler status vault` targets `[vault]` and all `vault.*` sub-groups together, and running `dotler tidy` after adding or removing a sub-group relocates existing archives across `vault/` and `vault/<sub...>/` without losing data.
+
 ## 4. OS Keyring Integration
 
 Dotler automatically provisions your master passphrase in your operating system's native credential manager (macOS Keychain, Linux Secret Service / Keyutils, Windows Credential Manager) at vault and repository lifecycle boundaries (`dotler init`, `dotler vault init`, `dotler vault from`, `dotler vault rotate`, `dotler vault recover`) so `import`, `export`, and `tidy` run without prompting every time. Keys are isolated per `vault_id` (so multiple independent repositories with distinct passphrases coexist without conflict), with automatic fallback to the global `default` slot:

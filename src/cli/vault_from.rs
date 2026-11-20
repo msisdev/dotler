@@ -148,11 +148,25 @@ pub(crate) fn handle_vault_from<W: Write>(
     }
     let mut mismatched_files: Vec<MismatchedArtifact> = Vec::new();
     for g_name in repo_cfg.groups.keys() {
-        let group_dir = repo_path.join(g_name);
+        let group_dir = crate::config::repo::group_repo_dir(&repo_path, g_name);
+        let delegated = repo_cfg.descendant_subpaths(g_name);
         if !group_dir.is_dir() {
             continue;
         }
-        for entry in WalkDir::new(&group_dir).into_iter().filter_map(|e| e.ok()) {
+        for entry in WalkDir::new(&group_dir)
+            .filter_entry(|e| {
+                if e.depth() == 0 {
+                    return true;
+                }
+                !e.path().strip_prefix(&group_dir).is_ok_and(|rel| {
+                    crate::config::repo::is_delegated_to_subgroup(
+                        &rel.to_string_lossy(),
+                        &delegated,
+                    )
+                })
+            })
+            .filter_map(|e| e.ok())
+        {
             if !entry.file_type().is_file() {
                 continue;
             }

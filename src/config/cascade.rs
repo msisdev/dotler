@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::ConfigError;
 use crate::config::path_security::{normalize_lexical_path, resolve_with_existing_ancestors};
-use crate::config::repo::{GroupConfig, RepoConfig};
+use crate::config::repo::{GroupConfig, RepoConfig, is_delegated_to_subgroup};
 use crate::config::selection::{
     SelectionMode, SelectionRule, evaluate_selection, parse_selection_rules,
 };
@@ -115,6 +115,7 @@ struct ActiveGroup<'a> {
     name: &'a str,
     base: String,
     rules: Vec<SelectionRule>,
+    delegated_subpaths: Vec<String>,
     concrete_files: Vec<String>,
     wildcard_rules: Vec<SelectionRule>,
     has_no_rules: bool,
@@ -136,6 +137,10 @@ fn clean_rule_pattern(rule: &SelectionRule) -> &str {
 
 fn is_included(rules: &[SelectionRule], path: &str) -> bool {
     matches!(evaluate_selection(rules, path), Some(m) if m != SelectionMode::Exclude)
+}
+
+fn is_effectively_included(group: &ActiveGroup<'_>, path: &str) -> bool {
+    !is_delegated_to_subgroup(path, &group.delegated_subpaths) && is_included(&group.rules, path)
 }
 
 fn normalize_group_base(raw: &str) -> String {
@@ -219,13 +224,21 @@ fn check_no_rules_against(
         return Ok(());
     }
     for file in &other.concrete_files {
-        if rel_to_base(file, &empty.base).is_some() {
+        if let Some(rel) = rel_to_base(file, &empty.base)
+            && !is_delegated_to_subgroup(&rel, &empty.delegated_subpaths)
+        {
             return Err(collision(file.clone(), g1, g2));
         }
     }
     for w in &other.wildcard_rules {
-        let target = join_base_and_pattern(&other.base, clean_rule_pattern(w));
-        if rel_to_base(&target, &empty.base).is_some() {
+        let p = clean_rule_pattern(w);
+        if is_delegated_to_subgroup(p, &other.delegated_subpaths) {
+            continue;
+        }
+        let target = join_base_and_pattern(&other.base, p);
+        if let Some(rel) = rel_to_base(&target, &empty.base)
+            && !is_delegated_to_subgroup(&rel, &empty.delegated_subpaths)
+        {
             return Err(collision(target, g1, g2));
         }
     }
@@ -241,7 +254,7 @@ fn check_wildcard_vs_concrete(
     for file in &concrete_group.concrete_files {
         if let Some(rel) = rel_to_base(file, &wc_group.base)
             && !rel.is_empty()
-            && is_included(&wc_group.rules, &rel)
+            && is_effectively_included(wc_group, &rel)
         {
             return Err(collision(file.clone(), g1, g2));
         }
@@ -257,11 +270,13 @@ fn check_wildcard_target_overlap(
 ) -> Result<(), ConfigError> {
     for w in &src.wildcard_rules {
         let p = clean_rule_pattern(w);
+        if !is_effectively_included(src, p) {
+            continue;
+        }
         let target = join_base_and_pattern(&src.base, p);
         if let Some(rel) = rel_to_base(&target, &dst.base)
             && !rel.is_empty()
-            && is_included(&src.rules, p)
-            && is_included(&dst.rules, &rel)
+            && is_effectively_included(dst, &rel)
         {
             return Err(collision(target, g1, g2));
         }
@@ -303,10 +318,14 @@ impl RepoConfig {
         let mut active_groups = Vec::new();
 
         for (group_name, group) in &self.groups {
-            let Some(target_base) = resolve_group_target_path(group, devices, os_info) else {
+            if self.is_anchor_only_group(group_name) {
+                continue;
+            }
+            let Some(target_base) = self.resolve_target_path(group_name, devices, os_info) else {
                 continue;
             };
             let rules = parse_selection_rules(&group.files)?;
+            let delegated_subpaths = self.descendant_subpaths(group_name);
             let normalized_base = map_base(&target_base);
             let mut concrete_files = Vec::new();
             let mut wildcard_rules = Vec::new();
@@ -331,14 +350,19 @@ impl RepoConfig {
                         }
                     } else if is_dir_slash {
                         let probe = format!("{clean_pattern}/*");
-                        if rule.mode != SelectionMode::Exclude && is_included(&rules, &probe) {
+                        if rule.mode != SelectionMode::Exclude
+                            && !is_delegated_to_subgroup(&probe, &delegated_subpaths)
+                            && is_included(&rules, &probe)
+                        {
                             wildcard_rules.push(SelectionRule {
                                 pattern: probe,
                                 mode: rule.mode,
                                 line_no: rule.line_no,
                             });
                         }
-                    } else if is_included(&rules, clean_pattern) {
+                    } else if !is_delegated_to_subgroup(clean_pattern, &delegated_subpaths)
+                        && is_included(&rules, clean_pattern)
+                    {
                         let target_file = join_base_and_pattern(&normalized_base, clean_pattern);
                         if !concrete_files.contains(&target_file) {
                             concrete_files.push(target_file);
@@ -351,6 +375,7 @@ impl RepoConfig {
                 name: group_name.as_str(),
                 base: normalized_base,
                 rules,
+                delegated_subpaths,
                 concrete_files,
                 wildcard_rules,
                 has_no_rules,
@@ -378,9 +403,17 @@ impl RepoConfig {
                 check_wildcard_target_overlap(g2, g1, g1.name, g2.name)?;
 
                 for w1 in &g1.wildcard_rules {
-                    let target1 = join_base_and_pattern(&g1.base, clean_rule_pattern(w1));
+                    let p1 = clean_rule_pattern(w1);
+                    if !is_effectively_included(g1, p1) {
+                        continue;
+                    }
+                    let target1 = join_base_and_pattern(&g1.base, p1);
                     for w2 in &g2.wildcard_rules {
-                        let target2 = join_base_and_pattern(&g2.base, clean_rule_pattern(w2));
+                        let p2 = clean_rule_pattern(w2);
+                        if !is_effectively_included(g2, p2) {
+                            continue;
+                        }
+                        let target2 = join_base_and_pattern(&g2.base, p2);
                         if target1 == target2 {
                             return Err(collision(target1, g1.name, g2.name));
                         }
@@ -578,6 +611,45 @@ mod tests {
         );
         assert!(matches!(
             mixed.detect_cross_group_collisions_with_roots(&[], &os_info, &home_dir, &home_dir),
+            Err(ConfigError::CrossGroupFileCollision { .. })
+        ));
+    }
+
+    #[test]
+    fn test_nested_subgroup_delegation_avoids_parent_collision_while_catching_peer_overlap() {
+        let os_info = OsInfo::new("arch", "nux");
+        let valid_hierarchy = r#"
+vault_id = "0123456789abcdef"
+password_slot = "cGFzc3dvcmQ="
+recovery_slot = "cmVjb3Zlcnk="
+
+[vault]
+os-nux = "./notes"
+files = "* enc=full"
+
+[vault.sleep]
+files = "* enc=full"
+
+[vault.problems]
+files = "* enc=full"
+"#;
+        let cfg = RepoConfig::parse(valid_hierarchy).unwrap();
+        assert!(cfg.detect_cross_group_collisions(&[], &os_info).is_ok());
+
+        let peer_overlap =
+            format!("{valid_hierarchy}\n[rogue]\nos-nux = \"./notes/goals\"\nfiles = \"*\"\n");
+        let cfg_rogue = RepoConfig::parse(&peer_overlap).unwrap();
+        assert!(matches!(
+            cfg_rogue.detect_cross_group_collisions(&[], &os_info),
+            Err(ConfigError::CrossGroupFileCollision { .. })
+        ));
+
+        let peer_sub_overlap = format!(
+            "{valid_hierarchy}\n[rogue_sleep]\nos-nux = \"./notes/sleep\"\nfiles = \"log.md\"\n"
+        );
+        let cfg_rogue_sub = RepoConfig::parse(&peer_sub_overlap).unwrap();
+        assert!(matches!(
+            cfg_rogue_sub.detect_cross_group_collisions(&[], &os_info),
             Err(ConfigError::CrossGroupFileCollision { .. })
         ));
     }

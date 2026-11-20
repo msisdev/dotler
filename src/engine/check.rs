@@ -11,10 +11,11 @@ use crate::config::local::{
 };
 use crate::config::path_security::resolve_with_existing_ancestors;
 use crate::config::repo::{
-    SelectionMode, evaluate_selection, find_literal_full_enc_rules, is_cwd_group_path,
-    is_home_group_path, parse_selection_rules, render_home_template, resolve_group_target_path,
-    rules_have_effective_full_encryption, validate_dir_no_symlinks, validate_os_dir_path_with_home,
-    validate_path_security, validate_repo_target_disjointness, validate_rule_pattern,
+    SelectionMode, evaluate_selection, find_literal_full_enc_rules, group_matches_filter,
+    group_repo_dir, is_cwd_group_path, is_delegated_to_subgroup, is_home_group_path,
+    parse_selection_rules, render_home_template, rules_have_effective_full_encryption,
+    validate_dir_no_symlinks, validate_os_dir_path_with_home, validate_path_security,
+    validate_repo_target_disjointness, validate_rule_pattern,
 };
 use crate::config::state::{DotlerLockGuard, TMP_FILE_PREFIX, write_file_safe};
 use crate::core::context::CoreContext;
@@ -126,9 +127,12 @@ pub fn run_check(
     let repo_cfg = &resolved.repo_config;
     let repo_path = &resolved.repo_path;
 
-    // 1. Validate group filter existence
+    // 1. Validate group filter existence (exact or subtree match)
     if let Some(filter_grp) = group_filter
-        && !repo_cfg.groups.contains_key(filter_grp)
+        && !repo_cfg
+            .groups
+            .keys()
+            .any(|g| group_matches_filter(g, filter_grp))
     {
         let available = repo_cfg.groups.keys().cloned().collect();
         return Err(EngineError::GroupNotFound {
@@ -140,11 +144,11 @@ pub fn run_check(
     // 2. Validate path security and 3-state selection rule syntax
     for (g_name, g_cfg) in &repo_cfg.groups {
         if let Some(filter) = group_filter
-            && filter != g_name
+            && !group_matches_filter(g_name, filter)
         {
             continue;
         }
-        for p in g_cfg.paths.values() {
+        for p in repo_cfg.effective_group_paths(g_name).values() {
             validate_path_security(p)?;
         }
         parse_selection_rules(&g_cfg.files)?;
@@ -183,16 +187,20 @@ pub fn run_check(
     let expected_vid_opt = repo_cfg.vault.as_ref().map(|v| v.vault_id.as_str());
     let canon_repo = resolve_with_existing_ancestors(repo_path);
 
+    let mut checked_count = 0usize;
     for (g_name, g_cfg) in &repo_cfg.groups {
         if let Some(filter) = group_filter
-            && filter != g_name
+            && !group_matches_filter(g_name, filter)
         {
             continue;
         }
-        let group_repo_dir = repo_path.join(g_name);
+        checked_count += 1;
+        let group_repo_dir = group_repo_dir(repo_path, g_name);
+        let delegated_subpaths = repo_cfg.descendant_subpaths(g_name);
         validate_dir_no_symlinks(&group_repo_dir)?;
-        let target_and_boundary =
-            resolve_group_target_path(g_cfg, &resolved.devices, &resolved.os_info).map(|s| {
+        let target_and_boundary = repo_cfg
+            .resolve_target_path(g_name, &resolved.devices, &resolved.os_info)
+            .map(|s| {
                 if is_home_group_path(&s) {
                     let rel = s.strip_prefix("~/").unwrap_or("").trim_matches('/');
                     let target = if rel.is_empty() {
@@ -240,6 +248,7 @@ pub fn run_check(
                         || clean.contains('*')
                         || clean.contains('?')
                         || clean.contains('[')
+                        || is_delegated_to_subgroup(clean, &delegated_subpaths)
                     {
                         continue;
                     }
@@ -267,7 +276,14 @@ pub fn run_check(
         }
         let has_full_enc_rule = rules_have_effective_full_encryption(&rules);
         for entry in WalkDir::new(&group_repo_dir)
-            .into_iter()
+            .filter_entry(|e| {
+                if e.depth() == 0 {
+                    return true;
+                }
+                !e.path().strip_prefix(&group_repo_dir).is_ok_and(|rel| {
+                    is_delegated_to_subgroup(&rel.to_string_lossy(), &delegated_subpaths)
+                })
+            })
             .filter_map(|e| e.ok())
         {
             if !entry.file_type().is_file() {
@@ -336,6 +352,14 @@ pub fn run_check(
                             ),
                         })?;
                     validate_rule_pattern(&dec_rel)?;
+                    if is_delegated_to_subgroup(&dec_rel, &delegated_subpaths) {
+                        return Err(EngineError::EncryptionMismatch {
+                            path: entry.path().to_path_buf(),
+                            reason: format!(
+                                "Repository file '{dec_rel}' in group '{g_name}' belongs to a configured sub-group. Run 'dotler tidy' to relocate it."
+                            ),
+                        });
+                    }
                     if let Some(mode) = evaluate_selection(&rules, &dec_rel) {
                         if mode.is_included() && !mode.is_full_encrypted() {
                             return Err(EngineError::EncryptionMismatch {
@@ -426,7 +450,7 @@ pub fn run_check(
 
     Ok(CheckReport {
         status: "valid".to_string(),
-        groups_checked: repo_cfg.groups.len(),
+        groups_checked: checked_count,
         warnings,
     })
 }

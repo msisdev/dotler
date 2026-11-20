@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 use crate::config::local::WalkDir;
 use crate::config::path_security::resolve_with_existing_ancestors;
 use crate::config::repo::{
-    evaluate_selection, is_cwd_group_path, is_symlink, parse_selection_rules,
-    prune_empty_parent_dirs, resolve_group_target_path, validate_dir_no_symlinks,
-    validate_rule_pattern,
+    evaluate_selection, group_matches_filter, group_repo_dir, is_cwd_group_path,
+    is_delegated_to_subgroup, is_symlink, parse_selection_rules, prune_empty_parent_dirs,
+    split_group_root_and_subpath, validate_dir_no_symlinks, validate_rule_pattern,
 };
 use crate::config::state::{DotlerLockGuard, TMP_FILE_PREFIX, write_file_safe};
 use crate::core::context::CoreContext;
@@ -52,7 +52,9 @@ pub struct TidyReport {
 struct PlannedRepoTidyOp {
     group_name: String,
     group_base: PathBuf,
+    prune_stop_dir: PathBuf,
     rel_path: String,
+    os_target_str: String,
     kind: RepoTidyKind,
 }
 
@@ -149,8 +151,14 @@ pub fn tidy_groups_with_observer(
         .list_synced_files(Some(&engine.repo_label))?;
 
     for filter in group_filters {
-        let exists_in_repo = engine.repo_config.groups.contains_key(filter);
-        let exists_in_db = all_synced.iter().any(|r| &r.group_name == filter);
+        let exists_in_repo = engine
+            .repo_config
+            .groups
+            .keys()
+            .any(|g| group_matches_filter(g, filter));
+        let exists_in_db = all_synced
+            .iter()
+            .any(|r| group_matches_filter(&r.group_name, filter));
         if !exists_in_repo && !exists_in_db {
             return Err(EngineError::GroupNotFound {
                 group: filter.clone(),
@@ -161,42 +169,48 @@ pub fn tidy_groups_with_observer(
 
     let mut preview_entries: Vec<PlanPreviewEntry> = Vec::new();
     let mut repo_ops: Vec<PlannedRepoTidyOp> = Vec::new();
-    let synced_keys: HashSet<(String, String)> = all_synced
+    let synced_by_target: std::collections::HashMap<
+        String,
+        crate::config::state::SyncedFileRecord,
+    > = all_synced
         .iter()
-        .map(|r| (r.group_name.clone(), r.target_path.clone()))
+        .map(|r| (r.target_path.clone(), r.clone()))
         .collect();
     let mut pruned_repo_targets: HashSet<String> = HashSet::new();
 
-    // 1. Scan repository groups for in-repo format reconciliation and locally deleted files
-    for (group_name, group_cfg) in &engine.repo_config.groups {
-        if !group_filters.is_empty() && !group_filters.iter().any(|f| f == group_name) {
+    // 1. Scan repository groups for in-repo format reconciliation, hierarchical relocation, and locally deleted files
+    for scan_group_name in engine.repo_config.groups.keys() {
+        if !group_filters.is_empty()
+            && !group_filters.iter().any(|f| {
+                group_matches_filter(scan_group_name, f) || group_matches_filter(f, scan_group_name)
+            })
+        {
             continue;
         }
 
-        let group_repo_dir = engine.repo_dir.join(group_name);
-        validate_dir_no_symlinks(&group_repo_dir)?;
-        if !group_repo_dir.is_dir() {
+        let scan_group_repo_dir = group_repo_dir(&engine.repo_dir, scan_group_name);
+        validate_dir_no_symlinks(&scan_group_repo_dir)?;
+        if !scan_group_repo_dir.is_dir() {
             continue;
         }
-
-        let resolved_target_base =
-            resolve_group_target_path(group_cfg, &engine.devices, &engine.os_info)
-                .map(|s| engine.expand_target_base_checked(&s))
-                .transpose()?;
-        let group_base = resolved_target_base
-            .as_ref()
-            .map(|(b, _)| b.clone())
-            .unwrap_or_else(|| engine.effective_home_dir());
-
-        let rules = parse_selection_rules(&group_cfg.files)?;
+        let delegated_subpaths = engine.repo_config.descendant_subpaths(scan_group_name);
         let expected_vid = engine
             .repo_config
             .vault
             .as_ref()
             .map(|v| v.vault_id.as_str());
 
-        for entry in WalkDir::new(&group_repo_dir)
-            .into_iter()
+        for entry in WalkDir::new(&scan_group_repo_dir)
+            .filter_entry(|e| {
+                if e.depth() == 0 {
+                    return true;
+                }
+                !e.path()
+                    .strip_prefix(&scan_group_repo_dir)
+                    .is_ok_and(|rel| {
+                        is_delegated_to_subgroup(&rel.to_string_lossy(), &delegated_subpaths)
+                    })
+            })
             .filter_map(|e| e.ok())
         {
             if !entry.file_type().is_file() {
@@ -208,30 +222,36 @@ pub fn tidy_groups_with_observer(
             }
 
             let path = entry.path();
-            let rel = match path.strip_prefix(&group_repo_dir) {
+            let rel = match path.strip_prefix(&scan_group_repo_dir) {
                 Ok(r) => r,
                 Err(_) => continue,
             };
             let rel_str = rel.to_string_lossy().to_string();
-            let (src_kind, clean_rel_owned) = if is_full_enc_name(&rel_str) {
+            let prepend_nested_parent = |dec_rel: String| -> String {
+                match rel.parent() {
+                    Some(p) if !p.as_os_str().is_empty() => {
+                        format!("{}/{dec_rel}", p.to_string_lossy())
+                    }
+                    _ => dec_rel,
+                }
+            };
+            let (src_kind, scan_rel_owned) = if is_full_enc_name(&rel_str) {
                 let vault_key = require_vault(engine, "decryption")?;
                 let raw_bytes = fs::read(path)?;
                 let fenc = FullEncryptedFile::from_bytes(&raw_bytes)?;
                 let (dec_rel, _) = vault_key.decrypt_full_file(&file_name, &fenc)?;
                 validate_rule_pattern(&dec_rel)?;
-                (RepoArtifactKind::FullEnc, dec_rel)
+                (RepoArtifactKind::FullEnc, prepend_nested_parent(dec_rel))
             } else if let Some(stripped) = strip_content_enc_suffix(&rel_str) {
                 (RepoArtifactKind::ContentEnc, stripped.to_string())
-            } else if !rel_str.contains('/')
-                && parse_legacy_fenc_filename_stem(&file_name).is_some()
-            {
+            } else if parse_legacy_fenc_filename_stem(&file_name).is_some() {
                 let raw_bytes = fs::read(path)?;
                 if is_legacy_dotler_archive_bytes(&raw_bytes, expected_vid) {
                     let vault_key = require_vault(engine, "decryption")?;
                     let fenc = FullEncryptedFile::from_bytes(&raw_bytes)?;
                     let (dec_rel, _) = vault_key.decrypt_full_file(&file_name, &fenc)?;
                     validate_rule_pattern(&dec_rel)?;
-                    (RepoArtifactKind::FullEnc, dec_rel)
+                    (RepoArtifactKind::FullEnc, prepend_nested_parent(dec_rel))
                 } else {
                     (RepoArtifactKind::Plain, rel_str.clone())
                 }
@@ -245,17 +265,46 @@ pub fn tidy_groups_with_observer(
             } else {
                 (RepoArtifactKind::Plain, rel_str.clone())
             };
+
+            let (owner_group, clean_rel_owned) = engine
+                .repo_config
+                .resolve_owning_group(scan_group_name, &scan_rel_owned);
+            if !group_filters.is_empty()
+                && !group_filters
+                    .iter()
+                    .any(|f| group_matches_filter(owner_group, f))
+            {
+                continue;
+            }
+            let owner_cfg = &engine.repo_config.groups[owner_group];
+            let owner_repo_dir = group_repo_dir(&engine.repo_dir, owner_group);
+            let resolved_target_base = engine
+                .repo_config
+                .resolve_target_path(owner_group, &engine.devices, &engine.os_info)
+                .map(|s| engine.expand_target_base_checked(&s))
+                .transpose()?;
+            let group_base = resolved_target_base
+                .as_ref()
+                .map(|(b, _)| b.clone())
+                .unwrap_or_else(|| engine.effective_home_dir());
+            let rules = parse_selection_rules(&owner_cfg.files)?;
+
             let clean_rel = clean_rel_owned.as_str();
             let is_enc_artifact = src_kind != RepoArtifactKind::Plain;
 
             let os_path = group_base.join(clean_rel);
             let os_path_str = os_path.to_string_lossy().to_string();
+            let has_matching_sync_record = synced_by_target.get(&os_path_str).is_some_and(|rec| {
+                let (rec_root, _) = split_group_root_and_subpath(&rec.group_name);
+                let (own_root, _) = split_group_root_and_subpath(owner_group);
+                rec_root == own_root
+            });
             let mode = evaluate_selection(&rules, clean_rel);
             if mode.is_some_and(|m| m.is_included())
                 && resolved_target_base.is_some()
                 && !os_path.exists()
                 && !is_symlink(&os_path)
-                && synced_keys.contains(&(group_name.clone(), os_path_str.clone()))
+                && has_matching_sync_record
             {
                 let direction = if is_enc_artifact {
                     PlanDirection::EncryptToRepo
@@ -264,16 +313,18 @@ pub fn tidy_groups_with_observer(
                 };
                 push_repo_preview(
                     &mut preview_entries,
-                    group_name,
+                    owner_group,
                     os_path,
                     path,
                     PlanActionKind::Delete,
                     direction,
                 );
                 repo_ops.push(PlannedRepoTidyOp {
-                    group_name: group_name.clone(),
+                    group_name: owner_group.to_string(),
                     group_base: group_base.clone(),
+                    prune_stop_dir: scan_group_repo_dir.clone(),
                     rel_path: clean_rel.to_string(),
+                    os_target_str: os_path_str.clone(),
                     kind: RepoTidyKind::RemoveDeleted {
                         repo_path: path.to_path_buf(),
                         target_path_str: os_path_str.clone(),
@@ -287,11 +338,19 @@ pub fn tidy_groups_with_observer(
                 Some(m) if m.is_full_encrypted() => {
                     let vault_key = require_vault(engine, "encryption")?;
                     let fenc_path =
-                        group_repo_dir.join(vault_key.derive_full_enc_filename(clean_rel));
+                        owner_repo_dir.join(vault_key.derive_full_enc_filename(clean_rel));
                     if src_kind == RepoArtifactKind::FullEnc && path == fenc_path {
+                        sync_ledger_group_if_needed(
+                            engine,
+                            &synced_by_target,
+                            &os_path_str,
+                            owner_group,
+                            clean_rel,
+                            dry_run,
+                        )?;
                         push_repo_preview(
                             &mut preview_entries,
-                            group_name,
+                            owner_group,
                             os_path,
                             path,
                             PlanActionKind::Okay,
@@ -300,16 +359,18 @@ pub fn tidy_groups_with_observer(
                     } else {
                         push_repo_preview(
                             &mut preview_entries,
-                            group_name,
+                            owner_group,
                             os_path,
                             &fenc_path,
                             PlanActionKind::Overwrite,
                             PlanDirection::EncryptToRepo,
                         );
                         repo_ops.push(PlannedRepoTidyOp {
-                            group_name: group_name.clone(),
+                            group_name: owner_group.to_string(),
                             group_base: group_base.clone(),
+                            prune_stop_dir: scan_group_repo_dir.clone(),
                             rel_path: clean_rel.to_string(),
+                            os_target_str: os_path_str,
                             kind: RepoTidyKind::ConvertToFullEnc {
                                 src_path: path.to_path_buf(),
                                 src_kind,
@@ -320,11 +381,19 @@ pub fn tidy_groups_with_observer(
                     }
                 }
                 Some(m) if m.is_content_encrypted() => {
-                    let enc_path = group_repo_dir.join(format!("{clean_rel}{CONTENT_ENC_SUFFIX}"));
+                    let enc_path = owner_repo_dir.join(format!("{clean_rel}{CONTENT_ENC_SUFFIX}"));
                     if src_kind == RepoArtifactKind::ContentEnc && path == enc_path {
+                        sync_ledger_group_if_needed(
+                            engine,
+                            &synced_by_target,
+                            &os_path_str,
+                            owner_group,
+                            clean_rel,
+                            dry_run,
+                        )?;
                         push_repo_preview(
                             &mut preview_entries,
-                            group_name,
+                            owner_group,
                             os_path,
                             path,
                             PlanActionKind::Okay,
@@ -334,16 +403,18 @@ pub fn tidy_groups_with_observer(
                         require_vault(engine, "encryption")?;
                         push_repo_preview(
                             &mut preview_entries,
-                            group_name,
+                            owner_group,
                             os_path,
                             &enc_path,
                             PlanActionKind::Overwrite,
                             PlanDirection::EncryptToRepo,
                         );
                         repo_ops.push(PlannedRepoTidyOp {
-                            group_name: group_name.clone(),
+                            group_name: owner_group.to_string(),
                             group_base: group_base.clone(),
+                            prune_stop_dir: scan_group_repo_dir.clone(),
                             rel_path: clean_rel.to_string(),
+                            os_target_str: os_path_str,
                             kind: RepoTidyKind::ConvertToContentEnc {
                                 src_path: path.to_path_buf(),
                                 src_kind,
@@ -353,21 +424,25 @@ pub fn tidy_groups_with_observer(
                     }
                 }
                 Some(m) if m.is_included() => {
-                    if is_enc_artifact {
-                        require_vault(engine, "decryption")?;
-                        let plain_path = group_repo_dir.join(clean_rel);
+                    let plain_path = owner_repo_dir.join(clean_rel);
+                    if is_enc_artifact || path != plain_path {
+                        if is_enc_artifact {
+                            require_vault(engine, "decryption")?;
+                        }
                         push_repo_preview(
                             &mut preview_entries,
-                            group_name,
+                            owner_group,
                             os_path,
                             &plain_path,
                             PlanActionKind::Overwrite,
                             PlanDirection::DecryptInRepo,
                         );
                         repo_ops.push(PlannedRepoTidyOp {
-                            group_name: group_name.clone(),
+                            group_name: owner_group.to_string(),
                             group_base: group_base.clone(),
+                            prune_stop_dir: scan_group_repo_dir.clone(),
                             rel_path: clean_rel.to_string(),
+                            os_target_str: os_path_str,
                             kind: RepoTidyKind::Decrypt {
                                 enc_path: path.to_path_buf(),
                                 src_kind,
@@ -375,9 +450,17 @@ pub fn tidy_groups_with_observer(
                             },
                         });
                     } else {
+                        sync_ledger_group_if_needed(
+                            engine,
+                            &synced_by_target,
+                            &os_path_str,
+                            owner_group,
+                            clean_rel,
+                            dry_run,
+                        )?;
                         push_repo_preview(
                             &mut preview_entries,
-                            group_name,
+                            owner_group,
                             os_path,
                             path,
                             PlanActionKind::Okay,
@@ -388,16 +471,18 @@ pub fn tidy_groups_with_observer(
                 _ => {
                     push_repo_preview(
                         &mut preview_entries,
-                        group_name,
+                        owner_group,
                         os_path,
                         path,
                         PlanActionKind::Delete,
                         PlanDirection::PlainToRepo,
                     );
                     repo_ops.push(PlannedRepoTidyOp {
-                        group_name: group_name.clone(),
+                        group_name: owner_group.to_string(),
                         group_base: group_base.clone(),
+                        prune_stop_dir: scan_group_repo_dir.clone(),
                         rel_path: clean_rel.to_string(),
+                        os_target_str: os_path_str,
                         kind: RepoTidyKind::RemoveExcluded {
                             repo_path: path.to_path_buf(),
                         },
@@ -408,16 +493,27 @@ pub fn tidy_groups_with_observer(
     }
 
     // 2. Plan orphan cleanup from `synced_files`
-    let mut plans = Vec::new();
-    if group_filters.is_empty() {
-        plans = plan(engine, None, lock)?;
+    let plans = if group_filters.is_empty() {
+        plan(engine, None, lock)?
     } else {
+        let mut collected = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
         for g in group_filters {
-            if engine.repo_config.groups.contains_key(g) {
-                plans.append(&mut plan(engine, Some(g.as_str()), lock)?);
+            if engine
+                .repo_config
+                .groups
+                .keys()
+                .any(|k| group_matches_filter(k, g))
+            {
+                for p in plan(engine, Some(g.as_str()), lock)? {
+                    if seen.insert((p.group_name.clone(), p.target_os_path.clone())) {
+                        collected.push(p);
+                    }
+                }
             }
         }
-    }
+        collected
+    };
 
     let active_target_paths: HashSet<String> = plans
         .iter()
@@ -433,14 +529,22 @@ pub fn tidy_groups_with_observer(
 
     let mut orphan_ops: Vec<PlannedOrphanOp> = Vec::new();
     for rec in all_synced {
-        if !group_filters.is_empty() && !group_filters.iter().any(|g| g == &rec.group_name) {
+        if !group_filters.is_empty()
+            && !group_filters
+                .iter()
+                .any(|g| group_matches_filter(&rec.group_name, g))
+        {
             continue;
         }
+        let (rec_root, _) = split_group_root_and_subpath(&rec.group_name);
         let is_cwd_group = engine
             .repo_config
-            .groups
-            .get(&rec.group_name)
-            .and_then(|g| resolve_group_target_path(g, &engine.devices, &engine.os_info))
+            .resolve_target_path(&rec.group_name, &engine.devices, &engine.os_info)
+            .or_else(|| {
+                engine
+                    .repo_config
+                    .resolve_target_path(rec_root, &engine.devices, &engine.os_info)
+            })
             .is_some_and(|s| is_cwd_group_path(&s));
         if is_cwd_group {
             let rec_path = Path::new(&rec.target_path);
@@ -458,10 +562,7 @@ pub fn tidy_groups_with_observer(
         let orphan_path = PathBuf::from(&rec.target_path);
         let group_base =
             resolve_orphan_group_base(engine, &rec.group_name, &rec.relative_path, &orphan_path);
-        let repo_path = engine
-            .repo_dir
-            .join(&rec.group_name)
-            .join(&rec.relative_path);
+        let repo_path = group_repo_dir(&engine.repo_dir, &rec.group_name).join(&rec.relative_path);
         let os_action = match policy {
             TidyOrphanPolicy::PurgeFromOs => PlanActionKind::Delete,
             TidyOrphanPolicy::KeepOnOs => PlanActionKind::Untrack,
@@ -493,7 +594,16 @@ pub fn tidy_groups_with_observer(
 
     let mut report = TidyReport::default();
     for op in repo_ops {
-        let len = execute_repo_tidy_op(engine, &op.group_name, &op.kind, &mut report)?;
+        let len = execute_repo_tidy_op(
+            engine,
+            &op.group_name,
+            &op.rel_path,
+            &op.os_target_str,
+            &op.prune_stop_dir,
+            &synced_by_target,
+            &op.kind,
+            &mut report,
+        )?;
         observer.on_file_progress(&op.group_name, &op.group_base, &op.rel_path, len);
     }
     for op in orphan_ops {
@@ -599,15 +709,38 @@ fn summarize_tidy_dry_run(
     sim
 }
 
+fn sync_ledger_group_if_needed(
+    engine: &SyncEngine,
+    synced_by_target: &std::collections::HashMap<String, crate::config::state::SyncedFileRecord>,
+    os_target_str: &str,
+    owner_group: &str,
+    clean_rel: &str,
+    dry_run: bool,
+) -> Result<(), EngineError> {
+    if dry_run {
+        return Ok(());
+    }
+    if let Some(rec) = synced_by_target.get(os_target_str)
+        && (rec.group_name != owner_group || rec.relative_path != clean_rel)
+    {
+        let mut updated = rec.clone();
+        updated.group_name = owner_group.to_string();
+        updated.relative_path = clean_rel.to_string();
+        engine.state_db.upsert_synced_file(&updated)?;
+    }
+    Ok(())
+}
+
 fn resolve_orphan_group_base(
     engine: &SyncEngine,
     group_name: &str,
     relative_path: &str,
     orphan_path: &Path,
 ) -> PathBuf {
-    if let Some(group_cfg) = engine.repo_config.groups.get(group_name)
-        && let Some(base_str) =
-            resolve_group_target_path(group_cfg, &engine.devices, &engine.os_info)
+    if let Some(base_str) =
+        engine
+            .repo_config
+            .resolve_target_path(group_name, &engine.devices, &engine.os_info)
     {
         let cfg_base = engine.expand_target_base(&base_str);
         if orphan_path.starts_with(&cfg_base) {
@@ -662,13 +795,17 @@ fn read_tidy_source_plaintext(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_repo_tidy_op(
     engine: &SyncEngine,
     group_name: &str,
+    clean_rel: &str,
+    os_target_str: &str,
+    prune_stop_dir: &Path,
+    synced_by_target: &std::collections::HashMap<String, crate::config::state::SyncedFileRecord>,
     kind: &RepoTidyKind,
     report: &mut TidyReport,
 ) -> Result<Option<u64>, EngineError> {
-    let group_repo_dir = engine.repo_dir.join(group_name);
     match kind {
         RepoTidyKind::ConvertToContentEnc {
             src_path,
@@ -682,8 +819,16 @@ fn execute_repo_tidy_op(
             write_file_safe(enc_path, &enc.to_bytes())?;
             if src_path != enc_path {
                 let _ = fs::remove_file(src_path);
-                prune_empty_parent_dirs(src_path, &group_repo_dir);
+                prune_empty_parent_dirs(src_path, prune_stop_dir);
             }
+            sync_ledger_group_if_needed(
+                engine,
+                synced_by_target,
+                os_target_str,
+                group_name,
+                clean_rel,
+                false,
+            )?;
             report.encrypted_in_repo += 1;
             Ok(Some(len))
         }
@@ -700,8 +845,16 @@ fn execute_repo_tidy_op(
             write_file_safe(fenc_path, &fenc.to_bytes())?;
             if src_path != fenc_path {
                 let _ = fs::remove_file(src_path);
-                prune_empty_parent_dirs(src_path, &group_repo_dir);
+                prune_empty_parent_dirs(src_path, prune_stop_dir);
             }
+            sync_ledger_group_if_needed(
+                engine,
+                synced_by_target,
+                os_target_str,
+                group_name,
+                clean_rel,
+                false,
+            )?;
             report.encrypted_in_repo += 1;
             Ok(Some(len))
         }
@@ -715,14 +868,22 @@ fn execute_repo_tidy_op(
             write_file_safe(plain_path, &decrypted)?;
             if enc_path != plain_path {
                 let _ = fs::remove_file(enc_path);
-                prune_empty_parent_dirs(enc_path, &group_repo_dir);
+                prune_empty_parent_dirs(enc_path, prune_stop_dir);
             }
+            sync_ledger_group_if_needed(
+                engine,
+                synced_by_target,
+                os_target_str,
+                group_name,
+                clean_rel,
+                false,
+            )?;
             report.decrypted_in_repo += 1;
             Ok(Some(len))
         }
         RepoTidyKind::RemoveExcluded { repo_path } => {
             let _ = fs::remove_file(repo_path);
-            prune_empty_parent_dirs(repo_path, &group_repo_dir);
+            prune_empty_parent_dirs(repo_path, prune_stop_dir);
             report.removed_from_repo += 1;
             Ok(None)
         }
@@ -733,7 +894,7 @@ fn execute_repo_tidy_op(
             if repo_path.is_file() {
                 fs::remove_file(repo_path)?;
             }
-            prune_empty_parent_dirs(repo_path, &group_repo_dir);
+            prune_empty_parent_dirs(repo_path, prune_stop_dir);
             engine.state_db.remove_synced_file(target_path_str)?;
             report.removed_from_repo += 1;
             Ok(None)

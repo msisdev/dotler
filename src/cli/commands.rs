@@ -114,8 +114,16 @@ fn handle_check<W: Write>(
     let report = if args.groups.is_empty() {
         run_check(&ctx, None, lock)?
     } else {
+        let resolved = ctx.resolve_repo()?;
+        let matched = resolved
+            .repo_config
+            .matching_groups(&args.groups)
+            .map_err(|missing| EngineError::GroupNotFound {
+                group: missing,
+                available: resolved.repo_config.groups.keys().cloned().collect(),
+            })?;
         let mut warnings = Vec::new();
-        for g in &args.groups {
+        for g in &matched {
             let sub = run_check(&ctx, Some(g), lock)?;
             for w in sub.warnings {
                 if !warnings.contains(&w) {
@@ -125,7 +133,7 @@ fn handle_check<W: Write>(
         }
         CheckReport {
             status: "valid".to_string(),
-            groups_checked: args.groups.len(),
+            groups_checked: matched.len(),
             warnings,
         }
     };
@@ -143,9 +151,14 @@ fn handle_status<W: Write>(
     let plans = if args.groups.is_empty() {
         run_status(&ctx, None, lock)?
     } else {
+        let mut seen = std::collections::BTreeSet::new();
         let mut all_plans = Vec::new();
         for g in &args.groups {
-            all_plans.extend(run_status(&ctx, Some(g), lock)?);
+            for p in run_status(&ctx, Some(g), lock)? {
+                if seen.insert((p.group_name.clone(), p.target_os_path.clone())) {
+                    all_plans.push(p);
+                }
+            }
         }
         all_plans.sort_by(|a, b| a.target_os_path.cmp(&b.target_os_path));
         all_plans

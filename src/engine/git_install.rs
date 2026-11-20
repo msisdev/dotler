@@ -7,10 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::local::{WalkDir, expand_tilde, resolve_home_for_config_path};
 use crate::config::repo::{
-    OsInfo, SelectionMode, evaluate_selection, is_cwd_group_path, is_home_group_path, is_symlink,
-    parse_selection_rules, prune_empty_parent_dirs, render_home_template,
-    resolve_group_target_path, validate_os_dir_path_with_home, validate_os_target_path_with_home,
-    validate_path_security, validate_rule_pattern,
+    OsInfo, RepoConfig, SelectionMode, evaluate_selection, group_matches_filter, group_repo_dir,
+    group_repo_rel_path, is_cwd_group_path, is_delegated_to_subgroup, is_home_group_path,
+    is_symlink, parse_selection_rules, prune_empty_parent_dirs, render_home_template,
+    validate_os_dir_path_with_home, validate_os_target_path_with_home, validate_path_security,
+    validate_rule_pattern,
 };
 use crate::config::state::{
     BACKUPS_DIR_PATH, DotlerLockGuard, InstalledFileRecord, StateDb, write_file_safe,
@@ -172,19 +173,16 @@ pub fn install_remote_with_cwd(
     let repo_config = &primary.config;
     let manifest_dir = &primary.manifest_dir;
 
-    let target_groups: Vec<String> = if groups.is_empty() {
-        repo_config.groups.keys().cloned().collect()
-    } else {
-        for g in groups {
-            if !repo_config.groups.contains_key(g) {
-                return Err(EngineError::GroupNotFound {
-                    group: g.clone(),
-                    available: repo_config.groups.keys().cloned().collect(),
-                });
-            }
-        }
-        groups.to_vec()
-    };
+    let target_groups: Vec<String> = repo_config
+        .matching_groups(groups)
+        .map_err(|missing| EngineError::GroupNotFound {
+            group: missing,
+            available: repo_config.groups.keys().cloned().collect(),
+        })?
+        .into_iter()
+        .filter(|g| !repo_config.is_anchor_only_group(g))
+        .map(str::to_string)
+        .collect();
 
     let os_info = OsInfo::detect();
     let home = resolve_home_for_config_path(state.path());
@@ -198,25 +196,44 @@ pub fn install_remote_with_cwd(
 
     for g_name in &target_groups {
         let group = &repo_config.groups[g_name];
+        let matched_selector = groups
+            .iter()
+            .filter(|sel| group_matches_filter(g_name, sel))
+            .max_by_key(|sel| sel.len());
+        let effective_override = path_override.map(|ov| {
+            if let Some(sel) = matched_selector
+                && let Some(rest) = g_name
+                    .strip_prefix(sel.as_str())
+                    .and_then(|r| r.strip_prefix('.'))
+            {
+                ov.join(group_repo_rel_path(rest))
+            } else {
+                ov.to_path_buf()
+            }
+        });
         let (target_base, boundary_dir) = resolve_install_target_base(
             g_name,
-            group,
-            path_override,
+            repo_config,
+            effective_override.as_deref(),
             devices,
             &os_info,
             &home,
             &cwd,
-            &repo_config.groups,
         )?;
         validate_os_dir_path_with_home(&target_base, &boundary_dir, &home)?;
 
-        let group_dir = manifest_dir.join(g_name);
+        let group_dir = group_repo_dir(manifest_dir, g_name);
         if !group_dir.is_dir() {
             continue;
         }
         let rules = parse_selection_rules(&group.files).unwrap_or_default();
+        let delegated_subpaths = repo_config.descendant_subpaths(g_name);
 
-        for entry in WalkDir::new(&group_dir).min_depth(1) {
+        for entry in WalkDir::new(&group_dir).min_depth(1).filter_entry(|e| {
+            !e.path().strip_prefix(&group_dir).is_ok_and(|rel| {
+                is_delegated_to_subgroup(&rel.to_string_lossy(), &delegated_subpaths)
+            })
+        }) {
             let entry = entry?;
             if entry.file_type().is_symlink() || is_symlink(entry.path()) {
                 return Err(EngineError::HardBlockedPath {
@@ -370,16 +387,14 @@ pub fn install_remote_with_cwd(
     execute_install_wal(planned, url, state, observer)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_install_target_base(
     group_name: &str,
-    group: &crate::config::repo::GroupConfig,
+    repo_config: &RepoConfig,
     path_override: Option<&Path>,
     devices: &[String],
     os_info: &OsInfo,
     home: &Path,
     cwd: &Path,
-    all_groups: &std::collections::BTreeMap<String, crate::config::repo::GroupConfig>,
 ) -> Result<(PathBuf, PathBuf), EngineError> {
     if let Some(override_path) = path_override {
         let path_str = override_path.to_string_lossy();
@@ -419,12 +434,12 @@ fn resolve_install_target_base(
         ));
     }
 
-    let path_str = resolve_group_target_path(group, devices, os_info).ok_or_else(|| {
-        EngineError::GroupNotFound {
+    let path_str = repo_config
+        .resolve_target_path(group_name, devices, os_info)
+        .ok_or_else(|| EngineError::GroupNotFound {
             group: group_name.to_string(),
-            available: all_groups.keys().cloned().collect(),
-        }
-    })?;
+            available: repo_config.groups.keys().cloned().collect(),
+        })?;
     validate_path_security(&path_str)?;
     if is_cwd_group_path(&path_str) {
         return Ok((expand_with_cwd(&path_str, cwd), cwd.to_path_buf()));
@@ -556,7 +571,11 @@ pub fn uninstall_remote_with_observer(
     } else {
         all_records
             .into_iter()
-            .filter(|r| groups.iter().any(|g| g == &r.group_name))
+            .filter(|r| {
+                groups
+                    .iter()
+                    .any(|g| group_matches_filter(&r.group_name, g))
+            })
             .collect()
     };
 
@@ -705,15 +724,16 @@ fn create_backup_file(
     timestamp: i64,
     state: &StateDb,
 ) -> Result<String, EngineError> {
+    let group_rel = group_repo_rel_path(group_name);
     let backup_root = if let Some(dotler_dir) = state.path().parent() {
         dotler_dir
             .join(BACKUPS_DIR_NAME)
             .join(timestamp.to_string())
-            .join(group_name)
+            .join(&group_rel)
     } else {
         expand_tilde(BACKUPS_DIR_PATH)
             .join(timestamp.to_string())
-            .join(group_name)
+            .join(&group_rel)
     };
     let dest = backup_root.join(rel);
     let source_bytes = fs::read(source)?;

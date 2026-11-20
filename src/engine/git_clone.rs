@@ -176,10 +176,14 @@ fn clone_repo_inner(
     let manifest_dir = &primary.manifest_dir;
 
     let selected_pairs = resolve_selected_pairs(repo_config, selectors)?;
-    let selected_groups: Vec<String> = selected_pairs.iter().map(|(_, eff)| eff.clone()).collect();
+    let selected_groups: Vec<String> = selected_pairs
+        .iter()
+        .filter(|(rem, _)| !repo_config.is_anchor_only_group(rem))
+        .map(|(_, eff)| eff.clone())
+        .collect();
 
     for (remote_name, _) in &selected_pairs {
-        for path in repo_config.groups[remote_name].paths.values() {
+        for path in repo_config.effective_group_paths(remote_name).values() {
             validate_path_security(path)?;
         }
     }
@@ -187,6 +191,7 @@ fn clone_repo_inner(
     let (preview_entries, clone_files) = build_clone_preview(
         url,
         manifest_dir,
+        repo_config,
         target_dir,
         &selected_pairs,
         &selected_groups,
@@ -261,24 +266,33 @@ fn resolve_selected_pairs(
             .map(|k| (k.clone(), k.clone()))
             .collect());
     }
+    let mut pairs = Vec::new();
+    let mut seen_remote = std::collections::BTreeSet::new();
     for sel in selectors {
-        if !repo_config.groups.contains_key(&sel.remote_group) {
+        let matched: Vec<&String> = repo_config
+            .groups
+            .keys()
+            .filter(|k| crate::config::repo::group_matches_filter(k, &sel.remote_group))
+            .collect();
+        if matched.is_empty() {
             return Err(EngineError::GroupNotFound {
                 group: sel.remote_group.clone(),
                 available: repo_config.groups.keys().cloned().collect(),
             });
         }
+        for remote_key in matched {
+            if !seen_remote.insert(remote_key.clone()) {
+                continue;
+            }
+            let suffix = remote_key.strip_prefix(&sel.remote_group).unwrap_or("");
+            let effective = match &sel.local_alias {
+                Some(alias) => format!("{alias}{suffix}"),
+                None => remote_key.clone(),
+            };
+            pairs.push((remote_key.clone(), effective));
+        }
     }
-    Ok(selectors
-        .iter()
-        .map(|s| {
-            let effective = s
-                .local_alias
-                .clone()
-                .unwrap_or_else(|| s.remote_group.clone());
-            (s.remote_group.clone(), effective)
-        })
-        .collect())
+    Ok(pairs)
 }
 
 type CloneFileItem = (String, PathBuf, String, u64);
@@ -286,6 +300,7 @@ type CloneFileItem = (String, PathBuf, String, u64);
 fn build_clone_preview(
     url: &RemoteRepoUrl,
     manifest_dir: &Path,
+    repo_config: &RepoConfig,
     target_dir: &Path,
     selected_pairs: &[(String, String)],
     selected_groups: &[String],
@@ -294,11 +309,17 @@ fn build_clone_preview(
     let mut clone_files = Vec::new();
 
     for (remote_name, effective_name) in selected_pairs {
-        let g_dir = manifest_dir.join(remote_name);
+        let g_dir = crate::config::repo::group_repo_dir(manifest_dir, remote_name);
         if !g_dir.is_dir() {
             continue;
         }
-        for entry in WalkDir::new(&g_dir).min_depth(1) {
+        let delegated = repo_config.descendant_subpaths(remote_name);
+        let eff_target_dir = crate::config::repo::group_repo_dir(target_dir, effective_name);
+        for entry in WalkDir::new(&g_dir).min_depth(1).filter_entry(|e| {
+            !e.path().strip_prefix(&g_dir).is_ok_and(|rel| {
+                crate::config::repo::is_delegated_to_subgroup(&rel.to_string_lossy(), &delegated)
+            })
+        }) {
             let entry = entry?;
             if !entry.file_type().is_file() {
                 continue;
@@ -311,11 +332,17 @@ fn build_clone_preview(
                 .to_string();
             let is_enc = is_encrypted_repo_extension(entry.path());
             let size = fs::metadata(entry.path()).map(|m| m.len()).unwrap_or(0);
+            let remote_rel_dir = crate::config::repo::group_repo_rel_path(remote_name);
             preview_entries.push(PlanPreviewEntry {
                 group_name: effective_name.clone(),
-                os_path: PathBuf::from(format!("{}/{}/{}", url.raw, remote_name, rel)),
+                os_path: PathBuf::from(format!(
+                    "{}/{}/{}",
+                    url.raw,
+                    remote_rel_dir.to_string_lossy(),
+                    rel
+                )),
                 os_action: PlanActionKind::Okay,
-                repo_path: target_dir.join(effective_name).join(&rel),
+                repo_path: eff_target_dir.join(&rel),
                 repo_action: PlanActionKind::Create,
                 direction: if is_enc {
                     PlanDirection::EncryptToRepo
@@ -323,12 +350,7 @@ fn build_clone_preview(
                     PlanDirection::PlainToRepo
                 },
             });
-            clone_files.push((
-                effective_name.clone(),
-                target_dir.join(effective_name),
-                rel,
-                size,
-            ));
+            clone_files.push((effective_name.clone(), eff_target_dir.clone(), rel, size));
         }
     }
 
@@ -361,33 +383,103 @@ fn apply_group_pruning_and_aliases(
     repo_config: &RepoConfig,
     selected_pairs: &[(String, String)],
 ) -> Result<(), EngineError> {
-    for remote_group in repo_config.groups.keys() {
-        if !selected_pairs.iter().any(|(r, _)| r == remote_group) {
-            let unselected_dir = manifest_dir.join(remote_group);
-            if unselected_dir.is_dir() {
-                let _ = fs::remove_dir_all(&unselected_dir);
-            }
-        }
+    let reorg_dir = manifest_dir.join(".dotler-tmp-reorg");
+    if reorg_dir.exists() {
+        let _ = fs::remove_dir_all(&reorg_dir);
     }
+    fs::create_dir_all(&reorg_dir)?;
+
     for (remote_name, effective_name) in selected_pairs {
-        if remote_name != effective_name {
-            let src_dir = manifest_dir.join(remote_name);
-            let dst_dir = manifest_dir.join(effective_name);
-            if src_dir.is_dir() {
-                fs::rename(&src_dir, &dst_dir)?;
+        let src_dir = crate::config::repo::group_repo_dir(manifest_dir, remote_name);
+        if !src_dir.is_dir() {
+            continue;
+        }
+        let delegated = repo_config.descendant_subpaths(remote_name);
+        let dst_dir = crate::config::repo::group_repo_dir(&reorg_dir, effective_name);
+        for entry in WalkDir::new(&src_dir).min_depth(1).filter_entry(|e| {
+            !e.path().strip_prefix(&src_dir).is_ok_and(|rel| {
+                crate::config::repo::is_delegated_to_subgroup(&rel.to_string_lossy(), &delegated)
+            })
+        }) {
+            let entry = entry?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            if let Ok(rel) = entry.path().strip_prefix(&src_dir) {
+                let dst_file = dst_dir.join(rel);
+                if let Some(parent) = dst_file.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::rename(entry.path(), &dst_file)?;
             }
         }
     }
+
+    let mut top_level_group_roots = std::collections::BTreeSet::new();
+    for remote_group in repo_config.groups.keys() {
+        let (root, _) = crate::config::repo::split_group_root_and_subpath(remote_group);
+        top_level_group_roots.insert(root.to_string());
+    }
+    for root in top_level_group_roots {
+        let dir = manifest_dir.join(&root);
+        if dir.is_dir() {
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    if let Ok(entries) = fs::read_dir(&reorg_dir) {
+        for entry in entries.flatten() {
+            let dst = manifest_dir.join(entry.file_name());
+            if dst.exists() {
+                let _ = fs::remove_dir_all(&dst);
+            }
+            fs::rename(entry.path(), &dst)?;
+        }
+    }
+    let _ = fs::remove_dir_all(&reorg_dir);
+
     let mut new_groups = BTreeMap::new();
     for (remote_name, effective_name) in selected_pairs {
-        if let Some(cfg) = repo_config.groups.get(remote_name) {
-            new_groups.insert(effective_name.clone(), cfg.clone());
+        let Some(cfg) = repo_config.groups.get(remote_name) else {
+            continue;
+        };
+        let (eff_root, eff_sub_opt) =
+            crate::config::repo::split_group_root_and_subpath(effective_name);
+        if eff_sub_opt.is_some() {
+            let (rem_root, _) = crate::config::repo::split_group_root_and_subpath(remote_name);
+            if !new_groups.contains_key(eff_root)
+                && let Some(rem_root_cfg) = repo_config.groups.get(rem_root)
+            {
+                new_groups.insert(
+                    eff_root.to_string(),
+                    crate::config::repo::GroupConfig {
+                        files: String::new(),
+                        paths: rem_root_cfg.paths.clone(),
+                    },
+                );
+            }
+            new_groups.insert(
+                effective_name.clone(),
+                crate::config::repo::GroupConfig {
+                    files: cfg.files.clone(),
+                    paths: BTreeMap::new(),
+                },
+            );
+        } else {
+            new_groups.insert(
+                effective_name.clone(),
+                crate::config::repo::GroupConfig {
+                    files: cfg.files.clone(),
+                    paths: repo_config.effective_group_paths(remote_name),
+                },
+            );
         }
     }
     let updated_cfg = RepoConfig {
         vault: repo_config.vault.clone(),
         groups: new_groups,
     };
+    updated_cfg.validate_inner_for_clone()?;
     if let Ok(serialized) = toml::to_string_pretty(&updated_cfg) {
         write_file_safe(&manifest_dir.join("dotler.toml"), serialized.as_bytes())?;
     }

@@ -403,11 +403,12 @@ fn build_manifest_summary(m: &DiscoveredManifest) -> RemoteManifestSummary {
         .config
         .groups
         .iter()
+        .filter(|(group_name, _)| !m.config.is_anchor_only_group(group_name))
         .map(|(group_name, group)| {
             let rules = parse_selection_rules(&group.files).unwrap_or_default();
             RemoteGroupInfo {
                 name: group_name.clone(),
-                target_paths: group.paths.clone(),
+                target_paths: m.config.effective_group_paths(group_name),
                 has_encrypted: crate::config::repo::rules_have_effective_encryption(&rules),
                 files_rule: group.files.clone(),
             }

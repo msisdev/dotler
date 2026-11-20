@@ -528,7 +528,7 @@ pub fn validate_repo_target_disjointness<'a>(
     }
 
     for group_name in group_names {
-        let group_storage = canon_repo.join(group_name);
+        let group_storage = crate::config::repo::group_repo_dir(&canon_repo, group_name);
         if resolved_target == group_storage || resolved_target.starts_with(&group_storage) {
             return Err(ConfigError::HardBlockedPath {
                 path: target_path.display().to_string(),

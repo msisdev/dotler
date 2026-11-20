@@ -61,7 +61,7 @@ pub fn is_encrypted_repo_extension(path: &Path) -> bool {
 pub fn has_encrypted_repo_files(repo_path: &Path, repo_cfg: &RepoConfig) -> bool {
     let expected_vid = repo_cfg.vault.as_ref().map(|v| v.vault_id.as_str());
     for g_name in repo_cfg.groups.keys() {
-        let group_dir = repo_path.join(g_name);
+        let group_dir = crate::config::repo::group_repo_dir(repo_path, g_name);
         if !group_dir.is_dir() {
             continue;
         }

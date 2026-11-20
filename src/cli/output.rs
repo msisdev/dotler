@@ -167,6 +167,9 @@ impl CliError {
             CliError::Config(crate::config::ConfigError::UnknownOsKey { .. }) => {
                 "UNKNOWN_OS_KEY".to_string()
             }
+            CliError::Config(crate::config::ConfigError::InvalidGroupHierarchy { .. }) => {
+                "INVALID_GROUP_HIERARCHY".to_string()
+            }
             CliError::Config(crate::config::ConfigError::TomlSyntaxError(_)) => {
                 "SYNTAX_ERROR".to_string()
             }

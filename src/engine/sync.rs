@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::local::expand_tilde;
 use crate::config::repo::{
-    OsInfo, RepoConfig, is_cwd_group_path, is_home_group_path, is_symlink, prune_empty_parent_dirs,
-    resolve_group_target_path, unrender_home_template, validate_os_target_path_with_home,
+    OsInfo, RepoConfig, group_repo_dir, is_cwd_group_path, is_home_group_path, is_symlink,
+    prune_empty_parent_dirs, unrender_home_template, validate_os_target_path_with_home,
     validate_repo_target_disjointness,
 };
 pub use crate::config::state::{ATOMIC_REPLACE_RETRIES, TMP_FILE_PREFIX, write_file_safe};
@@ -158,8 +158,9 @@ impl<'a> SyncEngine<'a> {
     }
 
     pub(crate) fn boundary_for_group(&self, group_name: &str) -> Result<PathBuf, EngineError> {
-        if let Some(group) = self.repo_config.groups.get(group_name)
-            && let Some(base_str) = resolve_group_target_path(group, &self.devices, &self.os_info)
+        if let Some(base_str) =
+            self.repo_config
+                .resolve_target_path(group_name, &self.devices, &self.os_info)
         {
             let (_, boundary) = self.expand_target_base_checked(&base_str)?;
             return Ok(boundary);
@@ -169,9 +170,7 @@ impl<'a> SyncEngine<'a> {
 
     pub(crate) fn group_base_for(&self, group_name: &str) -> PathBuf {
         self.repo_config
-            .groups
-            .get(group_name)
-            .and_then(|g| resolve_group_target_path(g, &self.devices, &self.os_info))
+            .resolve_target_path(group_name, &self.devices, &self.os_info)
             .map(|s| self.expand_target_base(&s))
             .unwrap_or_else(|| self.effective_home_dir())
     }
@@ -404,12 +403,12 @@ impl<'a> SyncEngine<'a> {
                     repo_paths_to_remove,
                 } => {
                     let has_repo_files = !repo_paths_to_remove.is_empty();
-                    let group_repo_dir = self.repo_dir.join(&plan.group_name);
+                    let g_repo_dir = group_repo_dir(&self.repo_dir, &plan.group_name);
                     for repo_path in &repo_paths_to_remove {
                         if repo_path.is_file() {
                             fs::remove_file(repo_path)?;
                         }
-                        prune_empty_parent_dirs(repo_path, &group_repo_dir);
+                        prune_empty_parent_dirs(repo_path, &g_repo_dir);
                     }
                     self.state_db
                         .remove_synced_file(&plan.target_os_path.to_string_lossy())?;
@@ -458,18 +457,17 @@ impl<'a> SyncEngine<'a> {
 }
 
 fn all_repo_paths_for_plan(engine: &SyncEngine, plan: &FileActionPlan) -> Vec<PathBuf> {
-    let group_repo_dir = engine.repo_dir.join(&plan.group_name);
+    let g_repo_dir = group_repo_dir(&engine.repo_dir, &plan.group_name);
     let mut paths = vec![
-        group_repo_dir.join(&plan.relative_path),
-        group_repo_dir.join(format!("{}{CONTENT_ENC_SUFFIX}", plan.relative_path)),
+        g_repo_dir.join(&plan.relative_path),
+        g_repo_dir.join(format!("{}{CONTENT_ENC_SUFFIX}", plan.relative_path)),
     ];
     let expected_vid = engine
         .repo_config
         .vault
         .as_ref()
         .map(|v| v.vault_id.as_str());
-    let legacy_enc =
-        group_repo_dir.join(format!("{}{LEGACY_CONTENT_ENC_SUFFIX}", plan.relative_path));
+    let legacy_enc = g_repo_dir.join(format!("{}{LEGACY_CONTENT_ENC_SUFFIX}", plan.relative_path));
     if legacy_enc != plan.repo_file_path
         && legacy_enc.is_file()
         && fs::read(&legacy_enc)
@@ -480,9 +478,9 @@ fn all_repo_paths_for_plan(engine: &SyncEngine, plan: &FileActionPlan) -> Vec<Pa
     }
     if let Some(key) = engine.vault_key {
         let fenc_name = key.derive_full_enc_filename(&plan.relative_path);
-        paths.push(group_repo_dir.join(&fenc_name));
+        paths.push(g_repo_dir.join(&fenc_name));
         if let Some(stem) = fenc_name.strip_suffix(FULL_ENC_SUFFIX) {
-            let legacy_fenc = group_repo_dir.join(format!("{stem}{LEGACY_FULL_ENC_SUFFIX}"));
+            let legacy_fenc = g_repo_dir.join(format!("{stem}{LEGACY_FULL_ENC_SUFFIX}"));
             if legacy_fenc.is_file()
                 && fs::read(&legacy_fenc)
                     .map(|b| is_legacy_dotler_archive_bytes(&b, expected_vid))
@@ -568,11 +566,11 @@ fn write_import_payload(
         write_file_safe(&plan.repo_file_path, repo_payload_bytes)?;
     }
 
-    let group_repo_dir = engine.repo_dir.join(&plan.group_name);
+    let g_repo_dir = group_repo_dir(&engine.repo_dir, &plan.group_name);
     for other in counterparts {
         if other != plan.repo_file_path && other.is_file() {
             let _ = fs::remove_file(&other);
-            prune_empty_parent_dirs(&other, &group_repo_dir);
+            prune_empty_parent_dirs(&other, &g_repo_dir);
         }
     }
     Ok(())
@@ -586,11 +584,28 @@ pub(crate) fn collect_group_plans(
     if groups.is_empty() {
         return plan(engine, None, lock);
     }
-    let mut plans = Vec::new();
     for g in groups {
-        plans.append(&mut plan(engine, Some(g), lock)?);
+        if !engine
+            .repo_config
+            .groups
+            .keys()
+            .any(|k| crate::config::repo::group_matches_filter(k, g))
+        {
+            return Err(EngineError::GroupNotFound {
+                group: g.clone(),
+                available: engine.repo_config.groups.keys().cloned().collect(),
+            });
+        }
     }
-    Ok(plans)
+    let all = plan(engine, None, lock)?;
+    Ok(all
+        .into_iter()
+        .filter(|p| {
+            groups
+                .iter()
+                .any(|f| crate::config::repo::group_matches_filter(&p.group_name, f))
+        })
+        .collect())
 }
 
 /// Unified `import` command entry point shared by CLI (`dotler import`) and MCP (`dotler_import`).

@@ -17,7 +17,8 @@ pub use local::{
 };
 pub use repo::{
     GroupConfig, OsInfo, RepoConfig, SelectionMode, SelectionRule, VaultConfig, get_repo_config,
-    render_home_template, unrender_home_template,
+    group_matches_filter, group_repo_dir, group_repo_rel_path, is_delegated_to_subgroup,
+    is_sub_group_name, render_home_template, split_group_root_and_subpath, unrender_home_template,
 };
 pub use resource::Resource;
 pub use state::{
@@ -72,6 +73,10 @@ pub enum ConfigError {
         key: String,
         hint: String,
     },
+    InvalidGroupHierarchy {
+        group: String,
+        reason: String,
+    },
     MissingVaultConfig,
     CrossGroupFileCollision {
         path: String,
@@ -123,6 +128,9 @@ impl std::fmt::Display for ConfigError {
                 write!(f, "Invalid template content in '{path}': {reason}")
             }
             Self::UnknownOsKey { key, hint } => write!(f, "Unknown OS key '{key}'. {hint}"),
+            Self::InvalidGroupHierarchy { group, reason } => {
+                write!(f, "Invalid group hierarchy for '[{group}]': {reason}")
+            }
             Self::MissingVaultConfig => write!(
                 f,
                 "Missing vault configuration in repository manifest: encrypted files are declared but vault is not configured"

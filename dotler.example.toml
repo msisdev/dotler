@@ -41,3 +41,14 @@
 # .bash_profile tmpl
 # .netrc enc
 # """
+#
+# # Optional dotted sub-groups: store archives in nested `<group>/<sub...>/` folders.
+# # Define `os-*` / device paths ONLY on the top-level group (`<root_path>/<sub...>` is derived automatically).
+# # [vault]
+# # os-nux = "./notes"
+# # os-mac = "./notes"
+# # os-win = "./notes"
+# # files = "* enc=full"
+# #
+# # [vault.sleep]
+# # files = "* enc=full"

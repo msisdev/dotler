@@ -100,13 +100,23 @@ files = """
 .env enc
 .env.* enc=full
 """
+
+# Pattern D: Partition subfolders via dotted sub-groups (paths defined on top-level only)
+[vault]
+os-nux = "./notes"
+os-mac = "./notes"
+os-win = "./notes"
+files = "* enc=full"
+
+[vault.sleep]
+files = "* enc=full"
 ```
 
 ## 3. Standard Operational Guidelines & Command Cheatsheet
 Always follow the deterministic 5-step agent execution loop:
 1. Inspect or edit `dotler.toml` and dotfiles.
 2. Statically validate configuration: `dotler check --json`
-3. Reconcile formats, prune locally deleted repo copies, and clean orphans: `dotler tidy --json` (use `dotler tidy --purge --json` to permanently delete orphaned OS files)
+3. Reconcile formats, relocate files across parent/sub-groups, prune locally deleted repo copies, and clean orphans: `dotler tidy --json` (use `dotler tidy --purge --json` to permanently delete orphaned OS files)
 4. Pre-simulate operations without disk modification:
    - For collection & deletion pruning: `dotler import --dry-run --json`
    - For deployment: `dotler export --dry-run --json`
@@ -195,6 +205,7 @@ mod tests {
             );
         }
         assert!(INIT_AI_HINT.contains("dotler ai"));
+        assert!(DEFAULT_DOTLER_TOML.contains("[vault.sleep]"));
     }
 
     #[test]
@@ -208,6 +219,7 @@ mod tests {
         assert!(briefing.contains("Unmatched files are ignored by default"));
         assert!(briefing.contains("# Pattern A: Select specific files only"));
         assert!(briefing.contains("# Pattern B: Track an entire app directory"));
+        assert!(briefing.contains("# Pattern D: Partition subfolders via dotted sub-groups"));
         assert!(briefing.contains("## 3. Standard Operational Guidelines & Command Cheatsheet"));
         assert!(briefing.contains("## 4. Security Guardrails & Prohibitions"));
         assert!(briefing.contains("keyring_ready: true"));

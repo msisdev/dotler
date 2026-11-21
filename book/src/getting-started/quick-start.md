@@ -44,6 +44,7 @@ files = """
 - `<pattern> tmpl`: Include matching UTF-8 text file or directory with reversible `{{ $HOME }}` <-> OS home directory substitution (`import` replaces your home path with `{{ $HOME }}`; `export` and `git install` render `{{ $HOME }}` to the target machine's home path).
 - `<pattern> enc tmpl` / `<pattern> enc=full tmpl`: Combine `.dotler.enc` or `.dotler.fenc` encryption with `{{ $HOME }}` template substitution.
 - `!<pattern>`: Exclude matching file or directory.
+- `[<group>.<sub...>]` (Dotted sub-groups): Organize subdirectories into `<group>/<sub...>/` inside the repository. Define `os-*` / device paths only on the top-level `[<group>]` section (`<root_path>/<sub...>` is derived automatically, and running `dotler import <group>` targets the entire `<group>.*` subtree).
 
 ## 3. Import from Your System
 

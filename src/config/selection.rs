@@ -115,7 +115,7 @@ pub fn parse_selection_rules(files_content: &str) -> Result<Vec<SelectionRule>, 
                         "Exclusion prefix '!' already specifies selection mode; trailing attribute is redundant."
                             .to_string()
                     } else if tokens[1] == "encrpyt" || tokens[1].contains("encr") {
-                        "Supported selection attributes are 'enc' ('enc=cont'), 'enc=full', and 'tmpl'. Check for typos."
+                        "Supported selection attributes are 'enc' ('enc=cont'), 'enc=full', and 'tpl'. Check for typos."
                             .to_string()
                     } else {
                         "Expected single pattern after prefix '!' with no trailing attributes."
@@ -144,7 +144,7 @@ pub fn parse_selection_rules(files_content: &str) -> Result<Vec<SelectionRule>, 
                     let pattern = tokens[0].to_string();
                     validate_rule_pattern(&pattern)?;
                     let mut enc_kind: Option<ParsedEncKind> = None;
-                    let mut has_tmpl = false;
+                    let mut has_tpl = false;
                     for &attr in &tokens[1..] {
                         match attr {
                             "enc" | "enc=cont" => {
@@ -169,22 +169,22 @@ pub fn parse_selection_rules(files_content: &str) -> Result<Vec<SelectionRule>, 
                                 }
                                 enc_kind = Some(ParsedEncKind::Full);
                             }
-                            "tmpl" => {
-                                if has_tmpl {
+                            "tpl" => {
+                                if has_tpl {
                                     return Err(ConfigError::InvalidSelectionAttribute {
                                         attribute: tokens[1..].join(" "),
                                         line_no,
-                                        hint: "Duplicate 'tmpl' attribute on the same rule."
+                                        hint: "Duplicate 'tpl' attribute on the same rule."
                                             .to_string(),
                                     });
                                 }
-                                has_tmpl = true;
+                                has_tpl = true;
                             }
                             "encrypt" => {
                                 return Err(ConfigError::InvalidSelectionAttribute {
                                     attribute: attr.to_string(),
                                     line_no,
-                                    hint: "Use 'enc' ('enc=cont') or 'enc=full' instead of 'encrypt'. Supported selection attributes are 'enc', 'enc=cont', 'enc=full', and 'tmpl'."
+                                    hint: "Use 'enc' ('enc=cont') or 'enc=full' instead of 'encrypt'. Supported selection attributes are 'enc', 'enc=cont', 'enc=full', and 'tpl'."
                                         .to_string(),
                                 });
                             }
@@ -193,7 +193,7 @@ pub fn parse_selection_rules(files_content: &str) -> Result<Vec<SelectionRule>, 
                                     attribute: attr.to_string(),
                                     line_no,
                                     hint: format!(
-                                        "Use 'enc=full' instead of '{attr}' to encrypt both file path and content. Supported selection attributes are 'enc', 'enc=cont', 'enc=full', and 'tmpl'."
+                                        "Use 'enc=full' instead of '{attr}' to encrypt both file path and content. Supported selection attributes are 'enc', 'enc=cont', 'enc=full', and 'tpl'."
                                     ),
                                 });
                             }
@@ -201,16 +201,16 @@ pub fn parse_selection_rules(files_content: &str) -> Result<Vec<SelectionRule>, 
                                 return Err(ConfigError::InvalidSelectionAttribute {
                                     attribute: attr.to_string(),
                                     line_no,
-                                    hint: "Unsupported 'enc=' mode. Use 'enc' ('enc=cont') for content-only encryption or 'enc=full' to encrypt both file path and content, optionally combined with 'tmpl'."
+                                    hint: "Unsupported 'enc=' mode. Use 'enc' ('enc=cont') for content-only encryption or 'enc=full' to encrypt both file path and content, optionally combined with 'tpl'."
                                         .to_string(),
                                 });
                             }
-                            "template" | "tmp" | "tpl" => {
+                            "template" | "tmp" | "tmpl" => {
                                 return Err(ConfigError::InvalidSelectionAttribute {
                                     attribute: attr.to_string(),
                                     line_no,
                                     hint: format!(
-                                        "Use 'tmpl' instead of '{attr}'. Supported selection attributes are 'enc', 'enc=cont', 'enc=full', and 'tmpl'."
+                                        "Use 'tpl' instead of '{attr}'. Supported selection attributes are 'enc', 'enc=cont', 'enc=full', and 'tpl'."
                                     ),
                                 });
                             }
@@ -218,13 +218,13 @@ pub fn parse_selection_rules(files_content: &str) -> Result<Vec<SelectionRule>, 
                                 return Err(ConfigError::InvalidSelectionAttribute {
                                     attribute: attr.to_string(),
                                     line_no,
-                                    hint: "Supported selection attributes are 'enc' ('enc=cont'), 'enc=full', and 'tmpl'. Check for typos."
+                                    hint: "Supported selection attributes are 'enc' ('enc=cont'), 'enc=full', and 'tpl'. Check for typos."
                                         .to_string(),
                                 });
                             }
                         }
                     }
-                    let mode = match (enc_kind, has_tmpl) {
+                    let mode = match (enc_kind, has_tpl) {
                         (Some(ParsedEncKind::Content), false) => SelectionMode::EncryptedInclude,
                         (Some(ParsedEncKind::Full), false) => SelectionMode::FullEncryptedInclude,
                         (None, true) => SelectionMode::TemplateInclude,
@@ -246,7 +246,7 @@ pub fn parse_selection_rules(files_content: &str) -> Result<Vec<SelectionRule>, 
                     return Err(ConfigError::InvalidSelectionAttribute {
                         attribute: tokens[1..].join(" "),
                         line_no,
-                        hint: "Expected format: '<pattern>', '<pattern> enc' ('enc=cont'), '<pattern> enc=full', '<pattern> tmpl', '<pattern> enc tmpl', '<pattern> enc=full tmpl', or '!<pattern>'."
+                        hint: "Expected format: '<pattern>', '<pattern> enc' ('enc=cont'), '<pattern> enc=full', '<pattern> tpl', '<pattern> enc tpl', '<pattern> enc=full tpl', or '!<pattern>'."
                             .to_string(),
                     });
                 }
@@ -547,7 +547,7 @@ mod tests {
 
     #[test]
     fn test_selection_rules_parsing_standard_syntax() {
-        let content = "\n# Plaintext include\nconfig.json\n# Encrypted include\nid_ed25519 enc\n# Template include\n.gitconfig tmpl\n# Encrypted template include (both attribute orders)\ncredentials.toml enc tmpl\nsecrets.toml tmpl enc\n# Exclusion\n!temp*\n";
+        let content = "\n# Plaintext include\nconfig.json\n# Encrypted include\nid_ed25519 enc\n# Template include\n.gitconfig tpl\n# Encrypted template include (both attribute orders)\ncredentials.toml enc tpl\nsecrets.toml tpl enc\n# Exclusion\n!temp*\n";
         let rules = parse_selection_rules(content).expect("rules should parse cleanly");
         let expected = [
             ("config.json", SelectionMode::PlaintextInclude, 3),
@@ -587,12 +587,12 @@ mod tests {
                 assert_eq!(attribute, "encrpyt");
                 assert_eq!(line_no, 3);
                 assert!(hint.contains("enc"));
-                assert!(hint.contains("tmpl"));
+                assert!(hint.contains("tpl"));
             }
             other => panic!("expected InvalidSelectionAttribute, got {other:?}"),
         }
 
-        for legacy in ["encrypt", "template", "tmp", "tpl"] {
+        for legacy in ["encrypt", "template", "tmp", "tmpl"] {
             let line = format!("secret.txt {legacy}");
             let err = parse_selection_rules(&line).expect_err("legacy/alias attribute must fail");
             match err {
@@ -600,7 +600,7 @@ mod tests {
                     attribute, hint, ..
                 } => {
                     assert_eq!(attribute, legacy);
-                    assert!(hint.contains("enc") && hint.contains("tmpl"));
+                    assert!(hint.contains("enc") && hint.contains("tpl"));
                 }
                 other => panic!("expected InvalidSelectionAttribute, got {other:?}"),
             }
@@ -689,7 +689,7 @@ mod tests {
 
     #[test]
     fn test_enc_cont_and_enc_full_combinations_and_literal_detection() {
-        let content = "\n* enc=full\nid_ed25519 enc=cont\nconfig enc=cont tmpl\n*.secret tmpl enc=full\ndir_rules/ enc=full\nliteral_secret.pem enc=full\noverridden.pem enc=full\noverridden.pem\n!known_hosts*\n";
+        let content = "\n* enc=full\nid_ed25519 enc=cont\nconfig enc=cont tpl\n*.secret tpl enc=full\ndir_rules/ enc=full\nliteral_secret.pem enc=full\noverridden.pem enc=full\noverridden.pem\n!known_hosts*\n";
         let rules = parse_selection_rules(content).expect("enc=cont and enc=full should parse");
 
         assert_eq!(

@@ -816,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn install_remote_decrypts_enc_and_enc_tmpl_and_rejects_locked_vault() {
+    fn install_remote_decrypts_enc_and_enc_tpl_and_rejects_locked_vault() {
         let _mock = crate::crypto::keyring::MockKeyringGuard::new();
         unsafe {
             std::env::remove_var(crate::crypto::keyring::PASSPHRASE_ENV_VAR);
@@ -834,20 +834,20 @@ mod tests {
         let pass = SecretString::new("remote-install-pass-123".to_string());
         let (vcfg, vkey, _) = init_vault(&pass).unwrap();
         let enc_plain = vkey.encrypt_file(b"API_KEY=xyz\n").unwrap().to_bytes();
-        let enc_tmpl = vkey
+        let enc_tpl = vkey
             .encrypt_file(b"HOME_DIR={{ $HOME }}/bin\n")
             .unwrap()
             .to_bytes();
 
         let remote_toml = format!(
-            "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[sec]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nos-bsd = \"~\"\nfiles = \"\"\"\n.env enc\n.path_env enc tmpl\n\"\"\"\n",
+            "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[sec]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nos-bsd = \"~\"\nfiles = \"\"\"\n.env enc\n.path_env enc tpl\n\"\"\"\n",
             vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
         );
         let (_git_tmp, url) = create_test_bare_repo(
             &remote_toml,
             &[
                 ("sec/.env.dotler.enc", &enc_plain),
-                ("sec/.path_env.dotler.enc", &enc_tmpl),
+                ("sec/.path_env.dotler.enc", &enc_tpl),
             ],
         );
 
@@ -870,7 +870,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(locked_err.exit_code(), 4);
 
-        // With vault key unlocked (e.g. keyring), both `.enc` and `enc tmpl` deploy as plaintext
+        // With vault key unlocked (e.g. keyring), both `.enc` and `enc tpl` deploy as plaintext
         crate::crypto::keyring::OsKeyring::set_for_vault(&vcfg.vault_id, &pass).unwrap();
         let rep =
             install_remote(&url, &["sec".to_string()], None, None, &[], &state, &lock).unwrap();

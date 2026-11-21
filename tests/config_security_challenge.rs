@@ -22,8 +22,8 @@ fn test_selection_rule_typo_encrpyt_reports_exact_line() {
             assert_eq!(attribute, "encrpyt");
             assert_eq!(line_no, 4);
             assert!(
-                hint.contains("enc") && hint.contains("tmpl"),
-                "hint should suggest the correct attributes 'enc' and 'tmpl'"
+                hint.contains("enc") && hint.contains("tpl"),
+                "hint should suggest the correct attributes 'enc' and 'tpl'"
             );
         }
         other => panic!("expected InvalidSelectionAttribute, got: {other:?}"),
@@ -54,7 +54,7 @@ fn test_selection_rule_rejects_typos_in_attribute() {
         } => {
             assert_eq!(attribute, "encrpyt");
             assert_eq!(line_no, 1);
-            assert!(hint.contains("enc") && hint.contains("tmpl"));
+            assert!(hint.contains("enc") && hint.contains("tpl"));
         }
         other => panic!("expected InvalidSelectionAttribute, got: {other:?}"),
     }

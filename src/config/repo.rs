@@ -880,7 +880,7 @@ files = """
     fn test_vault_required_when_encrypted_rule_present() {
         for toml in [
             "[secrets]\nfiles = \"id_rsa enc\"\nos-nux = \"~/.ssh\"\n",
-            "[secrets]\nfiles = \"credentials.toml enc tmpl\"\nos-nux = \"~/.config/app\"\n",
+            "[secrets]\nfiles = \"credentials.toml enc tpl\"\nos-nux = \"~/.config/app\"\n",
         ] {
             let err = RepoConfig::parse(toml).expect_err("enc rule without vault must fail");
             assert!(matches!(err, ConfigError::MissingVaultConfig));

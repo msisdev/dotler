@@ -18,13 +18,13 @@ pub fn validate_template_text<'a>(
     if content.contains(&0) {
         return Err(ConfigError::InvalidTemplateContent {
             path: path_label.to_string(),
-            reason: "binary file (contains NUL byte) cannot use the 'tmpl' template attribute"
+            reason: "binary file (contains NUL byte) cannot use the 'tpl' template attribute"
                 .to_string(),
         });
     }
     std::str::from_utf8(content).map_err(|_| ConfigError::InvalidTemplateContent {
         path: path_label.to_string(),
-        reason: "non-UTF-8 file cannot use the 'tmpl' template attribute".to_string(),
+        reason: "non-UTF-8 file cannot use the 'tpl' template attribute".to_string(),
     })
 }
 

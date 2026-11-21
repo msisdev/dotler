@@ -128,7 +128,7 @@ lua
 fn test_home_template_bidirectional_import_export_tidy_and_remote_install() {
     let sb = SyncTestSandbox::new();
     let lock = sb.acquire_lock();
-    let (vault_cfg, vault_key) = sb.create_vault("tmpl-vault-passphrase");
+    let (vault_cfg, vault_key) = sb.create_vault("tpl-vault-passphrase");
 
     let home_str = sb.home_dir.to_string_lossy().replace('\\', "/");
     let home_str = home_str.trim_end_matches('/');
@@ -143,8 +143,8 @@ recovery_slot = "{}"
 os-nux = "~"
 os-mac = "~"
 files = """
-.gitconfig tmpl
-.credentials enc tmpl
+.gitconfig tpl
+.credentials enc tpl
 """
 "#,
         vault_cfg.vault_id, vault_cfg.password_slot, vault_cfg.recovery_slot
@@ -214,18 +214,18 @@ files = """
         os_creds.as_bytes()
     );
 
-    // 5. Tidy: switching `.credentials enc tmpl` -> `.credentials tmpl` decrypts in-place while preserving `{{ $HOME }}`
-    let toml_plain_tmpl = r#"
+    // 5. Tidy: switching `.credentials enc tpl` -> `.credentials tpl` decrypts in-place while preserving `{{ $HOME }}`
+    let toml_plain_tpl = r#"
 [shell]
 os-nux = "~"
 os-mac = "~"
 files = """
-.gitconfig tmpl
-.credentials tmpl
+.gitconfig tpl
+.credentials tpl
 """
 "#;
-    sb.write_dotler_toml(toml_plain_tmpl);
-    let repo_cfg_plain = RepoConfig::parse(toml_plain_tmpl).unwrap();
+    sb.write_dotler_toml(toml_plain_tpl);
+    let repo_cfg_plain = RepoConfig::parse(toml_plain_tpl).unwrap();
     let engine_plain = sb.sync_engine(&repo_cfg_plain, Some(&vault_key));
     let tidy_rep = engine_plain
         .tidy(None, &lock, TidyOrphanPolicy::KeepOnOs, false)
@@ -236,7 +236,7 @@ files = """
         "token_file = {{ $HOME }}/.tokens/prod.key\n"
     );
 
-    // 6. Binary file with `tmpl` attribute must be rejected
+    // 6. Binary file with `tpl` attribute must be rejected
     sb.write_home_file(".gitconfig", b"\x00\x01\x02binary");
     assert!(engine_plain.plan(None, &lock).is_err());
 }

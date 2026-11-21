@@ -312,8 +312,9 @@ fn test_empirical_selection_rule_typos_and_malformed_tokens() {
         ("!secret.key encrpyt", "encrpyt", 1, Some("enc")),
         ("regular_file.txt encrpyt", "encrpyt", 1, Some("enc")),
         ("regular_file.txt encrypt", "encrypt", 1, Some("enc")),
-        ("regular_file.txt template", "template", 1, Some("tmpl")),
-        ("regular_file.txt tmp", "tmp", 1, Some("tmpl")),
+        ("regular_file.txt template", "template", 1, Some("tpl")),
+        ("regular_file.txt tmp", "tmp", 1, Some("tpl")),
+        ("regular_file.txt tmpl", "tmpl", 1, Some("tpl")),
         (
             "regular_file.txt extra attribute tokens",
             "extra attribute tokens",

@@ -72,7 +72,7 @@ In all three subcommands (`file`, `git`, `url`), any `[<group>]` sections in the
 
 ## 3. Encrypting & Decrypting Files (`enc` / `enc=cont` & `enc=full`)
 
-Add `enc` (`enc=cont` for content-only encryption) or `enc=full` (to encrypt both file/subdirectory names and file contents) to selection rules in `dotler.toml` (combinable with `tmpl` for `{{ $HOME }}` substitution):
+Add `enc` (`enc=cont` for content-only encryption) or `enc=full` (to encrypt both file/subdirectory names and file contents) to selection rules in `dotler.toml` (combinable with `tpl` for `{{ $HOME }}` substitution):
 
 ```toml
 [ssh]
@@ -81,7 +81,7 @@ os-mac = "~/.ssh"
 files = """
 * enc=full
 id_ed25519 enc=cont
-config tmpl
+config tpl
 *.pub
 !known_hosts*
 """

@@ -293,7 +293,7 @@ impl EngineError {
                 "Run 'dotler vault init' to initialize vault encryption before syncing encrypted files.".to_string()
             }
             EngineError::Config(crate::config::ConfigError::InvalidTemplateContent { .. }) => {
-                "Remove the 'tmpl' attribute from binary or non-UTF-8 files in dotler.toml.".to_string()
+                "Remove the 'tpl' attribute from binary or non-UTF-8 files in dotler.toml.".to_string()
             }
             EngineError::Config(e) => format!("Fix configuration error: {e}"),
             EngineError::State(crate::config::StateError::UnsupportedSchemaVersion { .. }) => {

@@ -907,7 +907,7 @@ fn test_full_encryption_enc_full_import_export_tidy_check_and_literal_warning() 
 
     let base_manifest = fs::read_to_string(repo_dir.join("dotler.toml")).unwrap();
     let manifest_full = format!(
-        "{base_manifest}\n[ssh]\nos-nux = \"~/.ssh\"\nos-mac = \"~/.ssh\"\nos-win = \"~/.ssh\"\nos-bsd = \"~/.ssh\"\nfiles = \"\"\"\n* enc=full\n*.conf enc=full tmpl\nid_ed25519 enc=cont\n*.pub\n!known_hosts*\n\"\"\"\n"
+        "{base_manifest}\n[ssh]\nos-nux = \"~/.ssh\"\nos-mac = \"~/.ssh\"\nos-win = \"~/.ssh\"\nos-bsd = \"~/.ssh\"\nfiles = \"\"\"\n* enc=full\n*.conf enc=full tpl\nid_ed25519 enc=cont\n*.pub\n!known_hosts*\n\"\"\"\n"
     );
     fs::write(repo_dir.join("dotler.toml"), &manifest_full).unwrap();
 
@@ -984,7 +984,7 @@ fn test_full_encryption_enc_full_import_export_tidy_check_and_literal_warning() 
 
     // Switch * enc=full -> * enc=cont: check must detect mismatch (even without passphrase!), tidy reconciles
     let manifest_cont = format!(
-        "{base_manifest}\n[ssh]\nos-nux = \"~/.ssh\"\nos-mac = \"~/.ssh\"\nos-win = \"~/.ssh\"\nos-bsd = \"~/.ssh\"\nfiles = \"\"\"\n* enc=cont\n*.conf enc=cont tmpl\n*.pub\n!known_hosts*\n\"\"\"\n"
+        "{base_manifest}\n[ssh]\nos-nux = \"~/.ssh\"\nos-mac = \"~/.ssh\"\nos-win = \"~/.ssh\"\nos-bsd = \"~/.ssh\"\nfiles = \"\"\"\n* enc=cont\n*.conf enc=cont tpl\n*.pub\n!known_hosts*\n\"\"\"\n"
     );
     fs::write(repo_dir.join("dotler.toml"), &manifest_cont).unwrap();
 
@@ -1029,7 +1029,7 @@ fn test_full_encryption_enc_full_import_export_tidy_check_and_literal_warning() 
 
     // Literal path with enc=full is allowed (exit 0) and emits warning/hint
     let manifest_literal = format!(
-        "{base_manifest}\n[ssh]\nos-nux = \"~/.ssh\"\nos-mac = \"~/.ssh\"\nos-win = \"~/.ssh\"\nos-bsd = \"~/.ssh\"\nfiles = \"\"\"\nclients/acme-corp/secret_key enc=full\nclients/acme-corp/client.conf enc=full tmpl\nid_ed25519 enc=cont\n*.pub\n!known_hosts*\n\"\"\"\n"
+        "{base_manifest}\n[ssh]\nos-nux = \"~/.ssh\"\nos-mac = \"~/.ssh\"\nos-win = \"~/.ssh\"\nos-bsd = \"~/.ssh\"\nfiles = \"\"\"\nclients/acme-corp/secret_key enc=full\nclients/acme-corp/client.conf enc=full tpl\nid_ed25519 enc=cont\n*.pub\n!known_hosts*\n\"\"\"\n"
     );
     fs::write(repo_dir.join("dotler.toml"), &manifest_literal).unwrap();
     let chk_warn_json = run_cli(&["check", "--json"], None);
@@ -1142,7 +1142,7 @@ fn test_full_encryption_rekeying_on_vault_from_and_remote_git_install() {
 
     let mut toml_a = fs::read_to_string(repo_a.join("dotler.toml")).unwrap();
     toml_a.push_str(
-        "\n[app]\nos-nux = \"~/.config/secret_app\"\nos-mac = \"~/.config/secret_app\"\nos-win = \"~/.config/secret_app\"\nos-bsd = \"~/.config/secret_app\"\nfiles = \"* enc=full tmpl\"\n",
+        "\n[app]\nos-nux = \"~/.config/secret_app\"\nos-mac = \"~/.config/secret_app\"\nos-win = \"~/.config/secret_app\"\nos-bsd = \"~/.config/secret_app\"\nfiles = \"* enc=full tpl\"\n",
     );
     fs::write(repo_a.join("dotler.toml"), toml_a).unwrap();
 
@@ -1190,7 +1190,7 @@ fn test_full_encryption_rekeying_on_vault_from_and_remote_git_install() {
         "stale .fenc from old vault must be removed"
     );
 
-    // Verify `git install` deploys .fenc + tmpl cleanly and `git uninstall` restores
+    // Verify `git install` deploys .fenc + tpl cleanly and `git uninstall` restores
     let cfg_b = dotler::config::RepoConfig::load(&repo_a.join("dotler.toml")).unwrap();
     let vcfg_b = cfg_b.vault.as_ref().unwrap();
     let slot_b = dotler::crypto::VaultSlot::from_base64(&vcfg_b.password_slot).unwrap();

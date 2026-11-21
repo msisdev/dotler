@@ -32,13 +32,13 @@
 # #   <pattern>               -> include as plaintext
 # #   <pattern> enc           -> include content-encrypted (.dotler.enc; alias: enc=cont)
 # #   <pattern> enc=full      -> include path+content full-encrypted (.dotler.fenc)
-# #   <pattern> tmpl          -> include as template ({{ $HOME }} <-> home dir)
-# #   <pattern> enc tmpl      -> include content-encrypted + template (.dotler.enc)
-# #   <pattern> enc=full tmpl -> include full-encrypted + template (.dotler.fenc)
+# #   <pattern> tpl           -> include as template ({{ $HOME }} <-> home dir)
+# #   <pattern> enc tpl       -> include content-encrypted + template (.dotler.enc)
+# #   <pattern> enc=full tpl  -> include full-encrypted + template (.dotler.fenc)
 # #   !<pattern>              -> exclude (override a broader include rule)
 # files = """
 # .bashrc
-# .bash_profile tmpl
+# .bash_profile tpl
 # .netrc enc
 # """
 #

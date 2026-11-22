@@ -188,7 +188,7 @@ jobs:
           REFACTOR=""
           OTHER=""
 
-          while IFS=$'\t' read -r HASH SUBJECT; do
+          while IFS=$'\t' read -r HASH SUBJECT || [ -n "${HASH}" ]; do
             [ -z "${HASH}" ] && continue
             case "${SUBJECT}" in
               Merge\ *|*\(infra\):*|docs*|test*|chore*|ci*)
@@ -227,7 +227,7 @@ jobs:
                 OTHER="${OTHER}- ${SUBJECT} (\`${HASH}\`)"$'\n'
                 ;;
             esac
-          done < <(git log "${RANGE}" --no-merges --pretty=format:$'%h\t%s')
+          done < <(git log "${RANGE}" --no-merges --pretty=tformat:$'%h\t%s')
 
           {
             echo "## What's Changed in ${CURRENT_TAG}"

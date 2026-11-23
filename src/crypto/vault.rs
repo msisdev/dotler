@@ -234,6 +234,26 @@ pub fn change_password(
     })
 }
 
+pub fn rotate_recovery_slot(
+    config: &VaultConfig,
+    current_passphrase: &SecretString,
+) -> Result<(VaultConfig, RecoveryMnemonic), VaultError> {
+    let pw_slot = VaultSlot::from_base64(&config.password_slot)?;
+    let vault_key = pw_slot.unwrap(current_passphrase, Some(&config.vault_id))?;
+
+    let new_mnemonic = RecoveryMnemonic::generate()?;
+    let new_recovery_slot = VaultSlot::wrap(&new_mnemonic.0, &vault_key)?;
+
+    let new_config = VaultConfig {
+        vault_id: config.vault_id.clone(),
+        password_slot: config.password_slot.clone(),
+        recovery_slot: new_recovery_slot.to_base64(),
+        vault_hint: config.vault_hint.clone(),
+    };
+
+    Ok((new_config, new_mnemonic))
+}
+
 pub fn recover_vault(
     config: &VaultConfig,
     mnemonic_phrase: &SecretString,
@@ -414,5 +434,47 @@ mod tests {
             change_password(&config, &initial_pass, &empty_pass),
             Err(VaultError::WeakPassphrase(_))
         ));
+    }
+
+    #[test]
+    fn test_rotate_recovery_slot_replaces_only_recovery_slot_and_revokes_old_mnemonic() {
+        let pass = SecretString::new("stable-vault-passphrase".to_string());
+        let (mut config, initial_key, mnemonic1) = init_vault(&pass).unwrap();
+        config.vault_hint = Some("my-hint".to_string());
+
+        let wrong_pass = SecretString::new("wrong-passphrase".to_string());
+        assert!(matches!(
+            rotate_recovery_slot(&config, &wrong_pass),
+            Err(VaultError::InvalidSecret)
+        ));
+
+        let (rotated_cfg, mnemonic2) = rotate_recovery_slot(&config, &pass).unwrap();
+        assert_eq!(rotated_cfg.vault_id, config.vault_id);
+        assert_eq!(rotated_cfg.password_slot, config.password_slot);
+        assert_eq!(rotated_cfg.vault_hint, config.vault_hint);
+        assert_ne!(rotated_cfg.recovery_slot, config.recovery_slot);
+        assert_ne!(mnemonic1.phrase(), mnemonic2.phrase());
+
+        let pw_slot = VaultSlot::from_base64(&rotated_cfg.password_slot).unwrap();
+        assert_eq!(
+            pw_slot
+                .unwrap(&pass, Some(&rotated_cfg.vault_id))
+                .unwrap()
+                .expose(),
+            initial_key.expose()
+        );
+
+        let rec_slot = VaultSlot::from_base64(&rotated_cfg.recovery_slot).unwrap();
+        assert!(matches!(
+            rec_slot.unwrap(&mnemonic1.0, Some(&rotated_cfg.vault_id)),
+            Err(VaultError::InvalidSecret)
+        ));
+        assert_eq!(
+            rec_slot
+                .unwrap(&mnemonic2.0, Some(&rotated_cfg.vault_id))
+                .unwrap()
+                .expose(),
+            initial_key.expose()
+        );
     }
 }

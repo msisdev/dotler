@@ -102,7 +102,7 @@ pub use vault::{
     VAULT_ID_INFO, VAULT_KEY_LEN, VAULT_SLOT_LEN, VaultError, VaultKey, VaultSlot,
     XCHACHA_NONCE_LEN, change_password, init_vault, is_content_enc_name, is_full_enc_name,
     is_legacy_dotler_archive_bytes, parse_fenc_filename_stem, parse_legacy_fenc_filename_stem,
-    recover_vault, strip_content_enc_suffix,
+    recover_vault, rotate_recovery_slot, strip_content_enc_suffix,
 };
 
 #[derive(Debug)]

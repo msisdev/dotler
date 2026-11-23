@@ -14,7 +14,8 @@ pub use resource::{
     get_state_db,
 };
 pub use vault_loader::{
-    VaultRotateReport, VaultUnlockPolicy, has_encrypted_repo_files, has_encrypted_rules,
-    read_new_passphrase, resolve_old_passphrase_for_vaults, rotate_vault_passphrases,
-    unlock_vault_if_needed,
+    PendingRekeyWrite, VaultRotateKeyReport, VaultRotateRecoveryReport, VaultRotateReport,
+    VaultUnlockPolicy, apply_rekey_writes, has_encrypted_repo_files, has_encrypted_rules,
+    plan_repo_rekey_writes, read_new_passphrase, resolve_old_passphrase_for_vaults,
+    rotate_vault_key, rotate_vault_passphrases, rotate_vault_recovery, unlock_vault_if_needed,
 };

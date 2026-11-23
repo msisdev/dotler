@@ -9,7 +9,9 @@ use crate::config::repo::{
     RepoConfig, VaultConfig, get_repo_config, update_vault_manifest_section,
 };
 use crate::config::state::write_file_safe;
-use crate::core::vault_loader::{read_new_passphrase, unlock_vault_if_needed};
+use crate::core::vault_loader::{
+    PendingRekeyWrite, apply_rekey_writes, read_new_passphrase, unlock_vault_if_needed,
+};
 use crate::crypto::keyring::{OsKeyring, PASSPHRASE_ENV_VAR};
 use crate::crypto::vault::{
     EncryptedFile, FullEncryptedFile, VaultKey, VaultSlot, is_content_enc_name, is_full_enc_name,
@@ -194,8 +196,7 @@ pub(crate) fn handle_vault_from<W: Write>(
         }
     }
 
-    let mut rekeyed_writes: Vec<(std::path::PathBuf, Vec<u8>, Option<std::path::PathBuf>)> =
-        Vec::new();
+    let mut rekeyed_writes: Vec<PendingRekeyWrite> = Vec::new();
     if !mismatched_files.is_empty() {
         let old_vcfg = repo_cfg.vault.as_ref().ok_or(EngineError::Config(
             crate::config::ConfigError::MissingVaultConfig,
@@ -214,7 +215,11 @@ pub(crate) fn handle_vault_from<W: Write>(
                 MismatchedArtifact::Content(enc_path, enc_file) => {
                     let plain = old_vault_key.decrypt_file(&enc_file)?;
                     let rekeyed = new_vault_key.encrypt_file(plain.expose_secret())?;
-                    rekeyed_writes.push((enc_path, rekeyed.to_bytes(), None));
+                    rekeyed_writes.push(PendingRekeyWrite {
+                        dest_path: enc_path,
+                        bytes: rekeyed.to_bytes(),
+                        stale_path: None,
+                    });
                 }
                 MismatchedArtifact::Full(old_path, fname, fenc_file) => {
                     let (rel_path, plain) = old_vault_key.decrypt_full_file(&fname, &fenc_file)?;
@@ -222,28 +227,18 @@ pub(crate) fn handle_vault_from<W: Write>(
                         new_vault_key.encrypt_full_file(&rel_path, plain.expose_secret())?;
                     let parent = old_path.parent().unwrap_or(&repo_path);
                     let new_path = parent.join(new_fname);
-                    let stale = (new_path != old_path).then_some(old_path);
-                    rekeyed_writes.push((new_path, rekeyed.to_bytes(), stale));
+                    let stale_path = (new_path != old_path).then_some(old_path);
+                    rekeyed_writes.push(PendingRekeyWrite {
+                        dest_path: new_path,
+                        bytes: rekeyed.to_bytes(),
+                        stale_path,
+                    });
                 }
             }
         }
     }
 
-    let rekeyed_files = rekeyed_writes.len();
-    let written_paths: std::collections::HashSet<std::path::PathBuf> =
-        rekeyed_writes.iter().map(|(p, _, _)| p.clone()).collect();
-    let mut stale_to_remove = Vec::new();
-    for (dst_path, bytes, stale_opt) in rekeyed_writes {
-        write_file_safe(&dst_path, &bytes)?;
-        if let Some(old_path) = stale_opt
-            && !written_paths.contains(&old_path)
-        {
-            stale_to_remove.push(old_path);
-        }
-    }
-    for old_path in stale_to_remove {
-        let _ = std::fs::remove_file(old_path);
-    }
+    let rekeyed_files = apply_rekey_writes(rekeyed_writes)?;
 
     let vault_id = imported_cfg.vault_id.clone();
     let vault_hint = imported_cfg.vault_hint.clone();

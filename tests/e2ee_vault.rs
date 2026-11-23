@@ -3,7 +3,7 @@ use std::thread;
 
 use dotler::crypto::{
     EncryptedFile, KeyringError, OsKeyring, PassphraseSource, VaultError, VaultKey, VaultSlot,
-    change_password, init_vault, recover_vault,
+    change_password, init_vault, recover_vault, rotate_recovery_slot,
 };
 use dotler::crypto::{ExposeSecret, SecretString};
 
@@ -1427,4 +1427,42 @@ fn test_user_plain_enc_non_collision_and_legacy_archive_tidy_migration() {
         fs::read(sec_os.join("nested/secret.pem")).unwrap(),
         b"PEM_PAYLOAD=legacy_fenc\n"
     );
+}
+
+#[test]
+fn test_vault_rotate_recovery_slot_preserves_ciphertext_and_revokes_old_mnemonic() {
+    let pass = SecretString::new("recovery-rotate-pass-42".to_string());
+    let (config, vault_key, mnemonic_v1) = init_vault(&pass).unwrap();
+
+    let plaintext = b"SECRET_PAYLOAD_UNCHANGED=1";
+    let enc_bytes = vault_key.encrypt_file(plaintext).unwrap().to_bytes();
+
+    let (rotated_cfg, mnemonic_v2) = rotate_recovery_slot(&config, &pass).unwrap();
+    assert_eq!(rotated_cfg.vault_id, config.vault_id);
+    assert_eq!(rotated_cfg.password_slot, config.password_slot);
+    assert_ne!(rotated_cfg.recovery_slot, config.recovery_slot);
+    assert_ne!(mnemonic_v1.phrase(), mnemonic_v2.phrase());
+
+    // Old mnemonic is immediately revoked
+    assert!(matches!(
+        recover_vault(
+            &rotated_cfg,
+            &mnemonic_v1.0,
+            &SecretString::new("new-pw".to_string())
+        ),
+        Err(VaultError::InvalidSecret)
+    ));
+
+    // New mnemonic recovers cleanly and decrypts the original ciphertext without re-encryption
+    let recovered_pass = SecretString::new("recovered-after-rotate-recovery".to_string());
+    let (recovered_cfg, _mnemonic_v3) =
+        recover_vault(&rotated_cfg, &mnemonic_v2.0, &recovered_pass).unwrap();
+    let unlocked = VaultSlot::from_base64(&recovered_cfg.password_slot)
+        .unwrap()
+        .unwrap(&recovered_pass, Some(&recovered_cfg.vault_id))
+        .unwrap();
+    let decrypted = unlocked
+        .decrypt_file(&EncryptedFile::from_bytes(&enc_bytes).unwrap())
+        .unwrap();
+    assert_eq!(decrypted.expose_secret().as_slice(), plaintext);
 }

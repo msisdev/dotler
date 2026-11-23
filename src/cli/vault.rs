@@ -2,7 +2,7 @@
 
 use std::io::Write;
 
-use crate::cli::args::{Cli, VaultCommand, VaultInitArgs};
+use crate::cli::args::{Cli, VaultCommand, VaultInitArgs, VaultRotateCommand};
 use crate::cli::output::{
     VaultInitReport, VaultLsReport, VaultRecoverReport, VaultRepoStatusEntry, render_success_to,
 };
@@ -12,7 +12,9 @@ use crate::config::local::{
 };
 use crate::config::repo::{RepoConfig, VaultConfig, get_repo_config};
 use crate::config::state::DotlerLockGuard;
-use crate::core::vault_loader::{read_new_passphrase, rotate_vault_passphrases};
+use crate::core::vault_loader::{
+    read_new_passphrase, rotate_vault_key, rotate_vault_passphrases, rotate_vault_recovery,
+};
 use crate::crypto::SecretString;
 use crate::crypto::keyring::{OsKeyring, PASSPHRASE_ENV_VAR};
 use crate::crypto::vault::{VaultSlot, init_vault, recover_vault};
@@ -113,16 +115,52 @@ pub(crate) fn handle_vault<W: Write>(
         VaultCommand::From { command } => {
             handle_vault_from(command, local_cfg, cli, is_interactive, stdout)
         }
-        VaultCommand::Rotate(args) => {
-            let data = rotate_vault_passphrases(
-                local_cfg,
-                cli.repo.as_deref(),
-                args.password_stdin,
-                args.hint.as_deref(),
-                is_interactive,
-            )?;
-            Ok(render_success_to(stdout, "vault rotate", &data, cli.json))
-        }
+        VaultCommand::Rotate { command } => match command {
+            VaultRotateCommand::Password(args) => {
+                let data = rotate_vault_passphrases(
+                    local_cfg,
+                    cli.repo.as_deref(),
+                    args.password_stdin,
+                    args.hint.as_deref(),
+                    is_interactive,
+                )?;
+                Ok(render_success_to(
+                    stdout,
+                    "vault rotate password",
+                    &data,
+                    cli.json,
+                ))
+            }
+            VaultRotateCommand::Recovery(args) => {
+                let data = rotate_vault_recovery(
+                    local_cfg,
+                    cli.repo.as_deref(),
+                    args.password_stdin,
+                    is_interactive,
+                )?;
+                Ok(render_success_to(
+                    stdout,
+                    "vault rotate recovery",
+                    &data,
+                    cli.json,
+                ))
+            }
+            VaultRotateCommand::Key(args) => {
+                let data = rotate_vault_key(
+                    local_cfg,
+                    cli.repo.as_deref(),
+                    args.password_stdin,
+                    args.hint.as_deref(),
+                    is_interactive,
+                )?;
+                Ok(render_success_to(
+                    stdout,
+                    "vault rotate key",
+                    &data,
+                    cli.json,
+                ))
+            }
+        },
         VaultCommand::Recover(args) => {
             let (_label, repo_path) = resolve_repo_path_with_cwd(local_cfg, cli.repo.as_deref())?;
             let manifest_path = repo_path.join("dotler.toml");
@@ -222,7 +260,7 @@ fn handle_vault_init<W: Write>(
 
         return Err(EngineError::Config(crate::config::ConfigError::UnknownField {
             field: "vault".to_string(),
-            hint: "Vault is already initialized in dotler.toml. Use 'dotler vault rotate' to change password or 'dotler vault from <file|git|url>' to replace with another vault."
+            hint: "Vault is already initialized in dotler.toml. Use 'dotler vault rotate password' to change password, 'dotler vault rotate recovery' to reissue recovery mnemonic, 'dotler vault rotate key' to replace the master key, or 'dotler vault from <file|git|url>' to replace with another vault."
                 .to_string(),
         }));
     }

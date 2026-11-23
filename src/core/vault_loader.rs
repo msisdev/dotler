@@ -1,19 +1,24 @@
-//! Conditional vault master key loader and multi-repository passphrase rotation.
+//! Conditional vault master key loader and multi-repository vault rotation.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::local::{LocalConfig, WalkDir};
+use crate::config::local::{LocalConfig, WalkDir, resolve_repo_path_with_cwd};
 use crate::config::repo::{
     RepoConfig, VaultConfig, parse_selection_rules, rules_have_effective_encryption,
     update_vault_manifest_section,
 };
 use crate::config::state::write_file_safe;
-use crate::crypto::SecretString;
 use crate::crypto::keyring::{OsKeyring, PASSPHRASE_ENV_VAR};
-use crate::crypto::vault::{VaultKey, VaultSlot, change_password};
+use crate::crypto::vault::{
+    CONTENT_ENC_SUFFIX, EncryptedFile, FullEncryptedFile, LEGACY_CONTENT_ENC_SUFFIX, VaultKey,
+    VaultSlot, change_password, init_vault, is_content_enc_name, is_full_enc_name,
+    is_legacy_dotler_archive_bytes, parse_legacy_fenc_filename_stem, rotate_recovery_slot,
+};
+use crate::crypto::{ExposeSecret, SecretString};
 use crate::engine::EngineError;
 
 /// Policy governing whether a command requires unlocking the repository vault.
@@ -35,6 +40,162 @@ pub struct VaultRotateReport {
     pub already_synced_repos: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault_id: Option<String>,
+}
+
+/// Summary report returned by [`rotate_vault_recovery`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultRotateRecoveryReport {
+    pub status: String,
+    pub vault_id: String,
+    pub rotated_repos: Vec<String>,
+    pub skipped_repos: Vec<String>,
+    pub new_mnemonic: String,
+}
+
+/// Summary report returned by [`rotate_vault_key`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultRotateKeyReport {
+    pub status: String,
+    pub old_vault_id: String,
+    pub vault_id: String,
+    pub rotated_repos: Vec<String>,
+    pub skipped_repos: Vec<String>,
+    pub rekeyed_files: usize,
+    pub keyring_updated: bool,
+    pub new_mnemonic: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+/// Pending atomic file write produced by in-memory vault re-keying.
+#[derive(Debug, Clone)]
+pub struct PendingRekeyWrite {
+    pub dest_path: PathBuf,
+    pub bytes: Vec<u8>,
+    pub stale_path: Option<PathBuf>,
+}
+
+/// Prepares in-memory re-keying writes for all encrypted artifacts in `repo_path`
+/// whose embedded `vault_id` differs from `new_vault_key`.
+pub fn plan_repo_rekey_writes(
+    repo_path: &Path,
+    repo_cfg: &RepoConfig,
+    old_vault_key: &VaultKey,
+    new_vault_key: &VaultKey,
+) -> Result<Vec<PendingRekeyWrite>, EngineError> {
+    let old_vid_hex = old_vault_key.vault_id();
+    let new_vid_bytes = new_vault_key.vault_id_bytes();
+    let mut writes = Vec::new();
+
+    for g_name in repo_cfg.groups.keys() {
+        let group_dir = crate::config::repo::group_repo_dir(repo_path, g_name);
+        let delegated = repo_cfg.descendant_subpaths(g_name);
+        if !group_dir.is_dir() {
+            continue;
+        }
+        for entry in WalkDir::new(&group_dir)
+            .filter_entry(|e| {
+                if e.depth() == 0 {
+                    return true;
+                }
+                !e.path().strip_prefix(&group_dir).is_ok_and(|rel| {
+                    crate::config::repo::is_delegated_to_subgroup(
+                        &rel.to_string_lossy(),
+                        &delegated,
+                    )
+                })
+            })
+            .filter_map(|e| e.ok())
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let fname = entry.file_name().to_string_lossy().to_string();
+            let entry_path = entry.path().to_path_buf();
+
+            if is_content_enc_name(&fname) {
+                let bytes = fs::read(&entry_path)?;
+                let enc_file = EncryptedFile::from_bytes(&bytes)?;
+                if enc_file.vault_id != new_vid_bytes {
+                    let plain = old_vault_key.decrypt_file(&enc_file)?;
+                    let rekeyed = new_vault_key.encrypt_file(plain.expose_secret())?;
+                    writes.push(PendingRekeyWrite {
+                        dest_path: entry_path,
+                        bytes: rekeyed.to_bytes(),
+                        stale_path: None,
+                    });
+                }
+            } else if is_full_enc_name(&fname) {
+                let bytes = fs::read(&entry_path)?;
+                let fenc_file = FullEncryptedFile::from_bytes(&bytes)?;
+                if fenc_file.vault_id != new_vid_bytes {
+                    let (rel_path, plain) = old_vault_key.decrypt_full_file(&fname, &fenc_file)?;
+                    let (new_fname, rekeyed) =
+                        new_vault_key.encrypt_full_file(&rel_path, plain.expose_secret())?;
+                    let parent = entry_path.parent().unwrap_or(repo_path);
+                    let new_path = parent.join(new_fname);
+                    let stale_path = (new_path != entry_path).then_some(entry_path);
+                    writes.push(PendingRekeyWrite {
+                        dest_path: new_path,
+                        bytes: rekeyed.to_bytes(),
+                        stale_path,
+                    });
+                }
+            } else if let Some(stem) = fname.strip_suffix(LEGACY_CONTENT_ENC_SUFFIX) {
+                let bytes = fs::read(&entry_path)?;
+                if is_legacy_dotler_archive_bytes(&bytes, Some(&old_vid_hex)) {
+                    let enc_file = EncryptedFile::from_bytes(&bytes)?;
+                    let plain = old_vault_key.decrypt_file(&enc_file)?;
+                    let rekeyed = new_vault_key.encrypt_file(plain.expose_secret())?;
+                    let parent = entry_path.parent().unwrap_or(repo_path);
+                    let new_path = parent.join(format!("{stem}{CONTENT_ENC_SUFFIX}"));
+                    let stale_path = (new_path != entry_path).then_some(entry_path);
+                    writes.push(PendingRekeyWrite {
+                        dest_path: new_path,
+                        bytes: rekeyed.to_bytes(),
+                        stale_path,
+                    });
+                }
+            } else if parse_legacy_fenc_filename_stem(&fname).is_some() {
+                let bytes = fs::read(&entry_path)?;
+                if is_legacy_dotler_archive_bytes(&bytes, Some(&old_vid_hex)) {
+                    let fenc_file = FullEncryptedFile::from_bytes(&bytes)?;
+                    let (rel_path, plain) = old_vault_key.decrypt_full_file(&fname, &fenc_file)?;
+                    let (new_fname, rekeyed) =
+                        new_vault_key.encrypt_full_file(&rel_path, plain.expose_secret())?;
+                    let parent = entry_path.parent().unwrap_or(repo_path);
+                    let new_path = parent.join(new_fname);
+                    let stale_path = (new_path != entry_path).then_some(entry_path);
+                    writes.push(PendingRekeyWrite {
+                        dest_path: new_path,
+                        bytes: rekeyed.to_bytes(),
+                        stale_path,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(writes)
+}
+
+/// Commits planned re-keying writes atomically and removes superseded paths.
+pub fn apply_rekey_writes(writes: Vec<PendingRekeyWrite>) -> Result<usize, EngineError> {
+    let rekeyed_count = writes.len();
+    let written_paths: HashSet<PathBuf> = writes.iter().map(|w| w.dest_path.clone()).collect();
+    let mut stale_to_remove = Vec::new();
+    for item in writes {
+        write_file_safe(&item.dest_path, &item.bytes)?;
+        if let Some(old_path) = item.stale_path
+            && !written_paths.contains(&old_path)
+        {
+            stale_to_remove.push(old_path);
+        }
+    }
+    for old_path in stale_to_remove {
+        let _ = fs::remove_file(old_path);
+    }
+    Ok(rekeyed_count)
 }
 
 /// Returns `true` if any group in `repo_cfg` has an effective `enc` selection rule.
@@ -348,6 +509,315 @@ pub fn rotate_vault_passphrases(
         keyring_updated,
         already_synced_repos,
         vault_id: primary_vault_id,
+    })
+}
+
+fn canonical_or_raw(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+struct VaultIdTargetRepo {
+    label: String,
+    repo_path: PathBuf,
+    manifest_path: PathBuf,
+    repo_cfg: RepoConfig,
+    vault_cfg: VaultConfig,
+}
+
+fn collect_repos_sharing_vault_id(
+    local_cfg: &LocalConfig,
+    requested_label: Option<&str>,
+) -> Result<(VaultIdTargetRepo, Vec<VaultIdTargetRepo>, Vec<String>, bool), EngineError> {
+    let (active_label, active_path) = resolve_repo_path_with_cwd(local_cfg, requested_label)?;
+    let active_manifest = active_path.join("dotler.toml");
+    if !active_manifest.is_file() {
+        return Err(EngineError::Config(
+            crate::config::ConfigError::RepoPathNotFound(active_path.display().to_string()),
+        ));
+    }
+    let active_repo_cfg = RepoConfig::load(&active_manifest)?;
+    let active_vault_cfg =
+        active_repo_cfg
+            .vault
+            .clone()
+            .ok_or_else(|| EngineError::VaultLocked {
+                reason: "Vault is not configured".to_string(),
+            })?;
+    let target_vid = active_vault_cfg.vault_id.clone();
+    let active_canon = canonical_or_raw(&active_path);
+
+    let active_target = VaultIdTargetRepo {
+        label: active_label.clone(),
+        repo_path: active_path.clone(),
+        manifest_path: active_manifest.clone(),
+        repo_cfg: active_repo_cfg.clone(),
+        vault_cfg: active_vault_cfg.clone(),
+    };
+
+    if requested_label.is_some() {
+        let mut other_uses_vid = false;
+        for (_label, cand_path) in local_cfg.candidate_repos_with_cwd() {
+            if canonical_or_raw(&cand_path) == active_canon {
+                continue;
+            }
+            let manifest = cand_path.join("dotler.toml");
+            if let Ok(cfg) = RepoConfig::load_without_vault_check(&manifest)
+                && cfg.vault.as_ref().is_some_and(|v| v.vault_id == target_vid)
+            {
+                other_uses_vid = true;
+                break;
+            }
+        }
+        return Ok((
+            VaultIdTargetRepo {
+                label: active_label,
+                repo_path: active_path,
+                manifest_path: active_manifest,
+                repo_cfg: active_repo_cfg,
+                vault_cfg: active_vault_cfg,
+            },
+            vec![active_target],
+            Vec::new(),
+            other_uses_vid,
+        ));
+    }
+
+    let mut targets = Vec::new();
+    let mut skipped_repos = Vec::new();
+    let mut seen_paths = HashSet::new();
+
+    for (label, cand_path) in local_cfg.candidate_repos_with_cwd() {
+        let canon = canonical_or_raw(&cand_path);
+        if !seen_paths.insert(canon) {
+            continue;
+        }
+        let manifest = cand_path.join("dotler.toml");
+        if !manifest.is_file() {
+            skipped_repos.push(label);
+            continue;
+        }
+        let Ok(cfg) = RepoConfig::load(&manifest) else {
+            skipped_repos.push(label);
+            continue;
+        };
+        match cfg.vault.clone() {
+            Some(vcfg) if vcfg.vault_id == target_vid => {
+                targets.push(VaultIdTargetRepo {
+                    label,
+                    repo_path: cand_path,
+                    manifest_path: manifest,
+                    repo_cfg: cfg,
+                    vault_cfg: vcfg,
+                });
+            }
+            _ => skipped_repos.push(label),
+        }
+    }
+
+    if !seen_paths.contains(&active_canon) {
+        targets.push(VaultIdTargetRepo {
+            label: active_label,
+            repo_path: active_path,
+            manifest_path: active_manifest,
+            repo_cfg: active_repo_cfg,
+            vault_cfg: active_vault_cfg,
+        });
+    }
+
+    skipped_repos.sort();
+    Ok((active_target, targets, skipped_repos, false))
+}
+
+/// Rotates the 12-word recovery mnemonic slot across the specified repository or all
+/// locally registered repositories sharing the active repository's `vault_id`.
+pub fn rotate_vault_recovery(
+    local_cfg: &LocalConfig,
+    requested_label: Option<&str>,
+    password_stdin: bool,
+    is_interactive: bool,
+) -> Result<VaultRotateRecoveryReport, EngineError> {
+    let (active, targets, skipped_repos, _) =
+        collect_repos_sharing_vault_id(local_cfg, requested_label)?;
+
+    let current_pass = if password_stdin {
+        read_new_passphrase(
+            true,
+            false,
+            is_interactive,
+            "Enter current vault passphrase: ",
+        )?
+    } else {
+        let single_target = vec![(
+            active.label.clone(),
+            active.manifest_path.clone(),
+            active.vault_cfg.clone(),
+        )];
+        resolve_old_passphrase_for_vaults(&single_target, local_cfg.use_keyring, is_interactive)?
+    };
+
+    let (rotated_active_cfg, new_mnemonic) =
+        rotate_recovery_slot(&active.vault_cfg, &current_pass)?;
+    let new_recovery_slot = rotated_active_cfg.recovery_slot;
+    let target_vid = active.vault_cfg.vault_id.clone();
+
+    let mut pending_manifests = Vec::with_capacity(targets.len());
+    for target in &targets {
+        let updated_vcfg = VaultConfig {
+            vault_id: target.vault_cfg.vault_id.clone(),
+            password_slot: target.vault_cfg.password_slot.clone(),
+            recovery_slot: new_recovery_slot.clone(),
+            vault_hint: target.vault_cfg.vault_hint.clone(),
+        };
+        let manifest_str = fs::read_to_string(&target.manifest_path)?;
+        let updated_manifest =
+            update_vault_manifest_section(&manifest_str, &target.vault_cfg, &updated_vcfg);
+        pending_manifests.push((
+            target.label.clone(),
+            target.manifest_path.clone(),
+            updated_manifest,
+        ));
+    }
+
+    let mut rotated_repos = Vec::with_capacity(pending_manifests.len());
+    for (label, manifest_path, updated_manifest) in pending_manifests {
+        write_file_safe(&manifest_path, updated_manifest.as_bytes())?;
+        rotated_repos.push(label);
+    }
+
+    if local_cfg.use_keyring
+        && !target_vid.trim().is_empty()
+        && OsKeyring::get_for_vault(&target_vid)
+            .ok()
+            .flatten()
+            .is_none()
+    {
+        let _ = OsKeyring::set_with_fallback(Some(&target_vid), &current_pass);
+    }
+
+    Ok(VaultRotateRecoveryReport {
+        status: "recovery_rotated".to_string(),
+        vault_id: target_vid,
+        rotated_repos,
+        skipped_repos,
+        new_mnemonic: new_mnemonic.phrase().to_string(),
+    })
+}
+
+/// Replaces the master `VaultKey` with a newly generated key, re-encrypts all encrypted
+/// artifacts in memory before committing to disk, updates `dotler.toml` across all
+/// target repositories sharing `old_vault_id`, and synchronizes the OS keyring.
+pub fn rotate_vault_key(
+    local_cfg: &LocalConfig,
+    requested_label: Option<&str>,
+    password_stdin: bool,
+    new_hint: Option<&str>,
+    is_interactive: bool,
+) -> Result<VaultRotateKeyReport, EngineError> {
+    let (active, targets, skipped_repos, other_repo_uses_old_vid) =
+        collect_repos_sharing_vault_id(local_cfg, requested_label)?;
+
+    let old_vault_id = active.vault_cfg.vault_id.clone();
+    let single_target = vec![(
+        active.label.clone(),
+        active.manifest_path.clone(),
+        active.vault_cfg.clone(),
+    )];
+    let old_pass =
+        resolve_old_passphrase_for_vaults(&single_target, local_cfg.use_keyring, is_interactive)?;
+    let old_pw_slot = VaultSlot::from_base64(&active.vault_cfg.password_slot)?;
+    let old_vault_key = old_pw_slot.unwrap(&old_pass, Some(&old_vault_id))?;
+
+    let new_pass = read_new_passphrase(
+        password_stdin,
+        false,
+        is_interactive,
+        "Enter new vault passphrase: ",
+    )?;
+    let (new_base_cfg, new_vault_key, new_mnemonic) = init_vault(&new_pass)?;
+    let new_vault_id = new_base_cfg.vault_id.clone();
+
+    let resolved_override_hint: Option<Option<String>> = new_hint.map(|h| {
+        let trimmed = h.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    });
+
+    // Fail-fast phase: decrypt and re-encrypt every artifact across all target repos in memory
+    // before touching a single file or manifest on disk.
+    let mut all_rekey_writes = Vec::new();
+    let mut pending_manifests = Vec::with_capacity(targets.len());
+    let mut active_final_hint = active.vault_cfg.vault_hint.clone();
+    if let Some(ref override_hint) = resolved_override_hint {
+        active_final_hint = override_hint.clone();
+    }
+
+    for target in &targets {
+        let repo_writes = plan_repo_rekey_writes(
+            &target.repo_path,
+            &target.repo_cfg,
+            &old_vault_key,
+            &new_vault_key,
+        )?;
+        all_rekey_writes.extend(repo_writes);
+
+        let target_hint = match &resolved_override_hint {
+            Some(override_hint) => override_hint.clone(),
+            None => target.vault_cfg.vault_hint.clone(),
+        };
+        let target_new_cfg = VaultConfig {
+            vault_id: new_base_cfg.vault_id.clone(),
+            password_slot: new_base_cfg.password_slot.clone(),
+            recovery_slot: new_base_cfg.recovery_slot.clone(),
+            vault_hint: target_hint,
+        };
+        let manifest_str = fs::read_to_string(&target.manifest_path)?;
+        let updated_manifest =
+            update_vault_manifest_section(&manifest_str, &target.vault_cfg, &target_new_cfg);
+        pending_manifests.push((
+            target.label.clone(),
+            target.manifest_path.clone(),
+            updated_manifest,
+        ));
+    }
+
+    let rekeyed_files = apply_rekey_writes(all_rekey_writes)?;
+
+    let mut rotated_repos = Vec::with_capacity(pending_manifests.len());
+    for (label, manifest_path, updated_manifest) in pending_manifests {
+        write_file_safe(&manifest_path, updated_manifest.as_bytes())?;
+        rotated_repos.push(label);
+    }
+
+    let mut keyring_updated = false;
+    if local_cfg.use_keyring {
+        if OsKeyring::set_for_vault(&new_vault_id, &new_pass).is_ok() {
+            keyring_updated = true;
+        }
+        let existing_default = OsKeyring::get().ok().flatten();
+        let should_update_default = match existing_default {
+            None => true,
+            Some(ref sec) => {
+                sec.expose_secret() == old_pass.expose_secret()
+                    || sec.expose_secret() == new_pass.expose_secret()
+            }
+        };
+        if should_update_default && OsKeyring::set(&new_pass).is_ok() {
+            keyring_updated = true;
+        }
+        if !other_repo_uses_old_vid && !old_vault_id.trim().is_empty() {
+            let _ = OsKeyring::delete_for_vault(&old_vault_id);
+        }
+    }
+
+    Ok(VaultRotateKeyReport {
+        status: "key_rotated".to_string(),
+        old_vault_id,
+        vault_id: new_vault_id,
+        rotated_repos,
+        skipped_repos,
+        rekeyed_files,
+        keyring_updated,
+        new_mnemonic: new_mnemonic.phrase().to_string(),
+        hint: active_final_hint,
     })
 }
 
@@ -818,6 +1288,301 @@ mod tests {
         assert_eq!(
             crate::crypto::ExposeSecret::expose_secret(&OsKeyring::get().unwrap().unwrap()),
             "vault-b-stay-pass"
+        );
+    }
+
+    #[test]
+    fn test_rotate_vault_recovery_syncs_shared_vault_id_repos_without_touching_ciphertext() {
+        let _guard = crate::crypto::keyring::MockKeyringGuard::new();
+        unsafe {
+            std::env::remove_var(PASSPHRASE_ENV_VAR);
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_a = tmp.path().join("repo_a");
+        let repo_b = tmp.path().join("repo_b");
+        let repo_other = tmp.path().join("repo_other");
+        for dir in [&repo_a, &repo_b, &repo_other] {
+            fs::create_dir_all(dir.join("sec")).unwrap();
+        }
+
+        let pass = SecretString::new("shared-vault-pass-123".to_string());
+        let (vcfg_shared, vkey_shared, old_mnemonic) = init_vault(&pass).unwrap();
+        let (vcfg_other, _, other_mnemonic) = init_vault(&pass).unwrap();
+
+        let enc_a = vkey_shared.encrypt_file(b"secret-a").unwrap().to_bytes();
+        let (fenc_name, fenc_file) = vkey_shared
+            .encrypt_full_file("sub/hidden.key", b"hidden-b")
+            .unwrap();
+        let fenc_bytes = fenc_file.to_bytes();
+        write_file_safe(&repo_a.join("sec/a.dotler.enc"), &enc_a).unwrap();
+        write_file_safe(&repo_b.join("sec").join(&fenc_name), &fenc_bytes).unwrap();
+
+        let write_manifest = |dir: &Path, vcfg: &VaultConfig| {
+            let content = format!(
+                "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[sec]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nfiles = \"* enc\"\n",
+                vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
+            );
+            write_file_safe(&dir.join("dotler.toml"), content.as_bytes()).unwrap();
+        };
+        write_manifest(&repo_a, &vcfg_shared);
+        write_manifest(&repo_b, &vcfg_shared);
+        write_manifest(&repo_other, &vcfg_other);
+
+        let mut local_cfg = LocalConfig {
+            default_repo: Some("a".to_string()),
+            ..Default::default()
+        };
+        local_cfg
+            .repos
+            .insert("a".to_string(), repo_a.to_string_lossy().to_string());
+        local_cfg
+            .repos
+            .insert("b".to_string(), repo_b.to_string_lossy().to_string());
+        local_cfg.repos.insert(
+            "other".to_string(),
+            repo_other.to_string_lossy().to_string(),
+        );
+
+        OsKeyring::set_for_vault(&vcfg_shared.vault_id, &pass).unwrap();
+
+        let report = rotate_vault_recovery(&local_cfg, None, false, false).unwrap();
+        assert_eq!(report.status, "recovery_rotated");
+        assert_eq!(report.vault_id, vcfg_shared.vault_id);
+        assert_eq!(report.rotated_repos, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(report.skipped_repos, vec!["other".to_string()]);
+        assert_ne!(report.new_mnemonic, old_mnemonic.phrase());
+
+        // Ciphertexts are untouched byte-for-byte
+        assert_eq!(fs::read(repo_a.join("sec/a.dotler.enc")).unwrap(), enc_a);
+        assert_eq!(
+            fs::read(repo_b.join("sec").join(&fenc_name)).unwrap(),
+            fenc_bytes
+        );
+
+        // Both a and b accept the new mnemonic and reject the old one; password_slot unchanged
+        let new_m_secret = SecretString::new(report.new_mnemonic.clone());
+        for dir in [&repo_a, &repo_b] {
+            let loaded = RepoConfig::load(&dir.join("dotler.toml"))
+                .unwrap()
+                .vault
+                .unwrap();
+            assert_eq!(loaded.vault_id, vcfg_shared.vault_id);
+            assert_eq!(loaded.password_slot, vcfg_shared.password_slot);
+            assert_ne!(loaded.recovery_slot, vcfg_shared.recovery_slot);
+            let rec_slot = VaultSlot::from_base64(&loaded.recovery_slot).unwrap();
+            assert!(
+                rec_slot
+                    .unwrap(&old_mnemonic.0, Some(&loaded.vault_id))
+                    .is_err()
+            );
+            let recovered_key = rec_slot
+                .unwrap(&new_m_secret, Some(&loaded.vault_id))
+                .unwrap();
+            assert_eq!(recovered_key.expose(), vkey_shared.expose());
+        }
+
+        // Unrelated repo_other still uses its original mnemonic
+        let other_loaded = RepoConfig::load(&repo_other.join("dotler.toml"))
+            .unwrap()
+            .vault
+            .unwrap();
+        assert_eq!(other_loaded.recovery_slot, vcfg_other.recovery_slot);
+        let other_rec_slot = VaultSlot::from_base64(&other_loaded.recovery_slot).unwrap();
+        assert!(
+            other_rec_slot
+                .unwrap(&other_mnemonic.0, Some(&other_loaded.vault_id))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_rotate_vault_key_rekeys_enc_and_fenc_across_shared_repos_and_updates_keyring() {
+        let _guard = crate::crypto::keyring::MockKeyringGuard::new();
+        unsafe {
+            std::env::remove_var(PASSPHRASE_ENV_VAR);
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_a = tmp.path().join("repo_a");
+        let repo_b = tmp.path().join("repo_b");
+        let repo_other = tmp.path().join("repo_other");
+        for dir in [&repo_a, &repo_b, &repo_other] {
+            fs::create_dir_all(dir.join("sec")).unwrap();
+        }
+
+        let old_pass = SecretString::new("old-master-pass-111".to_string());
+        let other_pass = SecretString::new("other-vault-pass-222".to_string());
+        let (vcfg_shared, vkey_shared, old_mnemonic) = init_vault(&old_pass).unwrap();
+        let (vcfg_other, _, _) = init_vault(&other_pass).unwrap();
+
+        let enc_a = vkey_shared.encrypt_file(b"content-secret-a").unwrap();
+        let (old_fenc_name, fenc_b) = vkey_shared
+            .encrypt_full_file("nested/client.pem", b"full-secret-b")
+            .unwrap();
+        write_file_safe(&repo_a.join("sec/token.dotler.enc"), &enc_a.to_bytes()).unwrap();
+        write_file_safe(&repo_b.join("sec").join(&old_fenc_name), &fenc_b.to_bytes()).unwrap();
+
+        let write_manifest = |dir: &Path, vcfg: &VaultConfig| {
+            let content = format!(
+                "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[sec]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nfiles = \"* enc\"\n",
+                vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
+            );
+            write_file_safe(&dir.join("dotler.toml"), content.as_bytes()).unwrap();
+        };
+        write_manifest(&repo_a, &vcfg_shared);
+        write_manifest(&repo_b, &vcfg_shared);
+        write_manifest(&repo_other, &vcfg_other);
+
+        let mut local_cfg = LocalConfig {
+            default_repo: Some("a".to_string()),
+            ..Default::default()
+        };
+        local_cfg
+            .repos
+            .insert("a".to_string(), repo_a.to_string_lossy().to_string());
+        local_cfg
+            .repos
+            .insert("b".to_string(), repo_b.to_string_lossy().to_string());
+        local_cfg.repos.insert(
+            "other".to_string(),
+            repo_other.to_string_lossy().to_string(),
+        );
+
+        OsKeyring::set(&old_pass).unwrap();
+        OsKeyring::set_for_vault(&vcfg_shared.vault_id, &old_pass).unwrap();
+        OsKeyring::set_for_vault(&vcfg_other.vault_id, &other_pass).unwrap();
+
+        OsKeyring::push_mock_prompt_reply("brand-new-master-pass-999");
+        let report = rotate_vault_key(&local_cfg, None, false, Some("new-hint"), true).unwrap();
+        assert_eq!(report.status, "key_rotated");
+        assert_eq!(report.old_vault_id, vcfg_shared.vault_id);
+        assert_ne!(report.vault_id, vcfg_shared.vault_id);
+        assert_eq!(report.rotated_repos, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(report.skipped_repos, vec!["other".to_string()]);
+        assert_eq!(report.rekeyed_files, 2);
+        assert!(report.keyring_updated);
+        assert_eq!(report.hint.as_deref(), Some("new-hint"));
+        assert_ne!(report.new_mnemonic, old_mnemonic.phrase());
+
+        // Keyring has new_vault_id, removed unused old_vault_id, preserved other_vault_id, updated default
+        assert!(
+            OsKeyring::get_for_vault(&vcfg_shared.vault_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            OsKeyring::get_for_vault(&report.vault_id)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "brand-new-master-pass-999"
+        );
+        assert_eq!(
+            OsKeyring::get_for_vault(&vcfg_other.vault_id)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "other-vault-pass-222"
+        );
+        assert_eq!(
+            OsKeyring::get().unwrap().unwrap().expose_secret(),
+            "brand-new-master-pass-999"
+        );
+
+        // Unlock new key and verify re-keyed .dotler.enc and .dotler.fenc
+        let new_pass_sec = SecretString::new("brand-new-master-pass-999".to_string());
+        let loaded_a = RepoConfig::load(&repo_a.join("dotler.toml"))
+            .unwrap()
+            .vault
+            .unwrap();
+        let loaded_b = RepoConfig::load(&repo_b.join("dotler.toml"))
+            .unwrap()
+            .vault
+            .unwrap();
+        assert_eq!(loaded_a.vault_id, report.vault_id);
+        assert_eq!(loaded_b.vault_id, report.vault_id);
+        assert_eq!(loaded_a.vault_hint.as_deref(), Some("new-hint"));
+
+        let new_key = VaultSlot::from_base64(&loaded_a.password_slot)
+            .unwrap()
+            .unwrap(&new_pass_sec, Some(&report.vault_id))
+            .unwrap();
+        let rekeyed_enc =
+            EncryptedFile::from_bytes(&fs::read(repo_a.join("sec/token.dotler.enc")).unwrap())
+                .unwrap();
+        assert_eq!(rekeyed_enc.vault_id, new_key.vault_id_bytes());
+        assert_eq!(
+            new_key
+                .decrypt_file(&rekeyed_enc)
+                .unwrap()
+                .expose_secret()
+                .as_slice(),
+            b"content-secret-a"
+        );
+
+        // Old .dotler.fenc filename must be removed and replaced with new derived filename
+        assert!(!repo_b.join("sec").join(&old_fenc_name).exists());
+        let new_fenc_name = new_key.derive_full_enc_filename("nested/client.pem");
+        assert_ne!(new_fenc_name, old_fenc_name);
+        let rekeyed_fenc = FullEncryptedFile::from_bytes(
+            &fs::read(repo_b.join("sec").join(&new_fenc_name)).unwrap(),
+        )
+        .unwrap();
+        let (dec_rel, dec_plain) = new_key
+            .decrypt_full_file(&new_fenc_name, &rekeyed_fenc)
+            .unwrap();
+        assert_eq!(dec_rel, "nested/client.pem");
+        assert_eq!(dec_plain.expose_secret().as_slice(), b"full-secret-b");
+    }
+
+    #[test]
+    fn test_rotate_vault_key_fail_fast_on_tampered_file_leaves_disk_untouched() {
+        let _guard = crate::crypto::keyring::MockKeyringGuard::new();
+        unsafe {
+            std::env::remove_var(PASSPHRASE_ENV_VAR);
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(repo.join("sec")).unwrap();
+
+        let old_pass = SecretString::new("old-pass-tamper-test".to_string());
+        let (vcfg, vkey, _) = init_vault(&old_pass).unwrap();
+
+        let mut enc_bytes = vkey.encrypt_file(b"intact").unwrap().to_bytes();
+        let last = enc_bytes.len() - 1;
+        enc_bytes[last] ^= 0xFF; // Tamper MAC tag
+        write_file_safe(&repo.join("sec/corrupt.dotler.enc"), &enc_bytes).unwrap();
+
+        let manifest_content = format!(
+            "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[sec]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nfiles = \"* enc\"\n",
+            vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
+        );
+        write_file_safe(&repo.join("dotler.toml"), manifest_content.as_bytes()).unwrap();
+
+        let mut local_cfg = LocalConfig {
+            default_repo: Some("main".to_string()),
+            ..Default::default()
+        };
+        local_cfg
+            .repos
+            .insert("main".to_string(), repo.to_string_lossy().to_string());
+
+        OsKeyring::set_for_vault(&vcfg.vault_id, &old_pass).unwrap();
+        OsKeyring::push_mock_prompt_reply("new-pass-should-not-apply");
+
+        let res = rotate_vault_key(&local_cfg, None, false, None, true);
+        assert!(res.is_err());
+
+        // Manifest and keyring must remain completely untouched
+        assert_eq!(
+            fs::read_to_string(repo.join("dotler.toml")).unwrap(),
+            manifest_content
+        );
+        assert_eq!(
+            OsKeyring::get_for_vault(&vcfg.vault_id)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "old-pass-tamper-test"
         );
     }
 }

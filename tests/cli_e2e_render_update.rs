@@ -66,7 +66,7 @@ fn test_e2e_non_json_inline_formats_emoji_rules_and_colored_labels() {
     assert!(vault_init_lines[0].starts_with("Vault init done. (id: "));
     assert!(!vault_init_lines[0].contains("☀️"));
     assert!(vault_init_lines[1].starts_with("🔑 Recovery mnemonic: "));
-    let mnemonic = vault_init_lines[1]
+    let init_mnemonic = vault_init_lines[1]
         .strip_prefix("🔑 Recovery mnemonic: ")
         .unwrap()
         .trim()
@@ -75,7 +75,7 @@ fn test_e2e_non_json_inline_formats_emoji_rules_and_colored_labels() {
     let mut rotate_child = sandbox
         .cmd()
         .env("DOTLER_PASSPHRASE", "vault_pass_111")
-        .args(["vault", "rotate", "--password-stdin"])
+        .args(["vault", "rotate", "password", "--password-stdin"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -90,6 +90,51 @@ fn test_e2e_non_json_inline_formats_emoji_rules_and_colored_labels() {
         String::from_utf8_lossy(&rotate_out.stdout).trim(),
         "☀️ Passphrase rotation done. (1 rotated, 0 skipped)"
     );
+
+    let rot_rec_out = sandbox
+        .cmd()
+        .env("DOTLER_PASSPHRASE", "vault_pass_222")
+        .args(["vault", "rotate", "recovery"])
+        .output()
+        .unwrap();
+    assert_eq!(rot_rec_out.status.code(), Some(0));
+    let rot_rec_stdout = String::from_utf8_lossy(&rot_rec_out.stdout);
+    let rot_rec_lines: Vec<&str> = rot_rec_stdout.lines().collect();
+    assert_eq!(rot_rec_lines.len(), 2, "stdout: {rot_rec_stdout}");
+    assert!(rot_rec_lines[0].starts_with("☀️ Recovery mnemonic rotation done. (id: "));
+    assert!(rot_rec_lines[1].starts_with("🔑 New recovery mnemonic: "));
+    let rot_rec_mnemonic = rot_rec_lines[1]
+        .strip_prefix("🔑 New recovery mnemonic: ")
+        .unwrap()
+        .trim()
+        .to_string();
+    assert_ne!(rot_rec_mnemonic, init_mnemonic);
+
+    let mut rot_key_child = sandbox
+        .cmd()
+        .env("DOTLER_PASSPHRASE", "vault_pass_222")
+        .args(["vault", "rotate", "key", "--password-stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Some(mut stdin) = rot_key_child.stdin.take() {
+        writeln!(stdin, "vault_pass_key_250").unwrap();
+    }
+    let rot_key_out = rot_key_child.wait_with_output().unwrap();
+    assert_eq!(rot_key_out.status.code(), Some(0));
+    let rot_key_stdout = String::from_utf8_lossy(&rot_key_out.stdout);
+    let rot_key_lines: Vec<&str> = rot_key_stdout.lines().collect();
+    assert_eq!(rot_key_lines.len(), 2, "stdout: {rot_key_stdout}");
+    assert!(rot_key_lines[0].starts_with("☀️ Master key rotation done. (id: "));
+    assert!(rot_key_lines[1].starts_with("🔑 New recovery mnemonic: "));
+    let mnemonic = rot_key_lines[1]
+        .strip_prefix("🔑 New recovery mnemonic: ")
+        .unwrap()
+        .trim()
+        .to_string();
+    assert_ne!(mnemonic, rot_rec_mnemonic);
 
     let mut recover_child = sandbox
         .cmd()

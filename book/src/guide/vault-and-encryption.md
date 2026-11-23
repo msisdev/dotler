@@ -134,7 +134,7 @@ files = "* enc=full"
 
 ## 4. OS Keyring Integration
 
-Dotler automatically provisions your master passphrase in your operating system's native credential manager (macOS Keychain, Linux Secret Service / Keyutils, Windows Credential Manager) at vault and repository lifecycle boundaries (`dotler init`, `dotler vault init`, `dotler vault from`, `dotler vault rotate`, `dotler vault recover`) so `import`, `export`, and `tidy` run without prompting every time. Keys are isolated per `vault_id` (so multiple independent repositories with distinct passphrases coexist without conflict), with automatic fallback to the global `default` slot:
+Dotler automatically provisions your master passphrase in your operating system's native credential manager (macOS Keychain, Linux Secret Service / Keyutils, Windows Credential Manager) at vault and repository lifecycle boundaries (`dotler init`, `dotler vault init`, `dotler vault from`, `dotler vault rotate <password|recovery|key>`, `dotler vault recover`) so `import`, `export`, and `tidy` run without prompting every time. Keys are isolated per `vault_id` (so multiple independent repositories with distinct passphrases coexist without conflict), with automatic fallback to the global `default` slot:
 
 ```sh
 # Inspect vault_id and OS keyring readiness across registered repositories
@@ -144,14 +144,30 @@ dotler vault ls
 dotler vault init
 ```
 
-## 5. Passphrase Rotation & Mnemonic Recovery
+## 5. Vault Rotation & Mnemonic Recovery
 
-### Rotate Passphrase (`vault rotate`)
+### Rotate Passphrase (`vault rotate password`)
 
-Re-wraps `password_slot` using your new passphrase without re-encrypting any `.dotler.enc` / `.dotler.fenc` files in the repository. By default, `dotler vault rotate` updates all locally registered repositories that share the current passphrase and updates the OS keyring in one step:
+Re-wraps `password_slot` using your new passphrase without re-encrypting any `.dotler.enc` / `.dotler.fenc` files in the repository. By default, `dotler vault rotate password` updates all locally registered repositories that share the current passphrase and updates the OS keyring in one step:
 
 ```sh
-dotler vault rotate
+dotler vault rotate password
+```
+
+### Reissue Recovery Mnemonic (`vault rotate recovery`)
+
+If you lost your 12-word recovery mnemonic (or suspect it was exposed) while you still know your passphrase, reissue `recovery_slot` with a brand-new 12-word mnemonic without changing your passphrase or re-encrypting any files. By default, all locally registered repositories sharing the active `vault_id` are synchronized together (use `-r <repo>` to target a single repository):
+
+```sh
+dotler vault rotate recovery
+```
+
+### Rotate Master Vault Key (`vault rotate key`)
+
+If you suspect the master vault key itself may have been compromised, generate a brand-new 256-bit master key (`vault_id`), passphrase slot, and 12-word recovery mnemonic, and automatically re-encrypt all `.dotler.enc` and `.dotler.fenc` files in memory across all locally registered repositories sharing the old `vault_id` before committing atomically to disk and updating the OS keyring:
+
+```sh
+dotler vault rotate key
 ```
 
 ### Recover Vault (`vault recover`)

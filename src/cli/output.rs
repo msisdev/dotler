@@ -7,7 +7,9 @@ pub use crate::cli::render::{
     ExportReport, InlineRender, UpdateReport, VaultFromReport, VaultInitReport, VaultLsReport,
     VaultRecoverReport, VaultRepoStatusEntry, styled_error_label, styled_hint_label,
 };
-pub use crate::core::vault_loader::VaultRotateReport;
+pub use crate::core::vault_loader::{
+    VaultRotateKeyReport, VaultRotateRecoveryReport, VaultRotateReport,
+};
 
 pub const EXIT_SUCCESS: i32 = 0;
 pub const EXIT_SYNC_CONFLICT: i32 = 1;

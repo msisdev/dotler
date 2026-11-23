@@ -23,7 +23,8 @@ pub use crate::cli::args::{
     AiArgs, CheckArgs, Cli, Command, ExportArgs, GitCloneArgs, GitCommand, GitInstallArgs,
     GitLsArgs, GitUninstallArgs, ImportArgs, InitArgs, McpArgs, StatusArgs, TidyArgs, UpdateArgs,
     VaultCommand, VaultFromCommand, VaultFromSourceArgs, VaultInitArgs, VaultLsArgs,
-    VaultRecoverArgs, VaultRotateArgs,
+    VaultRecoverArgs, VaultRotateCommand, VaultRotateKeyArgs, VaultRotatePasswordArgs,
+    VaultRotateRecoveryArgs,
 };
 
 /// Dispatches parsed CLI commands to domain workflows under lock protection.

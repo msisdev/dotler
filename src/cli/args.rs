@@ -292,8 +292,11 @@ pub enum VaultCommand {
         command: VaultFromCommand,
     },
 
-    /// Rotate vault password slot using current credentials
-    Rotate(VaultRotateArgs),
+    /// Rotate vault password slot, recovery mnemonic slot, or master vault key
+    Rotate {
+        #[command(subcommand)]
+        command: VaultRotateCommand,
+    },
 
     /// Recover vault using 12-word mnemonic and issue new recovery mnemonic
     Recover(VaultRecoverArgs),
@@ -343,8 +346,41 @@ pub struct VaultFromSourceArgs {
     pub hint: Option<String>,
 }
 
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum VaultRotateCommand {
+    /// Rotate password slot across matching repositories without re-encrypting files
+    Password(VaultRotatePasswordArgs),
+
+    /// Reissue 12-word recovery mnemonic slot across repositories sharing the active vault_id
+    Recovery(VaultRotateRecoveryArgs),
+
+    /// Generate a new master vault key and re-encrypt all encrypted files across sharing repositories
+    Key(VaultRotateKeyArgs),
+}
+
 #[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
-pub struct VaultRotateArgs {
+pub struct VaultRotatePasswordArgs {
+    #[arg(
+        long = "password-stdin",
+        help = "Read new passphrase from standard input"
+    )]
+    pub password_stdin: bool,
+
+    #[arg(long, help = "Optional plaintext password hint stored in dotler.toml")]
+    pub hint: Option<String>,
+}
+
+#[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
+pub struct VaultRotateRecoveryArgs {
+    #[arg(
+        long = "password-stdin",
+        help = "Read current passphrase from standard input"
+    )]
+    pub password_stdin: bool,
+}
+
+#[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
+pub struct VaultRotateKeyArgs {
     #[arg(
         long = "password-stdin",
         help = "Read new passphrase from standard input"
@@ -474,7 +510,9 @@ mod tests {
             vec!["dotler", "vault", "init"],
             vec!["dotler", "vault", "ls"],
             vec!["dotler", "vault", "from", "file", "main"],
-            vec!["dotler", "vault", "rotate"],
+            vec!["dotler", "vault", "rotate", "password"],
+            vec!["dotler", "vault", "rotate", "recovery"],
+            vec!["dotler", "vault", "rotate", "key"],
             vec!["dotler", "ai"],
             vec!["dotler", "mcp"],
             vec!["dotler", "update"],
@@ -566,10 +604,78 @@ mod tests {
         assert!(Cli::try_parse_from(["dotler", "vault", "set"]).is_err());
         assert!(Cli::try_parse_from(["dotler", "vault", "del"]).is_err());
         assert!(Cli::try_parse_from(["dotler", "vault", "passwd"]).is_err());
+        assert!(Cli::try_parse_from(["dotler", "vault", "rotate"]).is_err());
         assert!(Cli::try_parse_from(["dotler", "check", "-g", "shell"]).is_err());
         assert!(Cli::try_parse_from(["dotler", "status", "-g", "shell"]).is_err());
         assert!(Cli::try_parse_from(["dotler", "import", "-g", "shell"]).is_err());
         assert!(Cli::try_parse_from(["dotler", "export", "-g", "shell"]).is_err());
         assert!(Cli::try_parse_from(["dotler", "tidy", "-g", "shell"]).is_err());
+    }
+
+    #[test]
+    fn test_vault_rotate_subcommands_parsing() {
+        let p = Cli::try_parse_from([
+            "dotler",
+            "vault",
+            "rotate",
+            "password",
+            "--password-stdin",
+            "--hint",
+            "new-hint",
+        ])
+        .expect("vault rotate password must parse");
+        match p.command {
+            Command::Vault {
+                command:
+                    VaultCommand::Rotate {
+                        command: VaultRotateCommand::Password(a),
+                    },
+            } => {
+                assert!(a.password_stdin);
+                assert_eq!(a.hint.as_deref(), Some("new-hint"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let r = Cli::try_parse_from(["dotler", "vault", "rotate", "recovery", "--password-stdin"])
+            .expect("vault rotate recovery must parse");
+        match r.command {
+            Command::Vault {
+                command:
+                    VaultCommand::Rotate {
+                        command: VaultRotateCommand::Recovery(a),
+                    },
+            } => {
+                assert!(a.password_stdin);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let k = Cli::try_parse_from([
+            "dotler",
+            "vault",
+            "rotate",
+            "key",
+            "--password-stdin",
+            "--hint",
+            "fresh-key",
+        ])
+        .expect("vault rotate key must parse");
+        match k.command {
+            Command::Vault {
+                command:
+                    VaultCommand::Rotate {
+                        command: VaultRotateCommand::Key(a),
+                    },
+            } => {
+                assert!(a.password_stdin);
+                assert_eq!(a.hint.as_deref(), Some("fresh-key"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        assert!(
+            Cli::try_parse_from(["dotler", "vault", "rotate", "recovery", "--hint", "x"]).is_err()
+        );
     }
 }

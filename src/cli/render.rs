@@ -3,7 +3,9 @@
 use crossterm::style::{Attribute, Color, ResetColor, SetAttribute, SetForegroundColor};
 use serde::{Deserialize, Serialize};
 
-pub use crate::core::vault_loader::VaultRotateReport;
+pub use crate::core::vault_loader::{
+    VaultRotateKeyReport, VaultRotateRecoveryReport, VaultRotateReport,
+};
 
 /// Formats the `Error:` label using ANSI 16-color index 9 (Negative Red) and Bold.
 pub fn styled_error_label() -> String {
@@ -304,6 +306,31 @@ impl InlineRender for VaultRotateReport {
     }
 }
 
+impl InlineRender for VaultRotateRecoveryReport {
+    fn render_inline(&self) -> String {
+        format!(
+            "☀️ Recovery mnemonic rotation done. (id: {}, {} rotated, {} skipped)\n🔑 New recovery mnemonic: {}",
+            self.vault_id,
+            self.rotated_repos.len(),
+            self.skipped_repos.len(),
+            self.new_mnemonic
+        )
+    }
+}
+
+impl InlineRender for VaultRotateKeyReport {
+    fn render_inline(&self) -> String {
+        format!(
+            "☀️ Master key rotation done. (id: {} -> {}, {} rotated, {} re-keyed)\n🔑 New recovery mnemonic: {}",
+            self.old_vault_id,
+            self.vault_id,
+            self.rotated_repos.len(),
+            self.rekeyed_files,
+            self.new_mnemonic
+        )
+    }
+}
+
 impl InlineRender for VaultRecoverReport {
     fn render_inline(&self) -> String {
         format!(
@@ -564,6 +591,34 @@ pub(crate) mod tests {
         assert_eq!(
             vrotate.render_inline(),
             "☀️ Passphrase rotation done. (2 rotated, 1 skipped)"
+        );
+
+        let vrotate_rec = VaultRotateRecoveryReport {
+            status: "recovery_rotated".into(),
+            vault_id: "vid-123".into(),
+            rotated_repos: vec!["a".into(), "b".into()],
+            skipped_repos: vec!["c".into()],
+            new_mnemonic: "alpha beta".into(),
+        };
+        assert_eq!(
+            vrotate_rec.render_inline(),
+            "☀️ Recovery mnemonic rotation done. (id: vid-123, 2 rotated, 1 skipped)\n🔑 New recovery mnemonic: alpha beta"
+        );
+
+        let vrotate_key = VaultRotateKeyReport {
+            status: "key_rotated".into(),
+            old_vault_id: "vid-old".into(),
+            vault_id: "vid-new".into(),
+            rotated_repos: vec!["a".into()],
+            skipped_repos: vec![],
+            rekeyed_files: 3,
+            keyring_updated: true,
+            new_mnemonic: "gamma delta".into(),
+            hint: None,
+        };
+        assert_eq!(
+            vrotate_key.render_inline(),
+            "☀️ Master key rotation done. (id: vid-old -> vid-new, 1 rotated, 3 re-keyed)\n🔑 New recovery mnemonic: gamma delta"
         );
 
         let vrec = VaultRecoverReport {

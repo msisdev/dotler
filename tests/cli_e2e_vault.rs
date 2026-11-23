@@ -164,12 +164,12 @@ fn test_e2e_vault_rotate_rotates_all_matching_registered_repos() {
 
     let other_before = fs::read_to_string(repo_other.join("dotler.toml")).unwrap();
 
-    // Run `dotler vault rotate` from outside all repo directories (`home_dir`)
+    // Run `dotler vault rotate password` from outside all repo directories (`home_dir`)
     let mut rotate_child = sandbox
         .cmd()
         .env("DOTLER_PASSPHRASE", "shared_old_pass_123")
         .current_dir(&sandbox.home_dir)
-        .args(["vault", "rotate", "--password-stdin", "--json"])
+        .args(["vault", "rotate", "password", "--password-stdin", "--json"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -188,7 +188,7 @@ fn test_e2e_vault_rotate_rotates_all_matching_registered_repos() {
 
     let parsed: Value = serde_json::from_slice(&rotate_out.stdout).unwrap();
     assert_eq!(parsed["ok"], true);
-    assert_eq!(parsed["command"], "vault rotate");
+    assert_eq!(parsed["command"], "vault rotate password");
     assert_eq!(
         parsed["data"]["rotated_repos"],
         serde_json::json!(["personal", "work"])
@@ -207,7 +207,7 @@ fn test_e2e_vault_rotate_rotates_all_matching_registered_repos() {
         .cmd()
         .env("DOTLER_PASSPHRASE", "shared_new_pass_789")
         .current_dir(&sandbox.home_dir)
-        .args(["vault", "rotate", "--password-stdin", "--json"])
+        .args(["vault", "rotate", "password", "--password-stdin", "--json"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -378,6 +378,7 @@ fn test_e2e_vault_hint_and_use_keyring_optout() {
         .args([
             "vault",
             "rotate",
+            "password",
             "--hint",
             "second pet name",
             "--password-stdin",
@@ -435,4 +436,240 @@ fn test_e2e_vault_hint_and_use_keyring_optout() {
     // Ensure local config still has use_keyring = false
     let final_local_cfg = fs::read_to_string(&config_toml_path).unwrap();
     assert!(final_local_cfg.contains("use_keyring = false"));
+}
+
+#[test]
+fn test_e2e_vault_rotate_recovery_and_rotate_key_full_lifecycle() {
+    let sandbox = E2eSandbox::new();
+
+    let repo_primary = sandbox.home_dir.join("repo-primary");
+    let repo_shared = sandbox.home_dir.join("repo-shared");
+    let repo_other = sandbox.home_dir.join("repo-other");
+    for (dir, label) in [
+        (&repo_primary, "primary"),
+        (&repo_shared, "shared"),
+        (&repo_other, "other"),
+    ] {
+        fs::create_dir_all(dir).unwrap();
+        let out = sandbox
+            .cmd()
+            .current_dir(dir)
+            .args(["init", "--label", label])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0));
+    }
+
+    // Configure encrypted groups (both enc=cont and enc=full) on primary
+    let secret_src_dir = sandbox.home_dir.join(".mysecrets");
+    fs::create_dir_all(secret_src_dir.join("nested")).unwrap();
+    fs::write(secret_src_dir.join("token.env"), b"API_TOKEN=v1_secret\n").unwrap();
+    fs::write(
+        secret_src_dir.join("nested/client.key"),
+        b"PRIVATE_KEY=full_enc_secret\n",
+    )
+    .unwrap();
+    fs::write(
+        repo_primary.join("dotler.toml"),
+        "[sec]\nos-nux = \"~/.mysecrets\"\nos-mac = \"~/.mysecrets\"\nos-win = \"~/.mysecrets\"\nfiles = \"\"\"\ntoken.env enc\nnested/* enc=full\n\"\"\"\n",
+    )
+    .unwrap();
+
+    // Initialize vault on primary, share with shared via `vault from file`, and create distinct vault on other
+    let init_primary = sandbox
+        .cmd()
+        .current_dir(&repo_primary)
+        .env("DOTLER_PASSPHRASE", "pass_v1")
+        .args(["vault", "init", "--hint", "v1-hint", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(init_primary.status.code(), Some(0));
+    let init_json: Value = serde_json::from_slice(&init_primary.stdout).unwrap();
+    let orig_vid = init_json["data"]["vault_id"].as_str().unwrap().to_string();
+    let orig_mnemonic = init_json["data"]["mnemonic"].as_str().unwrap().to_string();
+
+    let from_shared = sandbox
+        .cmd()
+        .current_dir(&repo_shared)
+        .env("DOTLER_PASSPHRASE", "pass_v1")
+        .args(["vault", "from", "file", "primary", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(from_shared.status.code(), Some(0));
+
+    let init_other = sandbox
+        .cmd()
+        .current_dir(&repo_other)
+        .env("DOTLER_PASSPHRASE", "pass_v1")
+        .args(["vault", "init", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(init_other.status.code(), Some(0));
+    let other_before = fs::read_to_string(repo_other.join("dotler.toml")).unwrap();
+
+    // Import encrypted files into primary
+    let import_out = sandbox
+        .cmd()
+        .current_dir(&repo_primary)
+        .env("DOTLER_PASSPHRASE", "pass_v1")
+        .args(["import", "-y", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(import_out.status.code(), Some(0));
+    let enc_before = fs::read(repo_primary.join("sec/token.env.dotler.enc")).unwrap();
+
+    // 1. Rotate recovery mnemonic across repos sharing orig_vid without re-encrypting files
+    let rot_rec_out = sandbox
+        .cmd()
+        .current_dir(&repo_primary)
+        .env("DOTLER_PASSPHRASE", "pass_v1")
+        .args(["vault", "rotate", "recovery", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        rot_rec_out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&rot_rec_out.stderr)
+    );
+    let rot_rec_json: Value = serde_json::from_slice(&rot_rec_out.stdout).unwrap();
+    assert_eq!(rot_rec_json["ok"], true);
+    assert_eq!(rot_rec_json["command"], "vault rotate recovery");
+    assert_eq!(rot_rec_json["data"]["status"], "recovery_rotated");
+    assert_eq!(rot_rec_json["data"]["vault_id"], orig_vid);
+    assert_eq!(
+        rot_rec_json["data"]["rotated_repos"],
+        serde_json::json!(["primary", "shared"])
+    );
+    assert_eq!(
+        rot_rec_json["data"]["skipped_repos"],
+        serde_json::json!(["other"])
+    );
+    let rotated_mnemonic = rot_rec_json["data"]["new_mnemonic"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(rotated_mnemonic, orig_mnemonic);
+    assert_eq!(
+        fs::read(repo_primary.join("sec/token.env.dotler.enc")).unwrap(),
+        enc_before,
+        "rotate recovery must not modify encrypted files"
+    );
+    assert_eq!(
+        fs::read_to_string(repo_other.join("dotler.toml")).unwrap(),
+        other_before,
+        "unrelated vault_id repo must be untouched"
+    );
+
+    // Old mnemonic must be rejected on shared repo
+    let mut bad_recover = sandbox
+        .cmd()
+        .current_dir(&repo_shared)
+        .args([
+            "vault",
+            "recover",
+            "--mnemonic",
+            &orig_mnemonic,
+            "--password-stdin",
+            "--json",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Some(mut stdin) = bad_recover.stdin.take() {
+        writeln!(stdin, "should_fail").unwrap();
+    }
+    assert_eq!(
+        bad_recover.wait_with_output().unwrap().status.code(),
+        Some(4)
+    );
+
+    // 2. Rotate master key across repos sharing orig_vid (re-keying .dotler.enc and .dotler.fenc)
+    let mut rot_key_child = sandbox
+        .cmd()
+        .current_dir(&repo_primary)
+        .env("DOTLER_PASSPHRASE", "pass_v1")
+        .args([
+            "vault",
+            "rotate",
+            "key",
+            "--hint",
+            "v2-key-hint",
+            "--password-stdin",
+            "--json",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Some(mut stdin) = rot_key_child.stdin.take() {
+        writeln!(stdin, "pass_v2_new_master").unwrap();
+    }
+    let rot_key_out = rot_key_child.wait_with_output().unwrap();
+    assert_eq!(
+        rot_key_out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&rot_key_out.stderr)
+    );
+    let rot_key_json: Value = serde_json::from_slice(&rot_key_out.stdout).unwrap();
+    assert_eq!(rot_key_json["ok"], true);
+    assert_eq!(rot_key_json["command"], "vault rotate key");
+    assert_eq!(rot_key_json["data"]["status"], "key_rotated");
+    assert_eq!(rot_key_json["data"]["old_vault_id"], orig_vid);
+    let new_vid = rot_key_json["data"]["vault_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(new_vid, orig_vid);
+    assert_eq!(rot_key_json["data"]["rekeyed_files"], 2);
+    assert_eq!(
+        rot_key_json["data"]["rotated_repos"],
+        serde_json::json!(["primary", "shared"])
+    );
+    assert_eq!(
+        rot_key_json["data"]["skipped_repos"],
+        serde_json::json!(["other"])
+    );
+    assert_eq!(rot_key_json["data"]["hint"], "v2-key-hint");
+
+    // `check` passes and deleting local OS files + `export` restores both .dotler.enc and .dotler.fenc cleanly
+    let check_out = sandbox
+        .cmd()
+        .current_dir(&repo_primary)
+        .args(["check", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        check_out.status.code(),
+        Some(0),
+        "check stderr: {}",
+        String::from_utf8_lossy(&check_out.stderr)
+    );
+
+    fs::remove_dir_all(&secret_src_dir).unwrap();
+    let export_out = sandbox
+        .cmd()
+        .current_dir(&repo_primary)
+        .env("DOTLER_PASSPHRASE", "pass_v2_new_master")
+        .args(["export", "-y", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        export_out.status.code(),
+        Some(0),
+        "export stderr: {}",
+        String::from_utf8_lossy(&export_out.stderr)
+    );
+    assert_eq!(
+        fs::read(secret_src_dir.join("token.env")).unwrap(),
+        b"API_TOKEN=v1_secret\n"
+    );
+    assert_eq!(
+        fs::read(secret_src_dir.join("nested/client.key")).unwrap(),
+        b"PRIVATE_KEY=full_enc_secret\n"
+    );
 }

@@ -238,8 +238,22 @@ impl EngineError {
             EngineError::LockTimeout { .. } => {
                 "Another dotler process holds ~/.config/dotler/dotler.lock. Wait for it to complete or terminate stale processes.".to_string()
             }
-            EngineError::VaultLocked { .. } => {
-                "Run 'dotler vault init' to store the passphrase in the OS keyring, or set the DOTLER_PASSPHRASE environment variable.".to_string()
+            EngineError::VaultLocked { reason } => {
+                if reason.contains("--mnemonic") {
+                    "Pass the 12-word recovery phrase via '--mnemonic \"<12 words>\"', or run in an interactive terminal.".to_string()
+                } else if reason.contains("use_keyring = false") {
+                    if reason.contains("--password-stdin") {
+                        "OS keyring is disabled (use_keyring = false). Pass '--password-stdin' or set the DOTLER_PASSPHRASE environment variable (or set use_keyring = true in ~/.config/dotler/config.toml).".to_string()
+                    } else {
+                        "OS keyring is disabled (use_keyring = false). Set the DOTLER_PASSPHRASE environment variable (or set use_keyring = true in ~/.config/dotler/config.toml).".to_string()
+                    }
+                } else if reason.contains("--password-stdin") {
+                    "Pipe the passphrase via '--password-stdin', or run in an interactive terminal.".to_string()
+                } else if reason.contains("not configured") {
+                    "Run 'dotler vault init' to initialize a vault in this repository first.".to_string()
+                } else {
+                    "Run 'dotler vault init' to store the passphrase in the OS keyring, or set the DOTLER_PASSPHRASE environment variable.".to_string()
+                }
             }
             EngineError::SyncConflict { path, .. } => {
                 format!(

@@ -10,7 +10,7 @@ use crate::config::repo::{
 };
 use crate::config::state::write_file_safe;
 use crate::core::vault_loader::{
-    PendingRekeyWrite, apply_rekey_writes, read_new_passphrase, unlock_vault_if_needed,
+    PendingRekeyWrite, apply_rekey_writes, read_new_passphrase, unlock_vault_if_needed_with_prompt,
 };
 use crate::crypto::keyring::{OsKeyring, PASSPHRASE_ENV_VAR};
 use crate::crypto::vault::{
@@ -24,6 +24,26 @@ pub(crate) fn unlock_imported_vault_slot(
     pw_slot: &VaultSlot,
     expected_vid: Option<&str>,
     vault_hint: Option<&str>,
+    use_keyring: bool,
+    password_stdin: bool,
+    is_interactive: bool,
+) -> Result<(VaultKey, SecretString, bool), EngineError> {
+    unlock_imported_vault_slot_with_label(
+        pw_slot,
+        expected_vid,
+        vault_hint,
+        "Enter vault passphrase",
+        use_keyring,
+        password_stdin,
+        is_interactive,
+    )
+}
+
+fn unlock_imported_vault_slot_with_label(
+    pw_slot: &VaultSlot,
+    expected_vid: Option<&str>,
+    vault_hint: Option<&str>,
+    prompt_prefix: &str,
     use_keyring: bool,
     password_stdin: bool,
     is_interactive: bool,
@@ -51,11 +71,20 @@ pub(crate) fn unlock_imported_vault_slot(
         return Ok((key, sec, false));
     }
 
+    if !is_interactive {
+        let reason = if use_keyring {
+            "Passphrase required in non-interactive mode. Pass '--password-stdin', export DOTLER_PASSPHRASE, or register the vault in OS keyring.".to_string()
+        } else {
+            "Passphrase required in non-interactive mode (OS keyring is disabled via use_keyring = false). Pass '--password-stdin' or export DOTLER_PASSPHRASE.".to_string()
+        };
+        return Err(EngineError::VaultLocked { reason });
+    }
+
     let prompt_msg = match vault_hint.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(h) => format!("Enter vault passphrase (hint: {h}): "),
-        None => "Enter vault passphrase: ".to_string(),
+        Some(h) => format!("{prompt_prefix} (hint: {h}): "),
+        None => format!("{prompt_prefix}: "),
     };
-    let pass = read_new_passphrase(false, false, is_interactive, &prompt_msg)?;
+    let pass = read_new_passphrase(false, false, true, &prompt_msg)?;
     let key = pw_slot.unwrap(&pass, expected_vid)?;
     Ok((key, pass, true))
 }
@@ -127,10 +156,11 @@ pub(crate) fn handle_vault_from<W: Write>(
         .map(str::to_string);
 
     let expected_vid = (!ext_vault.vault_id.is_empty()).then_some(ext_vault.vault_id.as_str());
-    let (new_vault_key, pass, should_update_keyring) = unlock_imported_vault_slot(
+    let (new_vault_key, pass, should_update_keyring) = unlock_imported_vault_slot_with_label(
         &pw_slot,
         expected_vid,
         ext_vault.vault_hint.as_deref(),
+        "Enter imported vault passphrase",
         local_cfg.use_keyring,
         args.password_stdin,
         is_interactive,
@@ -205,9 +235,16 @@ pub(crate) fn handle_vault_from<W: Write>(
         let old_vault_key = if let Ok(key) = old_slot.unwrap(&pass, Some(&old_vcfg.vault_id)) {
             key
         } else {
-            unlock_vault_if_needed(&repo_cfg, local_cfg.use_keyring, is_interactive, true)?.ok_or(
-                EngineError::Config(crate::config::ConfigError::MissingVaultConfig),
+            unlock_vault_if_needed_with_prompt(
+                &repo_cfg,
+                local_cfg.use_keyring,
+                is_interactive,
+                true,
+                Some("Enter current vault passphrase to re-key existing files"),
             )?
+            .ok_or(EngineError::Config(
+                crate::config::ConfigError::MissingVaultConfig,
+            ))?
         };
 
         for item in mismatched_files {
@@ -539,6 +576,144 @@ mod tests {
                 .unwrap()
                 .expose_secret(),
             "src-keyring-auto-777"
+        );
+
+        if let Some(h) = orig_home {
+            unsafe {
+                std::env::set_var("HOME", h);
+            }
+        }
+    }
+
+    #[test]
+    fn test_handle_vault_from_with_use_keyring_false_rekeys_without_touching_keyring() {
+        let _mock = mock_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let dotler_cfg_dir = home_dir.join(".config").join("dotler");
+        let repo_src = home_dir.join("repo_src");
+        let repo_dst = home_dir.join("repo_dst");
+        fs::create_dir_all(&dotler_cfg_dir).unwrap();
+        fs::create_dir_all(&repo_src).unwrap();
+        fs::create_dir_all(repo_dst.join("sec")).unwrap();
+
+        let pass_src = SecretString::new("src-disabled-kr-999".to_string());
+        let pass_dst = SecretString::new("dst-disabled-kr-111".to_string());
+        let (vcfg_src, vkey_src, _) = init_vault(&pass_src).unwrap();
+        let (vcfg_dst, vkey_dst, _) = init_vault(&pass_dst).unwrap();
+
+        write_file_safe(
+            &repo_src.join("dotler.toml"),
+            format!(
+                "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\nvault_hint = \"src-hint\"\n",
+                vcfg_src.vault_id, vcfg_src.password_slot, vcfg_src.recovery_slot
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        write_file_safe(
+            &repo_dst.join("dotler.toml"),
+            format!(
+                "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\nvault_hint = \"dst-hint\"\n\n[sec]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nfiles = \"secret.env enc\"\n",
+                vcfg_dst.vault_id, vcfg_dst.password_slot, vcfg_dst.recovery_slot
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let orig_enc = vkey_dst
+            .encrypt_file(b"TOKEN=disabled_kr")
+            .unwrap()
+            .to_bytes();
+        write_file_safe(&repo_dst.join("sec/secret.env.dotler.enc"), &orig_enc).unwrap();
+
+        let mut local_cfg = LocalConfig {
+            default_repo: Some("dst".to_string()),
+            use_keyring: false,
+            ..Default::default()
+        };
+        local_cfg
+            .repos
+            .insert("src".to_string(), "~/repo_src".to_string());
+        local_cfg
+            .repos
+            .insert("dst".to_string(), "~/repo_dst".to_string());
+
+        let orig_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", &home_dir);
+        }
+        local_cfg
+            .save_atomic(&dotler_cfg_dir.join("config.toml"))
+            .unwrap();
+
+        // Populate OS keyring with BOTH secrets; use_keyring=false must ignore them completely
+        OsKeyring::set_for_vault(&vcfg_src.vault_id, &pass_src).unwrap();
+        OsKeyring::set_for_vault(&vcfg_dst.vault_id, &pass_dst).unwrap();
+
+        let lock_res = crate::config::state::get_lock(dotler_cfg_dir.join("dotler.lock"));
+        let lock_guard = lock_res.get().unwrap();
+        let from_cmd = VaultFromCommand::File(VaultFromSourceArgs {
+            source: "src".to_string(),
+            ..Default::default()
+        });
+        let cli_non_interactive = Cli {
+            json: true,
+            device: None,
+            repo: Some("dst".to_string()),
+            dry_run: false,
+            verbose: false,
+            command: Command::Vault {
+                command: VaultCommand::From {
+                    command: from_cmd.clone(),
+                },
+            },
+        };
+
+        // 1. Non-interactive without env/stdin must fail with use_keyring=false hint (NOT `dotler vault init`)
+        let err = handle_vault(
+            &VaultCommand::From {
+                command: from_cmd.clone(),
+            },
+            &cli_non_interactive,
+            false,
+            &mut Vec::new(),
+            lock_guard,
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 4);
+        assert!(err.hint().contains("use_keyring = false"));
+        assert!(!err.hint().contains("dotler vault init"));
+
+        // 2. Interactive prompts twice (imported vault first, then current vault for re-keying)
+        OsKeyring::clear_mock();
+        OsKeyring::push_mock_prompt_reply("src-disabled-kr-999");
+        OsKeyring::push_mock_prompt_reply("dst-disabled-kr-111");
+        let mut out = Vec::new();
+        handle_vault(
+            &VaultCommand::From { command: from_cmd },
+            &cli_non_interactive,
+            true,
+            &mut out,
+            lock_guard,
+        )
+        .unwrap();
+        let resp: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(resp["data"]["vault_id"], vcfg_src.vault_id);
+        assert_eq!(resp["data"]["rekeyed_files"], 1);
+        assert!(OsKeyring::get().unwrap().is_none());
+        assert!(
+            OsKeyring::get_for_vault(&vcfg_src.vault_id)
+                .unwrap()
+                .is_none()
+        );
+
+        let rekeyed = EncryptedFile::from_bytes(
+            &fs::read(repo_dst.join("sec/secret.env.dotler.enc")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            vkey_src.decrypt_file(&rekeyed).unwrap().expose_secret(),
+            b"TOKEN=disabled_kr"
         );
 
         if let Some(h) = orig_home {

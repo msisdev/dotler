@@ -436,6 +436,151 @@ fn test_e2e_vault_hint_and_use_keyring_optout() {
     // Ensure local config still has use_keyring = false
     let final_local_cfg = fs::read_to_string(&config_toml_path).unwrap();
     assert!(final_local_cfg.contains("use_keyring = false"));
+
+    // 5. `dotler init` on an already-vault-initialized repo with `use_keyring = false`
+    //    must succeed non-interactively without requiring any passphrase.
+    let reinit_out = sandbox.cmd().args(["init", "--json"]).output().unwrap();
+    assert_eq!(
+        reinit_out.status.code(),
+        Some(0),
+        "dotler init with use_keyring=false must not require vault passphrase: {}",
+        String::from_utf8_lossy(&reinit_out.stdout)
+    );
+
+    // 6. `dotler vault init` on an already-initialized repo with `use_keyring = false`
+    //    must fail with exit code 2 even when DOTLER_PASSPHRASE is set.
+    let vault_reinit = sandbox
+        .cmd()
+        .env("DOTLER_PASSPHRASE", "pass_rec_333")
+        .args(["vault", "init", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(vault_reinit.status.code(), Some(2));
+
+    // 7. `dotler vault ls --json` must report use_keyring=false and keyring_status=disabled
+    let ls_out = sandbox
+        .cmd()
+        .args(["vault", "ls", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(ls_out.status.code(), Some(0));
+    let ls_json: Value = serde_json::from_slice(&ls_out.stdout).unwrap();
+    assert_eq!(ls_json["data"]["use_keyring"], false);
+    assert_eq!(ls_json["data"]["repos"][0]["keyring_status"], "disabled");
+
+    // 8. `dotler vault rotate password` JSON report must have keyring_updated=false
+    let rotate_json: Value = serde_json::from_slice(&rotate_out.stdout).unwrap();
+    assert_eq!(rotate_json["data"]["keyring_updated"], false);
+
+    // 9. `dotler vault recover` with DOTLER_PASSPHRASE exported but without `--password-stdin`
+    //    must fail with `--password-stdin` hint instead of adopting DOTLER_PASSPHRASE.
+    let rec_json: Value = serde_json::from_slice(&recover_out.stdout).unwrap();
+    let new_mnemonic = rec_json["data"]["new_mnemonic"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let recover_no_stdin = sandbox
+        .cmd()
+        .env("DOTLER_PASSPHRASE", "stale_shell_secret")
+        .args(["vault", "recover", "--mnemonic", &new_mnemonic, "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(recover_no_stdin.status.code(), Some(4));
+    let rec_err: Value = serde_json::from_slice(&recover_no_stdin.stdout).unwrap();
+    assert!(
+        rec_err["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("--password-stdin"),
+        "expected --password-stdin hint: {rec_err}"
+    );
+
+    // 10. `dotler vault from file` re-keying with distinct passphrases under `use_keyring = false`
+    //     succeeds via DOTLER_PASSPHRASE (current) + --password-stdin (imported), and
+    //     missing passphrase on `dotler import` reports a `use_keyring = false` hint.
+    let repo_other = sandbox.home_dir.join("other-vault-repo");
+    fs::create_dir_all(&repo_other).unwrap();
+    assert_eq!(
+        sandbox
+            .cmd()
+            .current_dir(&repo_other)
+            .args(["init", "--label", "other", "--json"])
+            .output()
+            .unwrap()
+            .status
+            .code(),
+        Some(0)
+    );
+    let init_other = sandbox
+        .cmd()
+        .current_dir(&repo_other)
+        .env("DOTLER_PASSPHRASE", "other_vault_pass_999")
+        .args(["vault", "init", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(init_other.status.code(), Some(0));
+
+    let mut primary_toml = fs::read_to_string(sandbox.repo_dir.join("dotler.toml")).unwrap();
+    primary_toml.push_str(
+        "\n[sec]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nfiles = \"secret.env enc\"\n",
+    );
+    fs::write(sandbox.repo_dir.join("dotler.toml"), primary_toml).unwrap();
+    fs::write(sandbox.home_dir.join("secret.env"), b"KEY=optout\n").unwrap();
+
+    // Missing passphrase on `dotler import` must report `use_keyring = false` (not `dotler vault init`)
+    let locked_imp = sandbox
+        .cmd()
+        .args(["import", "-y", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(locked_imp.status.code(), Some(4));
+    let locked_json: Value = serde_json::from_slice(&locked_imp.stdout).unwrap();
+    let locked_hint = locked_json["hint"].as_str().unwrap_or_default();
+    assert!(
+        locked_hint.contains("use_keyring = false") && !locked_hint.contains("dotler vault init"),
+        "unexpected locked hint: {locked_json}"
+    );
+
+    assert_eq!(
+        sandbox
+            .cmd()
+            .env("DOTLER_PASSPHRASE", "pass_rec_333")
+            .args(["import", "-y", "--json"])
+            .output()
+            .unwrap()
+            .status
+            .code(),
+        Some(0)
+    );
+
+    let mut from_child = sandbox
+        .cmd()
+        .env("DOTLER_PASSPHRASE", "pass_rec_333")
+        .args([
+            "vault",
+            "from",
+            "file",
+            "other",
+            "--password-stdin",
+            "--json",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Some(mut stdin) = from_child.stdin.take() {
+        writeln!(stdin, "other_vault_pass_999").unwrap();
+    }
+    let from_out = from_child.wait_with_output().unwrap();
+    assert_eq!(
+        from_out.status.code(),
+        Some(0),
+        "vault from rekeying under use_keyring=false failed: {}",
+        String::from_utf8_lossy(&from_out.stderr)
+    );
+    let from_json: Value = serde_json::from_slice(&from_out.stdout).unwrap();
+    assert_eq!(from_json["data"]["rekeyed_files"], 1);
 }
 
 #[test]

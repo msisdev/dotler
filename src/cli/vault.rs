@@ -28,16 +28,35 @@ pub(crate) fn resolve_vault_init_passphrase<W: Write>(
     is_interactive: bool,
     json_mode: bool,
 ) -> Result<(SecretString, bool), EngineError> {
-    let has_env_pass = std::env::var(PASSPHRASE_ENV_VAR)
-        .is_ok_and(|v| !v.trim_end_matches(['\r', '\n']).is_empty());
+    if password_stdin {
+        let pass =
+            read_new_passphrase(true, false, is_interactive, "Enter new vault passphrase: ")?;
+        return Ok((pass, true));
+    }
 
-    let existing_keyring = if !password_stdin && !has_env_pass && use_keyring {
-        OsKeyring::get().ok().flatten()
-    } else {
-        None
-    };
+    let env_pass = std::env::var(PASSPHRASE_ENV_VAR).ok().and_then(|v| {
+        let trimmed = v.trim_end_matches(['\r', '\n']);
+        (!trimmed.is_empty()).then(|| SecretString::new(trimmed.to_string()))
+    });
 
-    if let Some(existing_secret) = existing_keyring {
+    if let Some(env_secret) = env_pass {
+        if json_mode || (!is_interactive && !ConfirmPrompt::has_mock_or_env_input()) {
+            return Ok((env_secret, true));
+        }
+
+        let reuse = match confirm_proceed_to(
+            writer,
+            "DOTLER_PASSPHRASE is set in the environment. Use it as the new vault passphrase?",
+        ) {
+            Ok(val) => val,
+            Err(ConfirmError::NonTtyError) => true,
+            Err(ConfirmError::TerminalIoError(e)) => return Err(EngineError::Io(e)),
+        };
+
+        if reuse {
+            return Ok((env_secret, true));
+        }
+    } else if use_keyring && let Some(existing_secret) = OsKeyring::get().ok().flatten() {
         if json_mode || (!is_interactive && !ConfirmPrompt::has_mock_or_env_input()) {
             return Ok((existing_secret, false));
         }
@@ -56,12 +75,16 @@ pub(crate) fn resolve_vault_init_passphrase<W: Write>(
         }
     }
 
-    let pass = read_new_passphrase(
-        password_stdin,
-        true,
-        is_interactive,
-        "Enter new vault passphrase: ",
-    )?;
+    if !is_interactive {
+        let reason = if use_keyring {
+            "Passphrase required in non-interactive mode. Pass '--password-stdin' or export DOTLER_PASSPHRASE.".to_string()
+        } else {
+            "Passphrase required in non-interactive mode (OS keyring is disabled via use_keyring = false). Pass '--password-stdin' or export DOTLER_PASSPHRASE.".to_string()
+        };
+        return Err(EngineError::VaultLocked { reason });
+    }
+
+    let pass = read_new_passphrase(false, false, true, "Enter new vault passphrase: ")?;
     Ok((pass, true))
 }
 
@@ -71,6 +94,9 @@ pub(crate) fn ensure_repo_vault_in_keyring(
     password_stdin: bool,
     is_interactive: bool,
 ) -> Result<(), EngineError> {
+    if !use_keyring {
+        return Ok(());
+    }
     let pw_slot = VaultSlot::from_base64(&vault_cfg.password_slot)?;
     let expected_vid =
         (!vault_cfg.vault_id.trim().is_empty()).then_some(vault_cfg.vault_id.as_str());
@@ -82,8 +108,7 @@ pub(crate) fn ensure_repo_vault_in_keyring(
         password_stdin,
         is_interactive,
     )?;
-    if use_keyring
-        && let Some(vid) = expected_vid
+    if let Some(vid) = expected_vid
         && (should_update_keyring || OsKeyring::get_for_vault(vid).ok().flatten().is_none())
     {
         let _ = OsKeyring::set_with_fallback(Some(vid), &pass);
@@ -175,17 +200,16 @@ pub(crate) fn handle_vault<W: Write>(
                 })?;
             let mnemonic_phrase = if let Some(ref m) = args.mnemonic {
                 SecretString::new(m.clone())
+            } else if !is_interactive {
+                return Err(EngineError::VaultLocked {
+                    reason: "Recovery mnemonic required in non-interactive mode. Pass '--mnemonic <12-word-phrase>'.".to_string(),
+                });
             } else {
-                read_new_passphrase(
-                    false,
-                    false,
-                    is_interactive,
-                    "Enter 12-word recovery mnemonic: ",
-                )?
+                read_new_passphrase(false, false, true, "Enter 12-word recovery mnemonic: ")?
             };
             let new_pass = read_new_passphrase(
                 args.password_stdin,
-                true,
+                false,
                 is_interactive,
                 "Enter new vault passphrase: ",
             )?;
@@ -229,33 +253,34 @@ fn handle_vault_init<W: Write>(
     let mut repo_cfg = RepoConfig::load_without_vault_check(&manifest_path)?;
 
     if let Some(ref existing_vault) = repo_cfg.vault {
-        let has_env_pass = std::env::var(PASSPHRASE_ENV_VAR)
-            .is_ok_and(|v| !v.trim_end_matches(['\r', '\n']).is_empty());
-        let needs_keyring = local_cfg.use_keyring
-            && !existing_vault.vault_id.trim().is_empty()
-            && !OsKeyring::get_for_vault(&existing_vault.vault_id)
-                .ok()
-                .flatten()
-                .is_some_and(|sec| {
-                    VaultSlot::from_base64(&existing_vault.password_slot)
-                        .ok()
-                        .is_some_and(|slot| {
-                            slot.unwrap(&sec, Some(&existing_vault.vault_id)).is_ok()
-                        })
-                });
-        if args.password_stdin || has_env_pass || needs_keyring {
-            ensure_repo_vault_in_keyring(
-                existing_vault,
-                local_cfg.use_keyring,
-                args.password_stdin,
-                is_interactive,
-            )?;
-            let data = VaultInitReport {
-                vault_id: existing_vault.vault_id.clone(),
-                mnemonic: None,
-                hint: existing_vault.vault_hint.clone(),
-            };
-            return Ok(render_success_to(stdout, "vault init", &data, cli.json));
+        if local_cfg.use_keyring {
+            let has_env_pass = std::env::var(PASSPHRASE_ENV_VAR)
+                .is_ok_and(|v| !v.trim_end_matches(['\r', '\n']).is_empty());
+            let needs_keyring = !existing_vault.vault_id.trim().is_empty()
+                && !OsKeyring::get_for_vault(&existing_vault.vault_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|sec| {
+                        VaultSlot::from_base64(&existing_vault.password_slot)
+                            .ok()
+                            .is_some_and(|slot| {
+                                slot.unwrap(&sec, Some(&existing_vault.vault_id)).is_ok()
+                            })
+                    });
+            if args.password_stdin || has_env_pass || needs_keyring {
+                ensure_repo_vault_in_keyring(
+                    existing_vault,
+                    local_cfg.use_keyring,
+                    args.password_stdin,
+                    is_interactive,
+                )?;
+                let data = VaultInitReport {
+                    vault_id: existing_vault.vault_id.clone(),
+                    mnemonic: None,
+                    hint: existing_vault.vault_hint.clone(),
+                };
+                return Ok(render_success_to(stdout, "vault init", &data, cli.json));
+            }
         }
 
         return Err(EngineError::Config(crate::config::ConfigError::UnknownField {
@@ -576,6 +601,221 @@ mod tests {
         assert_eq!(repos[1]["label"], "my-life-vault");
         assert_eq!(repos[1]["keyring_status"], "vault_slot");
 
+        if let Some(h) = orig_home {
+            unsafe {
+                std::env::set_var("HOME", h);
+            }
+        }
+    }
+
+    #[test]
+    fn test_resolve_vault_init_passphrase_confirms_env_var_in_interactive_mode() {
+        let _mock = mock_guard();
+        unsafe {
+            std::env::set_var(PASSPHRASE_ENV_VAR, "stale-shell-env-pass");
+        }
+
+        // Non-interactive JSON mode consumes DOTLER_PASSPHRASE directly without prompting
+        let (json_pass, _) =
+            resolve_vault_init_passphrase(&mut Vec::new(), false, false, false, true).unwrap();
+        assert_eq!(json_pass.expose_secret(), "stale-shell-env-pass");
+
+        // Interactive mode asks confirmation before reusing DOTLER_PASSPHRASE
+        ConfirmPrompt::push_mock_input("yes");
+        let (yes_pass, _) =
+            resolve_vault_init_passphrase(&mut Vec::new(), false, false, true, false).unwrap();
+        assert_eq!(yes_pass.expose_secret(), "stale-shell-env-pass");
+
+        ConfirmPrompt::push_mock_input("no");
+        OsKeyring::push_mock_prompt_reply("fresh-interactive-pass");
+        let (no_pass, _) =
+            resolve_vault_init_passphrase(&mut Vec::new(), false, false, true, false).unwrap();
+        assert_eq!(no_pass.expose_secret(), "fresh-interactive-pass");
+
+        unsafe {
+            std::env::remove_var(PASSPHRASE_ENV_VAR);
+        }
+    }
+
+    #[test]
+    fn test_vault_commands_respect_use_keyring_false_and_recover_ignores_env_pass() {
+        use crate::cli::args::VaultRecoverArgs;
+        let _mock = mock_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let dotler_cfg_dir = home_dir.join(".config").join("dotler");
+        let repo_dir = home_dir.join("my-dots");
+        fs::create_dir_all(&dotler_cfg_dir).unwrap();
+        fs::create_dir_all(&repo_dir).unwrap();
+
+        let orig_pass = SecretString::new("orig-secret-111".to_string());
+        let (vcfg, _, mnemonic) = init_vault(&orig_pass).unwrap();
+        write_file_safe(
+            &repo_dir.join("dotler.toml"),
+            format!(
+                "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n",
+                vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+
+        let mut local_cfg = LocalConfig {
+            default_repo: Some("main".to_string()),
+            use_keyring: false,
+            ..Default::default()
+        };
+        local_cfg
+            .repos
+            .insert("main".to_string(), "~/my-dots".to_string());
+
+        let orig_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", &home_dir);
+        }
+        local_cfg
+            .save_atomic(&dotler_cfg_dir.join("config.toml"))
+            .unwrap();
+
+        // Pre-populate OS keyring to ensure use_keyring=false ignores and never mutates it
+        OsKeyring::set(&SecretString::new("stale-keyring-default".to_string())).unwrap();
+        OsKeyring::set_for_vault(
+            &vcfg.vault_id,
+            &SecretString::new("stale-keyring-vault".to_string()),
+        )
+        .unwrap();
+
+        // ensure_repo_vault_in_keyring must be a no-op when use_keyring=false (even non-interactively)
+        ensure_repo_vault_in_keyring(&vcfg, false, false, false).unwrap();
+
+        let lock_res = crate::config::state::get_lock(dotler_cfg_dir.join("dotler.lock"));
+        let lock_guard = lock_res.get().unwrap();
+        let make_cli = |cmd: Command, json: bool| Cli {
+            json,
+            device: None,
+            repo: Some("main".to_string()),
+            dry_run: false,
+            verbose: false,
+            command: cmd,
+        };
+
+        // `vault init` on an already-initialized repo with use_keyring=false must error even if DOTLER_PASSPHRASE is set
+        unsafe {
+            std::env::set_var(PASSPHRASE_ENV_VAR, "orig-secret-111");
+        }
+        let init_again_err = handle_vault(
+            &VaultCommand::Init(VaultInitArgs::default()),
+            &make_cli(
+                Command::Vault {
+                    command: VaultCommand::Init(VaultInitArgs::default()),
+                },
+                true,
+            ),
+            false,
+            &mut Vec::new(),
+            lock_guard,
+        )
+        .unwrap_err();
+        assert!(matches!(init_again_err, EngineError::Config(_)));
+
+        // Non-interactive `vault recover` without --mnemonic gives a --mnemonic hint
+        let missing_mnemonic_err = handle_vault(
+            &VaultCommand::Recover(VaultRecoverArgs::default()),
+            &make_cli(
+                Command::Vault {
+                    command: VaultCommand::Recover(VaultRecoverArgs::default()),
+                },
+                true,
+            ),
+            false,
+            &mut Vec::new(),
+            lock_guard,
+        )
+        .unwrap_err();
+        assert!(missing_mnemonic_err.hint().contains("--mnemonic"));
+        assert!(!missing_mnemonic_err.hint().contains("dotler vault init"));
+
+        // Non-interactive `vault recover` with --mnemonic but no --password-stdin MUST NOT consume DOTLER_PASSPHRASE
+        let missing_stdin_err = handle_vault(
+            &VaultCommand::Recover(VaultRecoverArgs {
+                mnemonic: Some(mnemonic.phrase().to_string()),
+                ..Default::default()
+            }),
+            &make_cli(
+                Command::Vault {
+                    command: VaultCommand::Recover(VaultRecoverArgs {
+                        mnemonic: Some(mnemonic.phrase().to_string()),
+                        ..Default::default()
+                    }),
+                },
+                true,
+            ),
+            false,
+            &mut Vec::new(),
+            lock_guard,
+        )
+        .unwrap_err();
+        assert!(missing_stdin_err.hint().contains("--password-stdin"));
+        assert!(!missing_stdin_err.hint().contains("dotler vault init"));
+
+        // Interactive `vault recover` with DOTLER_PASSPHRASE exported MUST prompt for the new passphrase
+        // instead of silently adopting DOTLER_PASSPHRASE, and must NOT write to OS keyring.
+        OsKeyring::push_mock_prompt_reply("brand-new-recovered-pass-999");
+        let mut rec_out = Vec::new();
+        handle_vault(
+            &VaultCommand::Recover(VaultRecoverArgs {
+                mnemonic: Some(mnemonic.phrase().to_string()),
+                ..Default::default()
+            }),
+            &make_cli(
+                Command::Vault {
+                    command: VaultCommand::Recover(VaultRecoverArgs {
+                        mnemonic: Some(mnemonic.phrase().to_string()),
+                        ..Default::default()
+                    }),
+                },
+                false,
+            ),
+            true,
+            &mut rec_out,
+            lock_guard,
+        )
+        .unwrap();
+        assert!(OsKeyring::take_mock_prompt_reply().is_none());
+
+        let updated_vcfg = RepoConfig::load(&repo_dir.join("dotler.toml"))
+            .unwrap()
+            .vault
+            .unwrap();
+        let slot = VaultSlot::from_base64(&updated_vcfg.password_slot).unwrap();
+        assert!(
+            slot.unwrap(
+                &SecretString::new("brand-new-recovered-pass-999".to_string()),
+                Some(&updated_vcfg.vault_id),
+            )
+            .is_ok()
+        );
+        assert!(
+            slot.unwrap(&orig_pass, Some(&updated_vcfg.vault_id))
+                .is_err()
+        );
+
+        // Pre-existing OS keyring entries must remain untouched
+        assert_eq!(
+            OsKeyring::get().unwrap().unwrap().expose_secret(),
+            "stale-keyring-default"
+        );
+        assert_eq!(
+            OsKeyring::get_for_vault(&vcfg.vault_id)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "stale-keyring-vault"
+        );
+
+        unsafe {
+            std::env::remove_var(PASSPHRASE_ENV_VAR);
+        }
         if let Some(h) = orig_home {
             unsafe {
                 std::env::set_var("HOME", h);

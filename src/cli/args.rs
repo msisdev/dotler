@@ -339,7 +339,10 @@ pub struct VaultFromSourceArgs {
     #[arg(help = "Source path, registered repository label, Git URL/shorthand, or HTTP(S) URL")]
     pub source: String,
 
-    #[arg(long = "password-stdin", help = "Read passphrase from standard input")]
+    #[arg(
+        long = "password-stdin",
+        help = "Read imported vault passphrase from stdin (export DOTLER_PASSPHRASE for existing vault when re-keying)"
+    )]
     pub password_stdin: bool,
 
     #[arg(long, help = "Optional plaintext password hint stored in dotler.toml")]

@@ -254,6 +254,17 @@ pub fn unlock_vault_if_needed(
     is_interactive: bool,
     required: bool,
 ) -> Result<Option<VaultKey>, EngineError> {
+    unlock_vault_if_needed_with_prompt(repo_cfg, use_keyring, is_interactive, required, None)
+}
+
+/// Conditionally unlocks the repository [`VaultKey`] with an optional custom prompt prefix.
+pub fn unlock_vault_if_needed_with_prompt(
+    repo_cfg: &RepoConfig,
+    use_keyring: bool,
+    is_interactive: bool,
+    required: bool,
+    prompt_prefix: Option<&str>,
+) -> Result<Option<VaultKey>, EngineError> {
     let Some(vault_cfg) = repo_cfg.vault.as_ref() else {
         if required {
             return Err(EngineError::Config(
@@ -304,19 +315,23 @@ pub fn unlock_vault_if_needed(
     }
 
     if !is_interactive {
-        return Err(EngineError::VaultLocked {
-            reason: "Passphrase required in non-interactive mode. Run 'dotler vault init' or export DOTLER_PASSPHRASE.".to_string(),
-        });
+        let reason = if use_keyring {
+            "Passphrase required in non-interactive mode. Run 'dotler vault init' or export DOTLER_PASSPHRASE.".to_string()
+        } else {
+            "Passphrase required in non-interactive mode (OS keyring is disabled via use_keyring = false). Export DOTLER_PASSPHRASE.".to_string()
+        };
+        return Err(EngineError::VaultLocked { reason });
     }
 
+    let prefix = prompt_prefix.unwrap_or("Enter dotler vault passphrase");
     let prompt_msg = match vault_cfg
         .vault_hint
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        Some(h) => format!("Enter dotler vault passphrase (hint: {h}): "),
-        None => "Enter dotler vault passphrase: ".to_string(),
+        Some(h) => format!("{prefix} (hint: {h}): "),
+        None => format!("{prefix}: "),
     };
     let resolved = OsKeyring::prompt_passphrase_with_message(&prompt_msg)
         .map_err(|e| EngineError::Crypto(crate::crypto::CryptoError::Keyring(e)))?;
@@ -863,9 +878,12 @@ pub fn resolve_old_passphrase_for_vaults(
     }
 
     if !is_interactive {
-        return Err(EngineError::Crypto(crate::crypto::CryptoError::Keyring(
-            crate::crypto::keyring::KeyringError::PassphraseRequiredInNonInteractiveMode,
-        )));
+        let reason = if use_keyring {
+            "Current passphrase required in non-interactive mode. Run 'dotler vault init' or export DOTLER_PASSPHRASE.".to_string()
+        } else {
+            "Current passphrase required in non-interactive mode (OS keyring is disabled via use_keyring = false). Export DOTLER_PASSPHRASE.".to_string()
+        };
+        return Err(EngineError::VaultLocked { reason });
     }
 
     let first_hint = vault_targets
@@ -880,6 +898,11 @@ pub fn resolve_old_passphrase_for_vaults(
 
     let resolved = OsKeyring::prompt_passphrase_with_message(&prompt_msg)
         .map_err(|e| EngineError::Crypto(crate::crypto::CryptoError::Keyring(e)))?;
+    if !matches_any(&resolved.secret) {
+        return Err(EngineError::Vault(
+            crate::crypto::vault::VaultError::InvalidSecret,
+        ));
+    }
     Ok(resolved.secret)
 }
 
@@ -912,9 +935,12 @@ pub fn read_new_passphrase(
     }
 
     if !is_interactive {
-        return Err(EngineError::Crypto(crate::crypto::CryptoError::Keyring(
-            crate::crypto::keyring::KeyringError::PassphraseRequiredInNonInteractiveMode,
-        )));
+        let reason = if allow_env_var {
+            "Passphrase required in non-interactive mode. Pass '--password-stdin' or export DOTLER_PASSPHRASE.".to_string()
+        } else {
+            "New passphrase required in non-interactive mode. Pass '--password-stdin'.".to_string()
+        };
+        return Err(EngineError::VaultLocked { reason });
     }
 
     let resolved = OsKeyring::prompt_passphrase_with_message(prompt_msg)
@@ -1145,7 +1171,6 @@ mod tests {
         }
 
         OsKeyring::push_mock_prompt_reply("wrong-old-pass-000");
-        OsKeyring::push_mock_prompt_reply("shared-new-pass-999");
         assert!(rotate_vault_passphrases(&local_cfg, None, false, None, true).is_err());
         assert!(OsKeyring::get().unwrap().is_none());
 
@@ -1583,6 +1608,100 @@ mod tests {
                 .unwrap()
                 .expose_secret(),
             "old-pass-tamper-test"
+        );
+    }
+
+    #[test]
+    fn test_rotate_commands_respect_use_keyring_false_and_fail_fast_on_wrong_old_pass() {
+        let _guard = crate::crypto::keyring::MockKeyringGuard::new();
+        unsafe {
+            std::env::remove_var(PASSPHRASE_ENV_VAR);
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(repo.join("sec")).unwrap();
+
+        let pass_v1 = SecretString::new("kr-off-pass-111".to_string());
+        let (vcfg, vkey, _) = init_vault(&pass_v1).unwrap();
+        write_file_safe(
+            &repo.join("sec/item.dotler.enc"),
+            &vkey.encrypt_file(b"secret-body").unwrap().to_bytes(),
+        )
+        .unwrap();
+        write_file_safe(
+            &repo.join("dotler.toml"),
+            format!(
+                "vault_id = \"{}\"\npassword_slot = \"{}\"\nrecovery_slot = \"{}\"\n\n[sec]\nos-nux = \"~\"\nos-mac = \"~\"\nos-win = \"~\"\nfiles = \"* enc\"\n",
+                vcfg.vault_id, vcfg.password_slot, vcfg.recovery_slot
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+
+        let mut local_cfg = LocalConfig {
+            default_repo: Some("main".to_string()),
+            use_keyring: false,
+            ..Default::default()
+        };
+        local_cfg
+            .repos
+            .insert("main".to_string(), repo.to_string_lossy().to_string());
+
+        // Populate OS keyring with pass_v1; use_keyring=false must ignore and never modify it
+        OsKeyring::set(&pass_v1).unwrap();
+        OsKeyring::set_for_vault(&vcfg.vault_id, &pass_v1).unwrap();
+
+        // Non-interactive unlock_vault_if_needed gives use_keyring=false hint (not `dotler vault init`)
+        let repo_cfg = RepoConfig::load(&repo.join("dotler.toml")).unwrap();
+        let locked_err = unlock_vault_if_needed(&repo_cfg, false, false, true).unwrap_err();
+        assert!(locked_err.hint().contains("use_keyring = false"));
+        assert!(!locked_err.hint().contains("dotler vault init"));
+
+        // Interactive wrong old passphrase fails immediately before prompting for new passphrase
+        OsKeyring::push_mock_prompt_reply("wrong-pass");
+        OsKeyring::push_mock_prompt_reply("should-not-be-consumed");
+        assert!(rotate_vault_passphrases(&local_cfg, Some("main"), false, None, true).is_err());
+        assert_eq!(
+            OsKeyring::take_mock_prompt_reply().as_deref(),
+            Some("should-not-be-consumed")
+        );
+
+        // 1. rotate password interactively with use_keyring=false -> keyring_updated=false
+        OsKeyring::push_mock_prompt_reply("kr-off-pass-111");
+        OsKeyring::push_mock_prompt_reply("kr-off-pass-222");
+        let pw_report =
+            rotate_vault_passphrases(&local_cfg, Some("main"), false, None, true).unwrap();
+        assert!(!pw_report.keyring_updated);
+        assert_eq!(
+            OsKeyring::get_for_vault(&vcfg.vault_id)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "kr-off-pass-111"
+        );
+
+        // 2. rotate recovery interactively with use_keyring=false
+        OsKeyring::push_mock_prompt_reply("kr-off-pass-222");
+        let rec_report = rotate_vault_recovery(&local_cfg, Some("main"), false, true).unwrap();
+        assert_eq!(rec_report.status, "recovery_rotated");
+
+        // 3. rotate key interactively with use_keyring=false -> keyring_updated=false & old slot untouched
+        OsKeyring::push_mock_prompt_reply("kr-off-pass-222");
+        OsKeyring::push_mock_prompt_reply("kr-off-pass-333");
+        let key_report = rotate_vault_key(&local_cfg, Some("main"), false, None, true).unwrap();
+        assert!(!key_report.keyring_updated);
+        assert_eq!(key_report.rekeyed_files, 1);
+        assert!(
+            OsKeyring::get_for_vault(&key_report.vault_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            OsKeyring::get_for_vault(&vcfg.vault_id)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "kr-off-pass-111"
         );
     }
 }

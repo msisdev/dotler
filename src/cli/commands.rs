@@ -84,12 +84,14 @@ fn handle_init<W: Write>(
                 .get()
                 .map(|c| c.use_keyring)
                 .unwrap_or(true);
-            ensure_repo_vault_in_keyring(
-                vault_cfg,
-                use_keyring,
-                args.password_stdin,
-                is_interactive,
-            )?;
+            if use_keyring {
+                ensure_repo_vault_in_keyring(
+                    vault_cfg,
+                    use_keyring,
+                    args.password_stdin,
+                    is_interactive,
+                )?;
+            }
         }
     }
     let report = run_init(

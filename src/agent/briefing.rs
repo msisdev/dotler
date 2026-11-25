@@ -17,6 +17,7 @@ pub struct EnvironmentSnapshot {
     pub os_distro: Option<String>,
     pub default_devices: Vec<String>,
     pub registered_repos: BTreeMap<String, String>,
+    pub use_keyring: bool,
     pub keyring_ready: bool,
 }
 
@@ -31,6 +32,7 @@ impl EnvironmentSnapshot {
             },
             default_devices: local_config.default_devices.clone(),
             registered_repos: local_config.repos.clone(),
+            use_keyring: local_config.use_keyring,
             keyring_ready,
         }
     }
@@ -135,7 +137,7 @@ MCP Equivalent Tools:
 
 ## 4. Security Guardrails & Prohibitions (Zero Secret Leakage)
 - ZERO SECRET LEAKAGE: NEVER ask the user in chat for master passphrases or 12-word recovery mnemonics, and NEVER run commands that display or read 12-word recovery mnemonics (`dotler vault init`, `dotler vault rotate recovery`, `dotler vault rotate key`, `dotler vault recover`) or interactive passphrases (`dotler vault from`, `dotler vault rotate password`) inside an agent shell where secrets could enter LLM context. Instruct the user to run those directly in their local terminal (passphrases and mnemonics are read via hidden TTY prompts, and recovery mnemonics are displayed only to the user).
-- Keyring & Multi-Vault Inspection: You CAN safely run `dotler vault ls --json` non-interactively without exposing secrets to inspect `vault_id`, `vault_hint`, `keyring_status` (`vault_slot`, `default_fallback`, `mismatch`, `locked`, `no_vault`, `disabled`, `missing_repo`), and `default_slot_set` across registered repositories. If `keyring_ready` is false (or `keyring_status` is `locked` / `mismatch`), instruct the user to run `dotler vault init` (or `dotler init`) once in their local terminal.
+- Keyring & Multi-Vault Inspection: You CAN safely run `dotler vault ls --json` non-interactively without exposing secrets to inspect `vault_id`, `vault_hint`, `keyring_status` (`vault_slot`, `default_fallback`, `mismatch`, `locked`, `no_vault`, `disabled`, `missing_repo`), and `default_slot_set` across registered repositories. If `use_keyring` is `false` (`keyring_status` is `disabled`), OS keyring storage is intentionally disabled—do NOT ask the user to register keys with `dotler vault init`; instruct them to supply `DOTLER_PASSPHRASE` or run interactively in their terminal. Otherwise, if `keyring_ready` is `false` (or `keyring_status` is `locked` / `mismatch`), instruct the user to run `dotler vault init` (or `dotler init`) once in their local terminal.
 - Vault Lifecycle Commands: Instruct the user to run `dotler vault init` to initialize a brand-new vault (or register an existing vault's passphrase in the OS keyring), `dotler vault from <file <repo|path> | git <url> | url <url>>` to share/import an existing vault across repositories or devices (automatically re-keying existing `.dotler.enc` / `.dotler.fenc` files in memory when aligning an already-encrypted repository), `dotler vault rotate password` to rotate the passphrase across all matching locally registered repositories and update the OS keyring without re-encrypting files, `dotler vault rotate recovery` to reissue a fresh 12-word recovery mnemonic across repositories sharing the active `vault_id` without re-encrypting files, and `dotler vault rotate key` to replace the master vault key and re-encrypt all encrypted files across sharing repositories in one shot.
 - Symbolic links are strictly prohibited inside the repository (exit code 3). On the OS side, symlinks pointing to regular files inside the group boundary (`~` or `.`) are dereferenced on `import` and materialized into standalone regular files on `export`.
 - Directory traversal (`..`), symlinks escaping the group boundary (`~` or `.`), overlapping `<repo>/<group>/` storage paths, and environment variable expansions are blocked by path safety invariants (exit code 3).
@@ -181,8 +183,8 @@ pub fn render_briefing(
         }
     }
     out.push_str(&format!(
-        "- OS Keyring Master Password Status: `keyring_ready: {}`\n\n",
-        snapshot.keyring_ready
+        "- OS Keyring Master Password Status: `keyring_ready: {}` (`use_keyring: {}`)\n\n",
+        snapshot.keyring_ready, snapshot.use_keyring
     ));
 
     out.push_str(SHARED_OPERATIONAL_GUIDE);
@@ -223,6 +225,15 @@ mod tests {
         assert!(briefing.contains("## 3. Standard Operational Guidelines & Command Cheatsheet"));
         assert!(briefing.contains("## 4. Security Guardrails & Prohibitions"));
         assert!(briefing.contains("keyring_ready: true"));
+        assert!(briefing.contains("use_keyring: true"));
+
+        let disabled_cfg = LocalConfig {
+            use_keyring: false,
+            ..Default::default()
+        };
+        let disabled_briefing = render_briefing(&disabled_cfg, &os_info, false);
+        assert!(disabled_briefing.contains("keyring_ready: false"));
+        assert!(disabled_briefing.contains("use_keyring: false"));
     }
 
     #[test]
